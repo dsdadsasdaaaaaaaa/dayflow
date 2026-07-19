@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dayflow-web",
+      "runtimeExecutable": "./scripts/web.sh",
+      "runtimeArgs": [],
+      "port": 8081
+    }
+  ]
+}

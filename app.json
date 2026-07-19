@@ -1,13 +1,29 @@
 {
   "expo": {
-    "name": "dayflow",
+    "name": "DayFlow",
     "slug": "dayflow",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "scheme": "dayflow",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.levisilverberg.dayflow",
+      "entitlements": {
+        "com.apple.security.application-groups": [
+          "group.com.levisilverberg.dayflow"
+        ]
+      },
+      "infoPlist": {
+        "NSCalendarsUsageDescription": "DayFlow can show your calendar events alongside your tasks in the timeline.",
+        "NSCalendarsFullAccessUsageDescription": "DayFlow can show your calendar events alongside your tasks in the timeline.",
+        "NSRemindersUsageDescription": "DayFlow can import your reminders as tasks.",
+        "NSFaceIDUsageDescription": "DayFlow uses Face ID to unlock the app and keep your schedule private.",
+        "NSSupportsLiveActivities": true,
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -16,10 +32,56 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.READ_CALENDAR",
+        "android.permission.WRITE_CALENDAR"
+      ]
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-font",
+      "@bacons/apple-targets",
+      [
+        "expo-notifications",
+        {
+          "defaultChannel": "default"
+        }
+      ],
+      [
+        "expo-calendar",
+        {
+          "calendarPermission": "DayFlow can show your calendar events alongside your tasks in the timeline."
+        }
+      ],
+      "@react-native-community/datetimepicker"
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "build": {
+          "experimental": {
+            "ios": {
+              "appExtensions": [
+                {
+                  "bundleIdentifier": "com.levisilverberg.dayflow.widget",
+                  "targetName": "DayFlowWidgets",
+                  "entitlements": {
+                    "com.apple.security.application-groups": [
+                      "group.com.levisilverberg.dayflow"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "projectId": "f9ea80fd-eb21-4e5b-bbd1-6f70bddf9f27"
+      }
     }
   }
 }
