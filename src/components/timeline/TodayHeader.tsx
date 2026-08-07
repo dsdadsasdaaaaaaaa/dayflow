@@ -36,6 +36,8 @@ interface Props {
   hideCompleted: boolean;
   onToggleHideCompleted: () => void;
   onPressToday: () => void;
+  /** Tapping the date title opens the jump-to-date sheet. */
+  onPressTitle?: () => void;
 }
 
 /** Small plain circular button on a solid surface. */
@@ -76,6 +78,7 @@ export function TodayHeader({
   hideCompleted,
   onToggleHideCompleted,
   onPressToday,
+  onPressTitle,
 }: Props) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
@@ -89,13 +92,37 @@ export function TodayHeader({
 
   return (
     <View style={[styles.wrap, { paddingTop: insets.top + 8 }]}>
-      <View style={styles.textCol}>
+      <Pressable
+        style={styles.textCol}
+        onPress={() => {
+          if (onPressTitle) {
+            tapHaptic();
+            onPressTitle();
+          }
+        }}
+        accessibilityLabel="Jump to a date"
+      >
         <Text style={[styles.title, { color: theme.text }]} numberOfLines={1}>
           {title}
         </Text>
-        <Text style={[styles.subtitle, { color: theme.textSecondary }]}>{dateLine}</Text>
-      </View>
+        <View style={styles.subtitleRow}>
+          <Text style={[styles.subtitle, { color: theme.textSecondary }]}>{dateLine}</Text>
+          {onPressTitle ? (
+            <Ionicons name="chevron-down" size={13} color={theme.textTertiary} />
+          ) : null}
+        </View>
+      </Pressable>
       <View style={styles.actions}>
+        <CircleButton
+          theme={theme}
+          onPress={() => {
+            tapHaptic();
+            router.push('/week');
+          }}
+          accessibilityLabel="Week view"
+        >
+          <Ionicons name="grid-outline" size={18} color={theme.textSecondary} />
+        </CircleButton>
         {!today ? (
           <Pressable
             onPress={() => {
@@ -160,7 +187,8 @@ const styles = StyleSheet.create({
   },
   textCol: { flex: 1 },
   title: { fontSize: 34, fontWeight: '800', letterSpacing: -0.8 },
-  subtitle: { fontSize: 13, fontWeight: '500', marginTop: 2 },
+  subtitle: { fontSize: 13, fontWeight: '500' },
+  subtitleRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 2 },
   actions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   iconBtn: {
     width: 36,

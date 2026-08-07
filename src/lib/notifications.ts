@@ -1,8 +1,9 @@
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
+import { useTasks } from '../store/tasks';
 import { addDays, fromDayKey, todayKey } from './dates';
 import { taskOccursOn } from './recurrence';
-import type { Task } from '../types';
+import type { DayKey, Task } from '../types';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -12,6 +13,79 @@ Notifications.setNotificationHandler({
     shouldSetBadge: false,
   }),
 });
+
+/** iOS category id carried by every task alert so it shows action buttons. */
+const TASK_ALERT_CATEGORY = 'task-alert';
+
+let categoriesRegistered = false;
+
+/**
+ * Register the actionable-notification category (Complete / Snooze buttons).
+ * Idempotent — safe to call on every app launch. No-op on web.
+ */
+export async function registerNotificationCategories(): Promise<void> {
+  if (Platform.OS === 'web' || categoriesRegistered) return;
+  categoriesRegistered = true;
+  try {
+    await Notifications.setNotificationCategoryAsync(TASK_ALERT_CATEGORY, [
+      { identifier: 'complete', buttonTitle: 'Complete', options: { opensAppToForeground: false } },
+      { identifier: 'snooze15', buttonTitle: 'Snooze 15 min', options: { opensAppToForeground: false } },
+    ]);
+  } catch {
+    // Categories are best-effort; alerts still fire without buttons.
+  }
+}
+
+/**
+ * Handle a tap on a notification or one of its action buttons.
+ * 'complete' toggles the occurrence done and re-syncs that task's alerts;
+ * 'snooze15' re-fires the same alert 15 minutes from now. A plain tap
+ * (DEFAULT_ACTION_IDENTIFIER) just opens the app — nothing extra to do.
+ */
+export async function handleNotificationResponse(
+  response: Notifications.NotificationResponse
+): Promise<void> {
+  if (Platform.OS === 'web') return;
+  try {
+    const data = response?.notification?.request?.content?.data as
+      | { taskId?: unknown; dateKey?: unknown }
+      | undefined;
+    const taskId = typeof data?.taskId === 'string' ? data.taskId : null;
+    const dateKey = typeof data?.dateKey === 'string' ? (data.dateKey as DayKey) : null;
+    if (!taskId || !dateKey) return;
+
+    switch (response.actionIdentifier) {
+      case 'complete': {
+        useTasks.getState().toggleComplete(taskId, dateKey);
+        const task = useTasks.getState().tasks[taskId] ?? null;
+        await syncTaskNotifications(task, taskId);
+        break;
+      }
+      case 'snooze15': {
+        const title = response.notification.request.content.title ?? 'Reminder';
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title,
+            body: 'Snoozed reminder',
+            sound: true,
+            data: { taskId, dateKey },
+            categoryIdentifier: TASK_ALERT_CATEGORY,
+          },
+          trigger: {
+            type: Notifications.SchedulableTriggerInputTypes.DATE,
+            date: new Date(Date.now() + 15 * 60 * 1000),
+          },
+        });
+        break;
+      }
+      default:
+        // Notifications.DEFAULT_ACTION_IDENTIFIER — the app opens; nothing else.
+        break;
+    }
+  } catch {
+    // Best-effort; never crash over a notification action.
+  }
+}
 
 export async function ensureNotificationPermission(): Promise<boolean> {
   if (Platform.OS === 'web') return false;
@@ -70,6 +144,7 @@ export async function syncTaskNotifications(task: Task | null, taskId?: string):
                   : `Starts in ${Math.round(offset / 60)} h`,
             sound: true,
             data: { taskId: task.id, dateKey: day },
+            categoryIdentifier: TASK_ALERT_CATEGORY,
           },
           trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: fireAt },
         });
@@ -128,6 +203,7 @@ async function syncTaskNotificationsNoWipe(task: Task): Promise<void> {
                 : `Starts in ${Math.round(offset / 60)} h`,
           sound: true,
           data: { taskId: task.id, dateKey: day },
+          categoryIdentifier: TASK_ALERT_CATEGORY,
         },
         trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: fireAt },
       });

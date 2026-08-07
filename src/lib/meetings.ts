@@ -37,6 +37,20 @@ export function occurrenceAmount(task: Task, day: DayKey): number {
   return task.meeting.extras?.[day] ?? task.meeting.rate;
 }
 
+/** Deposit received up-front for one occurrence (0 when none). */
+export function occurrenceDeposit(task: Task, day: DayKey): number {
+  return task.meeting?.deposits?.[day] ?? 0;
+}
+
+/**
+ * What's still owed for one occurrence: full amount when unpaid minus any
+ * deposit, zero once marked paid. Never negative.
+ */
+export function occurrenceOwed(task: Task, day: DayKey): number {
+  if (!task.meeting || isPaidOn(task, day)) return 0;
+  return Math.max(0, occurrenceAmount(task, day) - occurrenceDeposit(task, day));
+}
+
 export interface MeetingOccurrence {
   task: Task;
   dateKey: DayKey;
@@ -96,8 +110,14 @@ export function earningsForDays(tasks: Record<string, Task>, days: DayKey[]): Ea
     if (m.completed) {
       earned += m.rate;
       meetingsDone += 1;
-      if (m.paid) collected += m.rate;
-      else outstanding += m.rate;
+      if (m.paid) {
+        collected += m.rate;
+      } else {
+        // A deposit paid up-front counts as collected; only the rest is owed.
+        const deposit = Math.min(m.rate, occurrenceDeposit(m.task, m.dateKey));
+        collected += deposit;
+        outstanding += m.rate - deposit;
+      }
     }
   }
   return {
@@ -203,8 +223,13 @@ export function clientProfiles(
         if (isPaidOn(task, day)) {
           p.collected += amount;
         } else {
-          p.outstanding += amount;
-          p.unpaid.push({ task, dateKey: day, amount });
+          const deposit = Math.min(amount, occurrenceDeposit(task, day));
+          p.collected += deposit;
+          const owed = amount - deposit;
+          if (owed > 0) {
+            p.outstanding += owed;
+            p.unpaid.push({ task, dateKey: day, amount: owed });
+          }
         }
         if (!p.lastSeen || day > p.lastSeen) p.lastSeen = day;
       }

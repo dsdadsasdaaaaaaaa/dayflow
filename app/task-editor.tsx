@@ -42,6 +42,7 @@ import { parseQuickAdd } from '../src/lib/nlp';
 import { syncTaskNotifications } from '../src/lib/notifications';
 import { describeRecurrence } from '../src/lib/recurrence';
 import { draftHasContent, useDrafts } from '../src/store/drafts';
+import { showUndo } from '../src/store/undo';
 import { useSettings } from '../src/store/settings';
 import { useTasks } from '../src/store/tasks';
 import { PRIORITY_META, RADIUS, SPACING, taskColor, useTheme } from '../src/theme';
@@ -433,9 +434,16 @@ export default function TaskEditorScreen() {
     if (!editingId || !initial) return;
     warningHaptic();
     const wipe = () => {
+      const captured = useTasks.getState().tasks[editingId];
       deleteTask(editingId);
       useDrafts.getState().clearDraft(draftKey);
       syncTaskNotifications(null, editingId);
+      if (captured) {
+        showUndo('Task deleted', () => {
+          useTasks.getState().importTasks([captured]);
+          void syncTaskNotifications(captured);
+        });
+      }
       router.back();
     };
     if (initial.recurrence && occurrenceDate) {
@@ -883,6 +891,11 @@ export default function TaskEditorScreen() {
             onChange={setMeeting}
             editingId={editingId}
             occurrenceDate={occurrenceDate}
+            onSuggestAlert={(minutesBefore) =>
+              setAlerts((prev) =>
+                prev.includes(minutesBefore) ? prev : [...prev, minutesBefore]
+              )
+            }
           />
         </Section>
 

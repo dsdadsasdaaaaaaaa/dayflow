@@ -1,8 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
 import { memo } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 import { tapHaptic } from '../../lib/haptics';
-import { useTheme, RADIUS } from '../../theme';
+import { RAIL_CENTER_X } from '../TaskCard';
+import { useTheme } from '../../theme';
 
 interface Props {
   top: number;
@@ -11,7 +12,10 @@ interface Props {
   onPress: (startMinutes: number) => void;
 }
 
-/** Ghost "+ Add" affordance rendered inside free gaps ≥ 30 minutes. */
+/**
+ * Quiet free-slot affordance: empty time stays visually empty — the whole gap
+ * is tappable, with only a small "+" seated on the connector rail as a hint.
+ */
 export const GapButton = memo(function GapButton({ top, height, startMinutes, onPress }: Props) {
   const theme = useTheme();
 
@@ -21,23 +25,19 @@ export const GapButton = memo(function GapButton({ top, height, startMinutes, on
         tapHaptic();
         onPress(startMinutes);
       }}
-      style={({ pressed }) => [
-        styles.gap,
-        { top, height, borderColor: theme.border, opacity: pressed ? 0.9 : 1 },
-      ]}
+      style={({ pressed }) => [styles.gap, { top, height, opacity: pressed ? 0.6 : 1 }]}
       accessibilityLabel="Add task in this gap"
     >
       <View
         style={[
           styles.hint,
           {
-            backgroundColor: theme.surface,
+            backgroundColor: theme.background,
             borderColor: theme.border,
           },
         ]}
       >
-        <Ionicons name="add" size={13} color={theme.textTertiary} />
-        <Text style={[styles.hintText, { color: theme.textTertiary }]}>Add</Text>
+        <Ionicons name="add" size={14} color={theme.textTertiary} />
       </View>
     </Pressable>
   );
@@ -48,22 +48,16 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 0,
     right: 0,
-    borderWidth: 1,
-    borderStyle: 'dashed',
-    borderRadius: RADIUS.sm,
-    alignItems: 'center',
     justifyContent: 'center',
     zIndex: 0,
-    marginVertical: 2,
   },
   hint: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 2,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 999,
+    marginLeft: RAIL_CENTER_X - 11,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
     borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  hintText: { fontSize: 11, fontWeight: '600' },
 });

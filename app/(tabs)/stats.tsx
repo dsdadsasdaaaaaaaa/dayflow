@@ -133,6 +133,7 @@ export default function StatsScreen() {
             <EarningsCard
               summary={earnings}
               occurrences={occurrences}
+              tasks={tasks}
               log={meetingLog}
               days={days}
               currency={currency}

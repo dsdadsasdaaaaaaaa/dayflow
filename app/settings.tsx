@@ -18,14 +18,17 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AlertChips } from '../src/components/settings/AlertChips';
+import { BackupsModal } from '../src/components/settings/BackupsModal';
 import { GlassSegmented } from '../src/components/settings/GlassSegmented';
 import { CalendarToggles } from '../src/components/settings/CalendarToggles';
 import { CurrencyPicker } from '../src/components/settings/CurrencyPicker';
 import { GoalStepper } from '../src/components/settings/GoalStepper';
 import { ImportBackupModal } from '../src/components/settings/ImportBackupModal';
+import { MessagingSection } from '../src/components/settings/MessagingSection';
 import { SettingsRow } from '../src/components/settings/SettingsRow';
 import { SettingsSection } from '../src/components/settings/SettingsSection';
 import { Stepper } from '../src/components/settings/Stepper';
+import { startAutoBackup } from '../src/lib/backup';
 import { ensureCalendarPermission } from '../src/lib/calendar';
 import { formatDuration } from '../src/lib/dates';
 import { selectionHaptic, successHaptic, tapHaptic, warningHaptic } from '../src/lib/haptics';
@@ -62,7 +65,14 @@ export default function SettingsScreen() {
   const clearMeetingLog = useMeetingSession((s) => s.clearLog);
 
   const [importVisible, setImportVisible] = useState(false);
+  const [backupsVisible, setBackupsVisible] = useState(false);
   const [notifStatus, setNotifStatus] = useState<NotifStatus>('unknown');
+
+  // Lazy trigger for the once-per-app-open automatic backup (no-op if it
+  // already ran — e.g. when the root layout wires startAutoBackup directly).
+  useEffect(() => {
+    startAutoBackup();
+  }, []);
 
   // ---- Notifications permission status -------------------------------------
 
@@ -462,6 +472,8 @@ export default function SettingsScreen() {
           />
         </SettingsSection>
 
+        <MessagingSection />
+
         <SettingsSection title="Focus" delay={135}>
           <SettingsRow
             icon="timer"
@@ -637,6 +649,13 @@ export default function SettingsScreen() {
             onPress={() => setImportVisible(true)}
           />
           <SettingsRow
+            icon="archive-outline"
+            tint={taskColor('indigo').solid}
+            label="Backups"
+            sublabel="Saved daily on your phone"
+            onPress={() => setBackupsVisible(true)}
+          />
+          <SettingsRow
             icon="trash-outline"
             tint={theme.danger}
             label="Erase all data"
@@ -676,6 +695,10 @@ export default function SettingsScreen() {
       <ImportBackupModal
         visible={importVisible}
         onClose={() => setImportVisible(false)}
+      />
+      <BackupsModal
+        visible={backupsVisible}
+        onClose={() => setBackupsVisible(false)}
       />
     </View>
   );

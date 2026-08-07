@@ -1,0 +1,12 @@
+# Runs in Expo's cloud on every push to main: publishes the JS over the air.
+# Installed apps pick it up next time they open — no build, no laptop.
+name: Publish OTA update
+on:
+  push:
+    branches: ['main']
+jobs:
+  update:
+    name: Publish update
+    type: update
+    params:
+      branch: preview

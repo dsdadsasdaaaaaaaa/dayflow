@@ -46,6 +46,11 @@ timeline + inbox + recurring tasks + habits + focus timer + stats, with everythi
   meetingOccurrences(tasks, days), earningsForDays(tasks, days) →
   {earned, expected, outstanding, collected, meetingsDone, meetingsPlanned},
   knownClients(tasks), lastMeetingFor(tasks, client) → prefill {rate, kind, location}.
+  DEPOSITS: `meeting.deposits?: Record<DayKey, number>` = money received up-front per
+  occurrence; helpers `occurrenceDeposit(task, day)` and `occurrenceOwed(task, day)`
+  (amount − deposit when unpaid, 0 when paid); earnings/client aggregations already
+  count deposits as collected and only the remainder as outstanding. Store action
+  `setOccurrenceDeposit(id, day, amount)` (0 clears).
   `useSettings` has `currencySymbol` (default "$"). `useTasks` has
   `togglePaid(id, day)` and `setOccurrenceAmount(id, day, absoluteFinalAmount)`
   (stores the delta from rate into `meeting.extras[day]`; occurrenceAmount(task, day)
@@ -61,6 +66,23 @@ timeline + inbox + recurring tasks + habits + focus timer + stats, with everythi
 - Settings has `weeklyEarningsGoal: number | null` and `appLock: boolean`.
 - `LockGate` (src/components/LockGate.tsx) wraps the root layout — Face ID gate
   driven by settings.appLock (expo-local-authentication; no-op on web).
+
+## Messenger (client texting)
+
+- Provider-backed SMS via the user's own account (Twilio REST). Credentials live in
+  the keychain: src/lib/smsCredentials.ts (load/save/clearSmsCredentials, normalizePhone).
+  API: src/lib/smsApi.ts (sendSms, listRecentSms, verifySmsCredentials).
+- Store src/store/messages.ts: useMessages {messages, lastReadAt, syncing, sendingTo,
+  lastSyncAt, lastError, configured; refreshConfigured(), sync(), send(to, body),
+  markRead(counterparty), clearAll()}. Helpers: buildThreads, threadMessages, totalUnread.
+  Sync = poll on demand/foreground; no server, no push (v1).
+- Client linking: ClientMeta now has optional `phone` (setPhone; clientNameForPhone
+  helper matches a thread's number to a client display name).
+- Routes: `/messages` tab (registered) and `/thread?number=<E.164>` (registered).
+- ZERO-RISK FALLBACK: when messaging isn't configured, "Message" actions do a TextNow
+  handoff — copy the client's number (expo-clipboard) and attempt
+  Linking.openURL('textnow://') with a graceful copied-only fallback. Never suggest
+  scraping/linking the user's TextNow account directly (no API; ToS/ban risk).
 
 ## Live meeting sessions (src/store/meetingSession.ts — read it)
 

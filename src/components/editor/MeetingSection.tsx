@@ -46,6 +46,12 @@ interface Props {
   editingId: string | null;
   /** Occurrence being edited: route `date` param, falling back to task.date. */
   occurrenceDate: DayKey | null;
+  /**
+   * Called when the section thinks the task deserves an alert (e.g. out-calls
+   * default to a 60-min heads-up so there's time to travel). The parent owns
+   * the alerts array and decides whether to add it.
+   */
+  onSuggestAlert?: (minutesBefore: number) => void;
 }
 
 /**
@@ -54,7 +60,7 @@ interface Props {
  * paid-toggle and a "Start meeting now" launcher when editing today's
  * scheduled occurrence.
  */
-export function MeetingSection({ draft, onChange, editingId, occurrenceDate }: Props) {
+export function MeetingSection({ draft, onChange, editingId, occurrenceDate, onSuggestAlert }: Props) {
   const theme = useTheme();
   const router = useRouter();
   const tasks = useTasks((s) => s.tasks);
@@ -121,6 +127,8 @@ export function MeetingSection({ draft, onChange, editingId, occurrenceDate }: P
           onValueChange={(v) => {
             tapHaptic();
             onChange({ ...draft, enabled: v });
+            // Out-calls default to an hour's heads-up — time to get there.
+            if (v && draft.kind === 'outcall') onSuggestAlert?.(60);
           }}
           trackColor={{ false: theme.border, true: theme.accent }}
           thumbColor="#FFFFFF"
@@ -134,7 +142,10 @@ export function MeetingSection({ draft, onChange, editingId, occurrenceDate }: P
             <GlassSegmented
               options={MEETING_KINDS.map((k) => ({ value: k.key, label: k.label }))}
               value={draft.kind}
-              onChange={(kind) => onChange({ ...draft, kind })}
+              onChange={(kind) => {
+                onChange({ ...draft, kind });
+                if (kind === 'outcall' && draft.kind !== 'outcall') onSuggestAlert?.(60);
+              }}
             />
           </View>
 

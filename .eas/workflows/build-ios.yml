@@ -1,0 +1,12 @@
+# Manual full iOS build — trigger it from expo.dev (project → Workflows → Run)
+# whenever native code changed. Produces an install link, all in the cloud.
+name: Build iOS (preview)
+on:
+  workflow_dispatch: {}
+jobs:
+  build_ios:
+    name: Build iOS preview
+    type: build
+    params:
+      platform: ios
+      profile: preview

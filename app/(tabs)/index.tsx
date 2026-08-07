@@ -1,9 +1,10 @@
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { EmptyState } from '../../src/components/EmptyState';
 import { Fab } from '../../src/components/Fab';
+import { RAIL_CENTER_X } from '../../src/components/TaskCard';
 import { AllDayShelf } from '../../src/components/timeline/AllDayShelf';
 import { DraggableTaskBlock } from '../../src/components/timeline/DraggableTaskBlock';
 import { EventBlock } from '../../src/components/timeline/EventBlock';
@@ -20,6 +21,9 @@ import { SummaryRow } from '../../src/components/timeline/SummaryRow';
 import { TaskActionSheet, type ShiftDelta } from '../../src/components/timeline/TaskActionSheet';
 import { TodayHeader } from '../../src/components/timeline/TodayHeader';
 import { WeekStrip } from '../../src/components/timeline/WeekStrip';
+import { consumePendingDay } from '../../src/components/week/dayHandoff';
+import { JumpDateSheet } from '../../src/components/week/JumpDateSheet';
+import { WeekEarningsChip } from '../../src/components/week/WeekEarningsChip';
 import {
   computeColumns,
   findGaps,
@@ -34,6 +38,7 @@ import { successHaptic, tapHaptic } from '../../src/lib/haptics';
 import { syncTaskNotifications } from '../../src/lib/notifications';
 import { useSettings } from '../../src/store/settings';
 import { instancesForDay, useTasks } from '../../src/store/tasks';
+import { showUndo } from '../../src/store/undo';
 import { useTheme } from '../../src/theme';
 import type { CalendarEventLite, DayKey, Task, TaskInstance } from '../../src/types';
 
@@ -75,6 +80,7 @@ export default function TodayScreen() {
   const [hideCompleted, setHideCompleted] = useState(false);
   const [menuInstance, setMenuInstance] = useState<TaskInstance | null>(null);
   const [replanOpen, setReplanOpen] = useState(false);
+  const [jumpOpen, setJumpOpen] = useState(false);
   const [events, setEvents] = useState<CalendarEventLite[]>([]);
   const [nowMin, setNowMin] = useState(() => minutesOfDay());
   const [scrollEnabled, setScrollEnabled] = useState(true);
@@ -92,6 +98,14 @@ export default function TodayScreen() {
     const id = setInterval(() => setNowMin(minutesOfDay()), 30_000);
     return () => clearInterval(id);
   }, []);
+
+  // A day tapped in the week view lands here when this tab regains focus.
+  useFocusEffect(
+    useCallback(() => {
+      const pending = consumePendingDay();
+      if (pending) setSelectedDay(pending);
+    }, [])
+  );
 
   // ── Device-calendar events for the selected day ───────────────────────────
   useEffect(() => {
@@ -299,14 +313,45 @@ export default function TodayScreen() {
     [dayData.timed, updateTask, detachOccurrence, selectedDay]
   );
 
+  const handleResize = useCallback(
+    (instance: TaskInstance, newDurationMinutes: number) => {
+      let id = instance.task.id;
+      if (instance.task.recurrence) {
+        // Resizing ONE occurrence detaches it, same as drag-move.
+        const copy = detachOccurrence(id, selectedDay);
+        if (!copy) return;
+        resync(instance.task.id);
+        id = copy.id;
+      }
+      updateTask(id, { durationMinutes: newDurationMinutes });
+      successHaptic();
+      resync(id);
+    },
+    [updateTask, detachOccurrence, selectedDay]
+  );
+
   const handleDelete = useCallback(
     (instance: TaskInstance, mode: 'occurrence' | 'series') => {
       if (mode === 'occurrence') {
-        skipOccurrence(instance.task.id, selectedDay);
+        const day = selectedDay;
+        skipOccurrence(instance.task.id, day);
         resync(instance.task.id);
+        showUndo('Occurrence removed', () => {
+          const t = useTasks.getState().tasks[instance.task.id];
+          if (!t) return;
+          useTasks.getState().updateTask(instance.task.id, {
+            skips: t.skips.filter((s) => s !== day),
+          });
+          resync(instance.task.id);
+        });
       } else {
-        deleteTask(instance.task.id);
-        void syncTaskNotifications(null, instance.task.id);
+        const captured = instance.task;
+        deleteTask(captured.id);
+        void syncTaskNotifications(null, captured.id);
+        showUndo('Task deleted', () => {
+          useTasks.getState().importTasks([captured]);
+          resync(captured.id);
+        });
       }
     },
     [skipOccurrence, deleteTask, selectedDay]
@@ -331,10 +376,16 @@ export default function TodayScreen() {
           if (task.date) toggleComplete(task.id, task.date);
           resync(task.id);
           break;
-        case 'delete':
-          deleteTask(task.id);
-          void syncTaskNotifications(null, task.id);
+        case 'delete': {
+          const captured = task;
+          deleteTask(captured.id);
+          void syncTaskNotifications(null, captured.id);
+          showUndo('Task deleted', () => {
+            useTasks.getState().importTasks([captured]);
+            resync(captured.id);
+          });
           break;
+        }
       }
     },
     [scheduleTask, toggleComplete, deleteTask]
@@ -364,6 +415,7 @@ export default function TodayScreen() {
         hideCompleted={hideCompleted}
         onToggleHideCompleted={() => setHideCompleted((v) => !v)}
         onPressToday={jumpToToday}
+        onPressTitle={() => setJumpOpen(true)}
       />
       <LiveMeetingBanner />
       <WeekStrip
@@ -377,16 +429,18 @@ export default function TodayScreen() {
         totalCount={dayData.all.length}
         plannedMinutes={dayData.plannedMinutes}
         freeMinutes={freeMinutes}
+        right={<WeekEarningsChip onPress={() => router.push('/stats')} />}
       />
       {replanTasks.length > 0 ? (
         <ReplanChip count={replanTasks.length} onPress={() => setReplanOpen(true)} />
       ) : null}
 
+      <View style={[styles.scrollEdge, { borderBottomColor: theme.separator }]} />
       <ScrollView
         ref={scrollRef}
         scrollEnabled={scrollEnabled}
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: 120 + insets.bottom }}
+        contentContainerStyle={{ paddingBottom: 84 + insets.bottom }}
       >
         <AllDayShelf
           instances={visibleAllDay}
@@ -411,6 +465,14 @@ export default function TodayScreen() {
               startHour={settings.dayStartHour}
               endHour={settings.dayEndHour}
               nowMinutes={showNowLine ? nowMin : null}
+            />
+            {/* Connector rail: task icon circles sit on this line. */}
+            <View
+              pointerEvents="none"
+              style={[
+                styles.rail,
+                { backgroundColor: theme.separator, height: gridHeight },
+              ]}
             />
             <View style={styles.blockArea}>
               {gaps.map((g) => (
@@ -453,6 +515,7 @@ export default function TodayScreen() {
                   onOpenMenu={setMenuInstance}
                   onCommit={handleDragCommit}
                   onDragActive={(active) => setScrollEnabled(!active)}
+                  onResize={handleResize}
                 />
               ))}
             </View>
@@ -504,6 +567,16 @@ export default function TodayScreen() {
         onClose={() => setReplanOpen(false)}
         onAction={handleReplanAction}
       />
+
+      <JumpDateSheet
+        visible={jumpOpen}
+        onClose={() => setJumpOpen(false)}
+        selected={selectedDay}
+        onSelect={(day) => {
+          setSelectedDay(day);
+          setJumpOpen(false);
+        }}
+      />
     </View>
   );
 }
@@ -511,6 +584,17 @@ export default function TodayScreen() {
 const styles = StyleSheet.create({
   root: { flex: 1 },
   grid: { marginTop: 6 },
+  scrollEdge: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    marginTop: 4,
+  },
+  rail: {
+    position: 'absolute',
+    top: 0,
+    left: GUTTER_WIDTH + 2 + RAIL_CENTER_X - 1,
+    width: 2,
+    borderRadius: 1,
+  },
   blockArea: {
     position: 'absolute',
     left: GUTTER_WIDTH + 2,

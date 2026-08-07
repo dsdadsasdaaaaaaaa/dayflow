@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as LocalAuthentication from 'expo-local-authentication';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AppState, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, AppState, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSettings } from '../store/settings';
 import { useTheme } from '../theme';
 
@@ -10,39 +10,111 @@ const RELOCK_AFTER_MS = 60_000;
 
 /**
  * Face ID / passcode gate. When settings.appLock is on, children are hidden
- * behind an opaque lock screen until the user authenticates. Re-locks after
- * the app sits in the background for a minute.
+ * behind an opaque lock screen until the user authenticates.
+ *
+ * FAIL-OPEN BY DESIGN: if authentication is impossible (Face ID permission
+ * denied for the app, biometrics not enrolled, no passcode set), the gate
+ * unlocks and disables the lock with an explanation — this is the user's own
+ * device and data; a broken lock must never trap them out of their app.
  */
 export function LockGate({ children }: { children: React.ReactNode }) {
   const theme = useTheme();
   const appLock = useSettings((s) => s.settings.appLock);
   const [locked, setLocked] = useState(appLock && Platform.OS !== 'web');
   const [authBusy, setAuthBusy] = useState(false);
+  const [hint, setHint] = useState<string | null>(null);
   const backgroundedAt = useRef<number | null>(null);
+
+  const failOpen = useCallback((reason: string) => {
+    setLocked(false);
+    setHint(null);
+    useSettings.getState().update({ appLock: false });
+    Alert.alert(
+      'App lock turned off',
+      `${reason} The lock was disabled so you are never locked out of your own data. ` +
+        'You can turn it back on in Settings → Privacy once Face ID or a passcode is available ' +
+        '(check iOS Settings → DayFlow → Face ID).'
+    );
+  }, []);
+
+  const lastAttemptAt = useRef(0);
 
   const unlock = useCallback(async () => {
     if (authBusy) return;
+    // Debounce: never stack a second system prompt on top of (or immediately
+    // after) another — this is what makes "it keeps prompting me" impossible.
+    if (Date.now() - lastAttemptAt.current < 1500) return;
+    lastAttemptAt.current = Date.now();
     setAuthBusy(true);
+    setHint(null);
     try {
+      const [hasHardware, enrolled, secLevel] = await Promise.all([
+        LocalAuthentication.hasHardwareAsync(),
+        LocalAuthentication.isEnrolledAsync(),
+        LocalAuthentication.getEnrolledLevelAsync(),
+      ]);
+
+      // Nothing on this device can authenticate → never trap the user.
+      if (secLevel === LocalAuthentication.SecurityLevel.NONE) {
+        failOpen('No Face ID or device passcode is set up on this phone.');
+        return;
+      }
+
       const res = await LocalAuthentication.authenticateAsync({
         promptMessage: 'Unlock DayFlow',
+        cancelLabel: 'Cancel',
+        // Explicitly allow the device passcode as a fallback path.
+        disableDeviceFallback: false,
       });
-      if (res.success) setLocked(false);
-    } catch {
-      // Stay locked; the button lets the user retry.
+
+      if (res.success) {
+        lastAttemptAt.current = 0;
+        setLocked(false);
+        setHint(null);
+        return;
+      }
+
+      const err = res.error;
+      if (
+        err === 'not_available' ||
+        err === 'not_enrolled' ||
+        err === 'passcode_not_set' ||
+        (!hasHardware && !enrolled)
+      ) {
+        // Face ID permission denied for the app / biometrics unusable, and the
+        // system produced no passcode sheet either.
+        failOpen('Face ID is not available for DayFlow right now.');
+        return;
+      }
+      if (err === 'lockout') {
+        setHint('Face ID is temporarily locked — tap Unlock and use your passcode.');
+        return;
+      }
+      if (err === 'user_cancel' || err === 'system_cancel' || err === 'app_cancel') {
+        setHint('Tap Unlock to try again.');
+        return;
+      }
+      // Unknown failure: show the actual reason so it's never a silent no-op.
+      setHint(`Couldn’t unlock (${err ?? 'unknown'}) — tap Unlock to try again.`);
+    } catch (e) {
+      setHint(
+        `Couldn’t start Face ID (${e instanceof Error ? e.message : 'error'}) — tap Unlock to try again.`
+      );
     } finally {
       setAuthBusy(false);
     }
-  }, [authBusy]);
+  }, [authBusy, failOpen]);
 
-  // Lock immediately when the setting turns on; unlock state resets on cold start.
+  // Lock when the setting turns on; auto-prompt shortly after launch (the
+  // small delay avoids iOS cancelling a prompt fired mid-transition).
   useEffect(() => {
     if (!appLock || Platform.OS === 'web') {
       setLocked(false);
       return;
     }
     setLocked(true);
-    void unlock();
+    const t = setTimeout(() => void unlock(), 450);
+    return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appLock]);
 
@@ -57,44 +129,51 @@ export function LockGate({ children }: { children: React.ReactNode }) {
         backgroundedAt.current = null;
         if (away > RELOCK_AFTER_MS) {
           setLocked(true);
-          void unlock();
+          setTimeout(() => void unlock(), 350);
         }
       }
     });
     return () => sub.remove();
   }, [appLock, unlock]);
 
-  if (!locked) return <>{children}</>;
-
+  // The app ALWAYS renders underneath; the lock is an opaque cover on top.
+  // (Never conditionally unmount the navigator — a successful unlock must
+  // only have to remove a view, not boot the whole app tree.)
   return (
-    <View style={[styles.root, { backgroundColor: theme.background }]}>
-      <View style={styles.center}>
-        <View style={[styles.iconCircle, { backgroundColor: theme.accent }]}>
-          <Ionicons name="lock-closed" size={34} color="#fff" />
+    <View style={styles.host}>
+      {children}
+      {locked ? (
+        <View style={[StyleSheet.absoluteFill, styles.root, { backgroundColor: theme.background }]}>
+          <View style={styles.center}>
+            <View style={[styles.iconCircle, { backgroundColor: theme.accent }]}>
+              <Ionicons name="lock-closed" size={34} color="#fff" />
+            </View>
+            <Text style={[styles.title, { color: theme.text }]}>DayFlow is locked</Text>
+            <Text style={[styles.subtitle, { color: theme.textSecondary }]}>
+              {hint ?? 'Your schedule and earnings stay private.'}
+            </Text>
+            <Pressable
+              onPress={unlock}
+              disabled={authBusy}
+              style={({ pressed }) => [
+                styles.button,
+                { backgroundColor: theme.accent, opacity: authBusy ? 0.6 : 1 },
+                pressed && { transform: [{ scale: 0.97 }] },
+              ]}
+            >
+              <Ionicons name="finger-print" size={20} color="#fff" />
+              <Text style={styles.buttonText}>Unlock</Text>
+            </Pressable>
+          </View>
         </View>
-        <Text style={[styles.title, { color: theme.text }]}>DayFlow is locked</Text>
-        <Text style={[styles.subtitle, { color: theme.textSecondary }]}>
-          Your schedule and earnings stay private.
-        </Text>
-        <Pressable
-          onPress={unlock}
-          disabled={authBusy}
-          style={({ pressed }) => [
-            styles.button,
-            { backgroundColor: theme.accent, opacity: authBusy ? 0.6 : 1 },
-            pressed && { transform: [{ scale: 0.97 }] },
-          ]}
-        >
-          <Ionicons name="finger-print" size={20} color="#fff" />
-          <Text style={styles.buttonText}>Unlock</Text>
-        </Pressable>
-      </View>
+      ) : null}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1 },
+  host: { flex: 1 },
+  root: { zIndex: 10000, elevation: 10000 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10, padding: 32 },
   iconCircle: {
     width: 84,
@@ -105,7 +184,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   title: { fontSize: 24, fontWeight: '800', letterSpacing: -0.5 },
-  subtitle: { fontSize: 14, textAlign: 'center' },
+  subtitle: { fontSize: 14, textAlign: 'center', minHeight: 18 },
   button: {
     flexDirection: 'row',
     alignItems: 'center',

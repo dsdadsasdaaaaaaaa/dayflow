@@ -13,7 +13,7 @@ import { MeetingHero } from '../src/components/meeting/MeetingHero';
 import { useNow } from '../src/components/meeting/useNow';
 import { todayKey } from '../src/lib/dates';
 import { successHaptic, tapHaptic, warningHaptic } from '../src/lib/haptics';
-import { formatMoney, isPaidOn, occurrenceAmount } from '../src/lib/meetings';
+import { formatMoney, isPaidOn, occurrenceAmount, occurrenceDeposit } from '../src/lib/meetings';
 import { isInstanceCompleted } from '../src/lib/recurrence';
 import { useMeetingSession } from '../src/store/meetingSession';
 import { useSettings } from '../src/store/settings';
@@ -285,6 +285,7 @@ export default function MeetingLiveScreen() {
           plannedEndAt={active.plannedEndAt}
           prefillAmount={task ? occurrenceAmount(task, active.dateKey) : 0}
           prefillPaid={task ? isPaidOn(task, active.dateKey) : false}
+          deposit={task ? occurrenceDeposit(task, active.dateKey) : 0}
           currencySymbol={symbol}
           onConfirm={onLogMeeting}
           busy={ending}

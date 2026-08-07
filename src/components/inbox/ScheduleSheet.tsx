@@ -35,6 +35,14 @@ import type { DayKey, Task } from '../../types';
 interface Props {
   /** Task being scheduled, or null when the sheet is closed. */
   task: Task | null;
+  /**
+   * Bulk mode: schedule several tasks at once (ignored while `task` is set).
+   * The chosen slot goes to the first task; the rest follow back-to-back,
+   * each offset by the previous task's duration so nothing overlaps.
+   */
+  tasks?: Task[] | null;
+  /** Called after a slot was committed (single or bulk), before closing. */
+  onScheduled?: () => void;
   onClose: () => void;
 }
 
@@ -59,7 +67,7 @@ function roundUpTo5(minutes: number): number {
  * DayFlow's faster answer to Structured's drag-to-tab gymnastics.
  * Design v3: plain overlay backdrop, solid card sheet, solid accent CTAs.
  */
-export function ScheduleSheet({ task, onClose }: Props) {
+export function ScheduleSheet({ task, tasks, onScheduled, onClose }: Props) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const scheduleTask = useTasks((s) => s.scheduleTask);
@@ -73,9 +81,12 @@ export function ScheduleSheet({ task, onClose }: Props) {
 
   const progress = useSharedValue(0);
 
-  // Reset + animate in whenever a new task opens the sheet.
+  const bulk = !task && tasks && tasks.length > 0 ? tasks : null;
+  const visible = task != null || bulk != null;
+
+  // Reset + animate in whenever a new task (or bulk batch) opens the sheet.
   useEffect(() => {
-    if (task) {
+    if (visible) {
       closing.current = false;
       setMode('quick');
       setDay(todayKey());
@@ -83,7 +94,7 @@ export function ScheduleSheet({ task, onClose }: Props) {
       progress.value = 0;
       progress.value = withTiming(1, { duration: 220 });
     }
-  }, [task?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [visible, task?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const backdropStyle = useAnimatedStyle(() => ({ opacity: progress.value }));
   const sheetStyle = useAnimatedStyle(() => ({
@@ -99,17 +110,25 @@ export function ScheduleSheet({ task, onClose }: Props) {
   };
 
   const commit = (date: DayKey, startMinutes: number) => {
-    if (!task) return;
-    scheduleTask(task.id, date, startMinutes, false);
-    // Scheduling from the inbox: give the task the default alerts so the
-    // notification it now deserves actually fires.
-    const current = useTasks.getState().tasks[task.id];
-    if (current && current.alerts.length === 0 && defaultAlerts.length > 0) {
-      updateTask(task.id, { alerts: defaultAlerts });
+    const list = task ? [task] : (bulk ?? []);
+    if (list.length === 0) return;
+    // Bulk: place tasks back-to-back from the chosen time, staggering each
+    // start by the previous task's duration so they never overlap.
+    let cursor = startMinutes;
+    for (const t of list) {
+      scheduleTask(t.id, date, Math.min(cursor, 24 * 60 - 5), false);
+      // Scheduling from the inbox: give the task the default alerts so the
+      // notification it now deserves actually fires.
+      const current = useTasks.getState().tasks[t.id];
+      if (current && current.alerts.length === 0 && defaultAlerts.length > 0) {
+        updateTask(t.id, { alerts: defaultAlerts });
+      }
+      const updated = useTasks.getState().tasks[t.id];
+      if (updated) void syncTaskNotifications(updated);
+      cursor += Math.max(5, t.durationMinutes);
     }
-    const updated = useTasks.getState().tasks[task.id];
-    if (updated) void syncTaskNotifications(updated);
     successHaptic();
+    onScheduled?.();
     close();
   };
 
@@ -124,19 +143,19 @@ export function ScheduleSheet({ task, onClose }: Props) {
       { key: 'tmrw-am', icon: 'arrow-redo-outline', label: 'Tomorrow morning', date: addDays(today, 1), minutes: 9 * 60 },
       { key: 'weekend', icon: 'cafe-outline', label: 'This weekend', date: addDays(today, satDiff), minutes: 10 * 60 },
     ];
-  }, [task?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [visible, task?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const dayChips = useMemo(() => {
     const today = todayKey();
     return Array.from({ length: 14 }, (_, i) => addDays(today, i));
-  }, [task?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [visible, task?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const timeIndex = TIME_SLOTS.indexOf(roundUpTo5(minutes));
   const initialTimeIndex = Math.max(0, (timeIndex === -1 ? 108 : timeIndex) - 2);
 
   return (
     <Modal
-      visible={task != null}
+      visible={visible}
       transparent
       animationType="none"
       statusBarTranslucent
@@ -186,7 +205,10 @@ export function ScheduleSheet({ task, onClose }: Props) {
                   {mode === 'quick' ? 'Schedule' : 'Pick date & time'}
                 </Text>
                 <Text numberOfLines={1} style={[styles.subtitle, { color: theme.textSecondary }]}>
-                  {task?.title ?? ''}
+                  {task?.title ??
+                    (bulk
+                      ? `${bulk.length} tasks · placed back-to-back`
+                      : '')}
                 </Text>
               </View>
               <Pressable

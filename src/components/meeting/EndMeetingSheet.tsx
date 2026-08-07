@@ -38,6 +38,8 @@ interface Props {
   prefillAmount: number;
   /** Prefill: whether the payment is already marked collected. */
   prefillPaid: boolean;
+  /** Deposit already received up-front for this occurrence (0 = none). */
+  deposit?: number;
   currencySymbol: string;
   /** Confirm — the caller logs the session and updates the task store. */
   onConfirm: (amount: number, paid: boolean) => void;
@@ -63,6 +65,7 @@ export function EndMeetingSheet({
   plannedEndAt,
   prefillAmount,
   prefillPaid,
+  deposit = 0,
   currencySymbol,
   onConfirm,
   busy = false,
@@ -111,6 +114,7 @@ export function EndMeetingSheet({
   const actualMin = Math.max(1, Math.round((endedAt - startedAt) / 60000));
   const overtimeMin = Math.max(0, actualMin - plannedMin);
   const amount = parseAmount(amountText);
+  const owed = Math.max(0, amount - deposit);
 
   const addTip = (tip: number) => {
     tapHaptic();
@@ -202,6 +206,24 @@ export function EndMeetingSheet({
                   ))}
                 </View>
               </View>
+
+              {deposit > 0 ? (
+                <View style={styles.depositRow}>
+                  <Ionicons name="wallet-outline" size={13} color={theme.success} />
+                  <Text
+                    numberOfLines={1}
+                    style={[styles.depositText, { color: theme.textSecondary }]}
+                  >
+                    Deposit received:{' '}
+                    <Text style={{ color: theme.success }}>
+                      {formatMoney(deposit, currencySymbol)}
+                    </Text>
+                    {owed > 0
+                      ? ` · collect ${formatMoney(owed, currencySymbol)} more`
+                      : ' · covers the full amount'}
+                  </Text>
+                </View>
+              ) : null}
 
               <View
                 style={[
@@ -316,6 +338,19 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     letterSpacing: -0.8,
     paddingVertical: 4,
+    fontVariant: ['tabular-nums'],
+  },
+  depositRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 2,
+    marginTop: -4,
+  },
+  depositText: {
+    flexShrink: 1,
+    fontSize: 12,
+    fontWeight: '600',
     fontVariant: ['tabular-nums'],
   },
   tipRow: { flexDirection: 'row', gap: 6 },

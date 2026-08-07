@@ -17,6 +17,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Fab } from '../../src/components/Fab';
 import { GlassCard } from '../../src/components/glass/GlassCard';
 import { ScreenHeader } from '../../src/components/ScreenHeader';
+import { BulkActionBar } from '../../src/components/inbox/BulkActionBar';
 import { EmptyGlow } from '../../src/components/inbox/EmptyGlow';
 import {
   FilterChips,
@@ -32,6 +33,7 @@ import { successHaptic, tapHaptic, warningHaptic } from '../../src/lib/haptics';
 import { nextOccurrence } from '../../src/lib/recurrence';
 import { syncTaskNotifications } from '../../src/lib/notifications';
 import { inboxTasks, useTasks } from '../../src/store/tasks';
+import { showUndo } from '../../src/store/undo';
 import { SPACING, useTheme } from '../../src/theme';
 import type { Task } from '../../src/types';
 
@@ -50,6 +52,9 @@ export default function InboxScreen() {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<InboxFilter>('all');
   const [schedulingId, setSchedulingId] = useState<string | null>(null);
+  const [selecting, setSelecting] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [bulkScheduling, setBulkScheduling] = useState(false);
   const searchInputRef = useRef<TextInput>(null);
 
   const inbox = useMemo(() => inboxTasks(tasks), [tasks]);
@@ -70,6 +75,21 @@ export default function InboxScreen() {
     }
   }, [tags, filter]);
 
+  // Keep the selection honest: drop ids that are no longer pending, and leave
+  // selection mode entirely when nothing is left to select.
+  useEffect(() => {
+    if (!selecting) return;
+    if (pending.length === 0) {
+      setSelecting(false);
+      setSelectedIds([]);
+      return;
+    }
+    setSelectedIds((ids) => {
+      const valid = ids.filter((id) => pending.some((t) => t.id === id));
+      return valid.length === ids.length ? ids : valid;
+    });
+  }, [pending, selecting]);
+
   const filteredPending = useMemo(
     () => pending.filter((t) => taskMatchesFilter(t, filter)),
     [pending, filter]
@@ -79,20 +99,45 @@ export default function InboxScreen() {
     [completedList, filter]
   );
 
+  const selectedTasks = useMemo(
+    () => selectedIds.map((id) => tasks[id]).filter((t): t is Task => t != null),
+    [selectedIds, tasks]
+  );
+
   const schedulingTask = schedulingId ? (tasks[schedulingId] ?? null) : null;
 
   const subtitle = searching
     ? 'Search everything'
-    : pending.length === 0
-      ? 'Nothing waiting'
-      : `${pending.length} ${pending.length === 1 ? 'task' : 'tasks'} waiting`;
+    : selecting
+      ? `${selectedIds.length} selected`
+      : pending.length === 0
+        ? 'Nothing waiting'
+        : `${pending.length} ${pending.length === 1 ? 'task' : 'tasks'} waiting`;
+
+  const exitSelection = () => {
+    setSelecting(false);
+    setSelectedIds([]);
+  };
 
   const toggleSearch = () => {
     tapHaptic();
+    exitSelection();
     setSearching((on) => {
       if (on) setQuery('');
       return !on;
     });
+  };
+
+  const toggleSelecting = () => {
+    tapHaptic();
+    if (selecting) exitSelection();
+    else setSelecting(true);
+  };
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((ids) =>
+      ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]
+    );
   };
 
   const openEditor = (task: Task) => {
@@ -102,17 +147,24 @@ export default function InboxScreen() {
     router.push(occ ? `/task-editor?id=${task.id}&date=${occ}` : `/task-editor?id=${task.id}`);
   };
 
+  /** Delete with undo: capture the task, remove it, offer to bring it back. */
+  const performDelete = (task: Task) => {
+    warningHaptic();
+    deleteTask(task.id);
+    void syncTaskNotifications(null, task.id);
+    showUndo('Task deleted', () => {
+      useTasks.getState().importTasks([task]);
+      void syncTaskNotifications(task);
+    });
+  };
+
   const confirmDelete = (task: Task) => {
     Alert.alert('Delete task?', `“${task.title}” will be removed from your inbox.`, [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete',
         style: 'destructive',
-        onPress: () => {
-          warningHaptic();
-          deleteTask(task.id);
-          void syncTaskNotifications(null, task.id);
-        },
+        onPress: () => performDelete(task),
       },
     ]);
   };
@@ -161,7 +213,61 @@ export default function InboxScreen() {
           style: 'destructive',
           onPress: () => {
             successHaptic();
+            const captured = [...completedList];
             clearCompletedInbox();
+            showUndo(
+              captured.length === 1 ? 'Task cleared' : `${captured.length} tasks cleared`,
+              () => useTasks.getState().importTasks(captured)
+            );
+          },
+        },
+      ]
+    );
+  };
+
+  // ── Bulk actions ───────────────────────────────────────────────────────────
+
+  const bulkComplete = () => {
+    if (selectedTasks.length === 0) return;
+    successHaptic();
+    const day = todayKey();
+    for (const t of selectedTasks) toggleComplete(t.id, day);
+    exitSelection();
+  };
+
+  const bulkSchedule = () => {
+    if (selectedTasks.length === 0) return;
+    tapHaptic();
+    setBulkScheduling(true);
+  };
+
+  const bulkDelete = () => {
+    const n = selectedTasks.length;
+    if (n === 0) return;
+    tapHaptic();
+    Alert.alert(
+      n === 1 ? 'Delete task?' : `Delete ${n} tasks?`,
+      `${n === 1 ? 'It' : 'They'} will be removed from your inbox.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            const captured = [...selectedTasks];
+            warningHaptic();
+            for (const t of captured) {
+              deleteTask(t.id);
+              void syncTaskNotifications(null, t.id);
+            }
+            showUndo(
+              captured.length === 1 ? 'Task deleted' : `${captured.length} tasks deleted`,
+              () => {
+                useTasks.getState().importTasks(captured);
+                for (const t of captured) void syncTaskNotifications(t);
+              }
+            );
+            exitSelection();
           },
         },
       ]
@@ -190,9 +296,41 @@ export default function InboxScreen() {
     </Pressable>
   );
 
+  const selectButton = (
+    <Pressable
+      onPress={toggleSelecting}
+      hitSlop={8}
+      accessibilityLabel={selecting ? 'Cancel selection' : 'Select tasks'}
+      style={({ pressed }) => [
+        styles.selectBtn,
+        {
+          backgroundColor: selecting ? theme.accentSoft : theme.card,
+          borderColor: selecting ? `${theme.accent}40` : theme.border,
+          opacity: pressed ? 0.7 : 1,
+        },
+      ]}
+    >
+      <Text
+        style={[
+          styles.selectLabel,
+          { color: selecting ? theme.accent : theme.textSecondary },
+        ]}
+      >
+        {selecting ? 'Cancel' : 'Select'}
+      </Text>
+    </Pressable>
+  );
+
+  const headerRight = (
+    <View style={styles.headerRow}>
+      {!searching && (selecting || pending.length >= 2) ? selectButton : null}
+      {selecting ? null : searchButton}
+    </View>
+  );
+
   return (
     <View style={[styles.screen, { backgroundColor: theme.background }]}>
-      <ScreenHeader title="Inbox" subtitle={subtitle} right={searchButton} />
+      <ScreenHeader title="Inbox" subtitle={subtitle} right={headerRight} />
 
       {searching ? (
         <Animated.View entering={FadeIn.duration(160)} style={styles.searchWrap}>
@@ -251,7 +389,7 @@ export default function InboxScreen() {
           <ScrollView
             contentContainerStyle={[
               styles.content,
-              { paddingBottom: 120 + insets.bottom },
+              { paddingBottom: (selecting ? 190 : 120) + insets.bottom },
             ]}
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode="on-drag"
@@ -282,6 +420,10 @@ export default function InboxScreen() {
                       onPress={() => openEditor(task)}
                       onLongPress={() => showActions(task)}
                       onSchedule={() => setSchedulingId(task.id)}
+                      onDelete={() => performDelete(task)}
+                      selectionMode={selecting}
+                      selected={selectedIds.includes(task.id)}
+                      onSelectToggle={() => toggleSelect(task.id)}
                     />
                   </Animated.View>
                 ))}
@@ -329,6 +471,7 @@ export default function InboxScreen() {
                           onPress={() => openEditor(task)}
                           onLongPress={() => showActions(task)}
                           onSchedule={() => setSchedulingId(task.id)}
+                          onDelete={() => performDelete(task)}
                         />
                       </Animated.View>
                     ))}
@@ -340,20 +483,42 @@ export default function InboxScreen() {
         </>
       )}
 
-      {!searching ? (
+      {!searching && !selecting ? (
         <Fab
           onPress={() => router.push('/task-editor?inbox=1')}
           bottom={96 + insets.bottom}
         />
       ) : null}
 
-      <ScheduleSheet task={schedulingTask} onClose={() => setSchedulingId(null)} />
+      {selecting ? (
+        <BulkActionBar
+          count={selectedIds.length}
+          onCompleteAll={bulkComplete}
+          onScheduleAll={bulkSchedule}
+          onDeleteAll={bulkDelete}
+        />
+      ) : null}
+
+      <ScheduleSheet
+        task={schedulingTask}
+        tasks={bulkScheduling ? selectedTasks : null}
+        onScheduled={bulkScheduling ? exitSelection : undefined}
+        onClose={() => {
+          setSchedulingId(null);
+          setBulkScheduling(false);
+        }}
+      />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   headerBtn: {
     width: 36,
     height: 36,
@@ -362,6 +527,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  selectBtn: {
+    height: 36,
+    paddingHorizontal: 14,
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  selectLabel: { fontSize: 13, fontWeight: '600' },
   searchWrap: {
     paddingHorizontal: SPACING.lg,
     paddingBottom: SPACING.sm,

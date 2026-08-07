@@ -1,6 +1,5 @@
-import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, Text, View } from 'react-native';
-import { useTheme, type Theme } from '../../theme';
+import { useTheme } from '../../theme';
 import { ProgressRing } from '../ProgressRing';
 
 interface Props {
@@ -9,6 +8,8 @@ interface Props {
   plannedMinutes: number;
   /** Free minutes remaining today, or null when not viewing today. */
   freeMinutes: number | null;
+  /** Optional trailing accessory (e.g. the week-earnings chip). */
+  right?: React.ReactNode;
 }
 
 /** "2h 15m" compact duration. */
@@ -20,54 +21,35 @@ function compact(mins: number): string {
   return rest === 0 ? `${h}h` : `${h}h ${rest}m`;
 }
 
-/** Plain surface chip. */
-function Chip({ theme, children }: { theme: Theme; children: React.ReactNode }) {
-  return (
-    <View style={[styles.chip, { backgroundColor: theme.surface }]}>{children}</View>
-  );
-}
-
-/** Day summary: completion ring + plain done / planned / free chips. */
-export function SummaryRow({ doneCount, totalCount, plannedMinutes, freeMinutes }: Props) {
+/**
+ * One quiet summary line under the week strip: a small completion ring (only
+ * once something is done) and a single sentence of day facts — no chip pile.
+ */
+export function SummaryRow({ doneCount, totalCount, plannedMinutes, freeMinutes, right }: Props) {
   const theme = useTheme();
   if (totalCount === 0 && plannedMinutes === 0) return null;
-  const progress = totalCount > 0 ? doneCount / totalCount : 0;
+
+  const parts: string[] = [];
+  if (totalCount > 0) parts.push(`${doneCount} of ${totalCount} done`);
+  if (plannedMinutes > 0) parts.push(`${compact(plannedMinutes)} planned`);
+  if (freeMinutes != null && freeMinutes > 0) parts.push(`${compact(freeMinutes)} free`);
 
   return (
     <View style={styles.row}>
-      <ProgressRing
-        size={34}
-        strokeWidth={4}
-        progress={progress}
-        color={theme.accent}
-        trackColor={theme.surface}
-      >
-        <Text style={[styles.ringText, { color: theme.textSecondary }]}>
-          {Math.round(progress * 100)}
-        </Text>
-      </ProgressRing>
-      <Chip theme={theme}>
-        <Ionicons name="checkmark-circle-outline" size={13} color={theme.textSecondary} />
-        <Text style={[styles.chipText, { color: theme.textSecondary }]}>
-          {doneCount} of {totalCount} done
-        </Text>
-      </Chip>
-      {plannedMinutes > 0 ? (
-        <Chip theme={theme}>
-          <Ionicons name="time-outline" size={13} color={theme.textSecondary} />
-          <Text style={[styles.chipText, { color: theme.textSecondary }]}>
-            {compact(plannedMinutes)} planned
-          </Text>
-        </Chip>
+      {doneCount > 0 ? (
+        <ProgressRing
+          size={18}
+          strokeWidth={3}
+          progress={totalCount > 0 ? doneCount / totalCount : 0}
+          color={theme.accent}
+          trackColor={theme.surface}
+        />
       ) : null}
-      {freeMinutes != null && freeMinutes > 0 ? (
-        <Chip theme={theme}>
-          <Ionicons name="sparkles-outline" size={13} color={theme.success} />
-          <Text style={[styles.chipText, { color: theme.textSecondary }]}>
-            {compact(freeMinutes)} free
-          </Text>
-        </Chip>
-      ) : null}
+      <Text style={[styles.text, { color: theme.textSecondary }]} numberOfLines={1}>
+        {parts.join(' · ')}
+      </Text>
+      <View style={styles.spacer} />
+      {right}
     </View>
   );
 }
@@ -76,20 +58,11 @@ const styles = StyleSheet.create({
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 7,
     paddingHorizontal: 16,
-    paddingTop: 10,
-    paddingBottom: 2,
-    flexWrap: 'wrap',
+    paddingTop: 8,
+    paddingBottom: 4,
   },
-  ringText: { fontSize: 9, fontWeight: '800', fontVariant: ['tabular-nums'] },
-  chip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 999,
-  },
-  chipText: { fontSize: 12, fontWeight: '600', fontVariant: ['tabular-nums'] },
+  text: { fontSize: 13, fontWeight: '600', fontVariant: ['tabular-nums'], flexShrink: 1 },
+  spacer: { flex: 1 },
 });

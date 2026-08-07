@@ -2,11 +2,13 @@ import { Ionicons } from '@expo/vector-icons';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { selectionHaptic } from '../../lib/haptics';
+import { totalUnread, useMessages } from '../../store/messages';
 import { useTheme } from '../../theme';
 
 const ICONS: Record<string, [string, string]> = {
   index: ['today-outline', 'today'],
   inbox: ['file-tray-outline', 'file-tray'],
+  messages: ['chatbubble-outline', 'chatbubble'],
   focus: ['timer-outline', 'timer'],
   habits: ['leaf-outline', 'leaf'],
   stats: ['stats-chart-outline', 'stats-chart'],
@@ -32,6 +34,7 @@ interface TabBarProps {
 export function GlassTabBar({ state, descriptors, navigation }: TabBarProps) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const unread = useMessages((s) => totalUnread(s.messages, s.lastReadAt));
 
   return (
     <View
@@ -71,11 +74,18 @@ export function GlassTabBar({ state, descriptors, navigation }: TabBarProps) {
             accessibilityState={{ selected: focused }}
             accessibilityLabel={label}
           >
-            <Ionicons
-              name={(focused ? filled : outline) as never}
-              size={23}
-              color={focused ? theme.accent : theme.textTertiary}
-            />
+            <View>
+              <Ionicons
+                name={(focused ? filled : outline) as never}
+                size={23}
+                color={focused ? theme.accent : theme.textTertiary}
+              />
+              {route.name === 'messages' && unread > 0 ? (
+                <View style={[styles.badge, { backgroundColor: theme.accent }]}>
+                  <Text style={styles.badgeLabel}>{unread > 9 ? '9+' : unread}</Text>
+                </View>
+              ) : null}
+            </View>
             <Text
               style={[
                 styles.label,
@@ -106,4 +116,16 @@ const styles = StyleSheet.create({
     gap: 3,
   },
   label: { fontSize: 10 },
+  badge: {
+    position: 'absolute',
+    top: -4,
+    right: -9,
+    minWidth: 15,
+    height: 15,
+    borderRadius: 8,
+    paddingHorizontal: 3,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  badgeLabel: { color: '#FFFFFF', fontSize: 9, fontWeight: '700' },
 });

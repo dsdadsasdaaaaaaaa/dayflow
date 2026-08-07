@@ -2,8 +2,8 @@
 // Everything here is deterministic on its inputs so the screen can wrap
 // each call in useMemo and stay cheap on re-renders.
 
-import { formatDayShort, formatMinutes, toDayKey, weekdayOf } from '../../lib/dates';
-import { formatMoney } from '../../lib/meetings';
+import { formatDayShort, formatMinutes, monthShort, toDayKey, weekdayOf } from '../../lib/dates';
+import { earningsForDays, formatMoney } from '../../lib/meetings';
 import type { MeetingOccurrence } from '../../lib/meetings';
 import { minutesFocusedOn } from '../../store/focus';
 import { habitActiveOn, habitStreak } from '../../store/habits';
@@ -224,6 +224,8 @@ export interface ClientStat {
   /** Planned durations of completed occurrences — fallback when no log. */
   plannedMinutes: number;
   earned: number;
+  /** earned / meetings (0 when no completed meetings). */
+  avgPerMeeting: number;
 }
 
 /** Per-client earnings for completed meeting occurrences, biggest earner first. */
@@ -238,7 +240,7 @@ export function clientStats(
     const name = m.client.trim() || 'Client';
     const entry =
       map.get(name.toLowerCase()) ??
-      { client: name, meetings: 0, loggedMinutes: 0, plannedMinutes: 0, earned: 0 };
+      { client: name, meetings: 0, loggedMinutes: 0, plannedMinutes: 0, earned: 0, avgPerMeeting: 0 };
     entry.meetings += 1;
     entry.earned += m.rate;
     entry.plannedMinutes += m.task.durationMinutes;
@@ -252,10 +254,13 @@ export function clientStats(
     if (!entry) {
       // Client had a live session in range but no completed occurrence
       // (e.g. session logged, task later unchecked) — still show the hours.
-      entry = { client: name, meetings: 0, loggedMinutes: 0, plannedMinutes: 0, earned: 0 };
+      entry = { client: name, meetings: 0, loggedMinutes: 0, plannedMinutes: 0, earned: 0, avgPerMeeting: 0 };
       map.set(name.toLowerCase(), entry);
     }
     entry.loggedMinutes += e.actualMinutes;
+  }
+  for (const entry of map.values()) {
+    entry.avgPerMeeting = entry.meetings > 0 ? entry.earned / entry.meetings : 0;
   }
   return [...map.values()].sort((a, b) => b.earned - a.earned);
 }
@@ -288,6 +293,42 @@ export function earningsPerDay(occurrences: MeetingOccurrence[], days: DayKey[])
     byDay.set(m.dateKey, (byDay.get(m.dateKey) ?? 0) + m.rate);
   }
   return days.map((d) => byDay.get(d) ?? 0);
+}
+
+export interface MonthEarning {
+  /** Short month label, e.g. "Feb". */
+  label: string;
+  earned: number;
+}
+
+/**
+ * Earned totals for the last `monthsBack` calendar months (oldest first,
+ * ending with the current month bounded at today). Deterministic per calendar
+ * day, so wrap it in useMemo keyed on `tasks`.
+ */
+export function monthlyEarnings(
+  tasks: Record<string, Task>,
+  monthsBack = 6
+): MonthEarning[] {
+  const now = new Date();
+  const out: MonthEarning[] = [];
+  for (let i = monthsBack - 1; i >= 0; i--) {
+    const first = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const lastOfMonth = new Date(now.getFullYear(), now.getMonth() - i + 1, 0);
+    // Current month is bounded at today — future days can't have earnings.
+    const end = i === 0 ? now : lastOfMonth;
+    const days: DayKey[] = [];
+    const cursor = new Date(first);
+    while (cursor <= end) {
+      days.push(toDayKey(cursor));
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    out.push({
+      label: monthShort(first.getMonth()),
+      earned: earningsForDays(tasks, days).earned,
+    });
+  }
+  return out;
 }
 
 export interface SessionStats {

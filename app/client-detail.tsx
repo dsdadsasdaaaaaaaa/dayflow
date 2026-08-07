@@ -1,12 +1,20 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useMemo } from 'react';
+import { useMemo, useRef } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { EmptyState } from '../src/components/EmptyState';
 import { BackButton } from '../src/components/clients/BackButton';
 import { ClientAvatar } from '../src/components/clients/ClientAvatar';
 import { ClientChip } from '../src/components/clients/ClientChip';
+import { ClientNotesCard } from '../src/components/clients/ClientNotesCard';
+import {
+  ClientPhoneRow,
+  type ClientPhoneRowHandle,
+} from '../src/components/clients/ClientPhoneRow';
+import { DepositRow } from '../src/components/clients/DepositRow';
+import { MessageButton } from '../src/components/clients/MessageButton';
+import { RebookSuggestion } from '../src/components/clients/RebookSuggestion';
 import { StatTile } from '../src/components/clients/StatTile';
 import { GlassCard } from '../src/components/glass/GlassCard';
 import {
@@ -24,6 +32,7 @@ import {
 } from '../src/lib/meetings';
 import { useMeetingSession } from '../src/store/meetingSession';
 import { useSettings } from '../src/store/settings';
+import { showUndo } from '../src/store/undo';
 import { useTasks } from '../src/store/tasks';
 import { SPACING, taskColor, useTheme } from '../src/theme';
 
@@ -40,6 +49,8 @@ export default function ClientDetailScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ name?: string }>();
   const rawName = typeof params.name === 'string' ? params.name : '';
+
+  const phoneRowRef = useRef<ClientPhoneRowHandle>(null);
 
   const tasks = useTasks((s) => s.tasks);
   const togglePaid = useTasks((s) => s.togglePaid);
@@ -62,6 +73,20 @@ export default function ClientDetailScreen() {
       .sort((a, b) => (a.dateKey < b.dateKey ? 1 : a.dateKey > b.dateKey ? -1 : 0))
       .slice(0, 20);
   }, [tasks, profile]);
+
+  /** The task behind the next scheduled (uncompleted) occurrence, if any. */
+  const nextOcc = useMemo(() => {
+    if (!profile?.nextMeeting) return null;
+    const key = profile.name.trim().toLowerCase();
+    return (
+      meetingOccurrences(tasks, [profile.nextMeeting]).find(
+        (o) => !o.completed && o.client.trim().toLowerCase() === key
+      ) ?? null
+    );
+  }, [tasks, profile]);
+
+  const avgPerMeeting =
+    profile && profile.meetingsDone > 0 ? profile.earned / profile.meetingsDone : 0;
 
   const amber = taskColor('amber');
   const amberFg = theme.dark ? amber.fgDark : amber.fgLight;
@@ -116,10 +141,20 @@ export default function ClientDetailScreen() {
                 solid={theme.success}
               />
             ) : null}
+            {avgPerMeeting > 0 ? (
+              <ClientChip
+                icon="stats-chart-outline"
+                label={`avg ${formatMoney(avgPerMeeting, symbol)}/meeting`}
+              />
+            ) : null}
             {profile.location ? (
               <ClientChip icon="location-outline" label={profile.location} />
             ) : null}
           </View>
+          <MessageButton
+            client={profile.name}
+            onNeedPhone={() => phoneRowRef.current?.focus()}
+          />
         </View>
 
         {/* Stat tiles */}
@@ -138,6 +173,18 @@ export default function ClientDetailScreen() {
             delay={100}
           />
           <StatTile label="Hours" value={formatDuration(profile.loggedMinutes)} delay={130} />
+        </View>
+
+        {/* Phone */}
+        <View>
+          <SectionLabel>Phone</SectionLabel>
+          <ClientPhoneRow ref={phoneRowRef} client={profile.name} />
+        </View>
+
+        {/* Notes */}
+        <View>
+          <SectionLabel>Notes</SectionLabel>
+          <ClientNotesCard client={profile.name} />
         </View>
 
         {/* Settle up */}
@@ -166,6 +213,10 @@ export default function ClientDetailScreen() {
                     onPress={() => {
                       successHaptic();
                       togglePaid(u.task.id, u.dateKey);
+                      showUndo(
+                        `Marked ${formatDayShort(u.dateKey)} paid`,
+                        () => togglePaid(u.task.id, u.dateKey)
+                      );
                     }}
                     accessibilityRole="button"
                     accessibilityLabel={`Mark ${formatDayShort(u.dateKey)} paid`}
@@ -184,9 +235,18 @@ export default function ClientDetailScreen() {
           </View>
         ) : null}
 
+        {/* Upcoming — next booking with its deposit affordance */}
+        {nextOcc ? (
+          <View>
+            <SectionLabel>Upcoming</SectionLabel>
+            <DepositRow task={nextOcc.task} dateKey={nextOcc.dateKey} />
+          </View>
+        ) : null}
+
         {/* Book again */}
         <View>
           <SectionLabel>Book again</SectionLabel>
+          <RebookSuggestion client={profile.name} />
           <Pressable
             onPress={bookAgain}
             accessibilityRole="button"

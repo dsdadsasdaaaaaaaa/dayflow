@@ -47,6 +47,8 @@ interface TaskState {
    * rate edits never change already-settled days.
    */
   setOccurrenceAmount: (id: string, day: DayKey, amount: number) => void;
+  /** Record a booking deposit received up-front for one occurrence (0 clears). */
+  setOccurrenceDeposit: (id: string, day: DayKey, amount: number) => void;
   /** Move a task to a date/time (drag-reschedule, inbox scheduling). */
   scheduleTask: (
     id: string,
@@ -76,6 +78,13 @@ function remapMeetingDay(task: Task, oldDate: DayKey | null, newDate: DayKey | n
     if (newDate) extras[newDate] = extras[oldDate];
     delete extras[oldDate];
     meeting.extras = extras;
+    changed = true;
+  }
+  if (meeting.deposits && meeting.deposits[oldDate] != null) {
+    const deposits = { ...meeting.deposits };
+    if (newDate) deposits[newDate] = deposits[oldDate];
+    delete deposits[oldDate];
+    meeting.deposits = deposits;
     changed = true;
   }
   return changed ? { ...task, meeting } : task;
@@ -131,6 +140,14 @@ function sanitizeImportedTask(raw: unknown): Task | null {
           ? Object.fromEntries(
               Object.entries(m.extras as Record<string, unknown>)
                 .filter(([k, v]) => dayKey(k) != null && typeof v === 'number')
+                .map(([k, v]) => [k, v as number])
+            )
+          : {},
+      deposits:
+        m.deposits && typeof m.deposits === 'object'
+          ? Object.fromEntries(
+              Object.entries(m.deposits as Record<string, unknown>)
+                .filter(([k, v]) => dayKey(k) != null && typeof v === 'number' && v >= 0)
                 .map(([k, v]) => [k, v as number])
             )
           : {},
@@ -296,6 +313,10 @@ export const useTasks = create<TaskState>()(
                   t.meeting.extras && t.meeting.extras[day] != null
                     ? { [day]: t.meeting.extras[day] }
                     : {},
+                deposits:
+                  t.meeting.deposits && t.meeting.deposits[day] != null
+                    ? { [day]: t.meeting.deposits[day] }
+                    : {},
               }
             : null,
           createdAt: Date.now(),
@@ -344,6 +365,21 @@ export const useTasks = create<TaskState>()(
           };
         }),
 
+      setOccurrenceDeposit: (id, day, amount) =>
+        set((s) => {
+          const t = s.tasks[id];
+          if (!t || !t.meeting) return s;
+          const deposits = { ...(t.meeting.deposits ?? {}) };
+          if (amount > 0) deposits[day] = amount;
+          else delete deposits[day];
+          return {
+            tasks: {
+              ...s.tasks,
+              [id]: { ...t, meeting: { ...t.meeting, deposits }, updatedAt: Date.now() },
+            },
+          };
+        }),
+
       scheduleTask: (id, date, startMinutes, allDay = false) =>
         set((s) => {
           const t = s.tasks[id];
@@ -365,7 +401,9 @@ export const useTasks = create<TaskState>()(
           completions: {},
           skips: [],
           subtasks: t.subtasks.map((st) => ({ ...st, id: uid(), done: false })),
-          meeting: t.meeting ? { ...t.meeting, paidDates: [], extras: {} } : null,
+          meeting: t.meeting
+            ? { ...t.meeting, paidDates: [], extras: {}, deposits: {} }
+            : null,
           createdAt: Date.now(),
           updatedAt: Date.now(),
         };

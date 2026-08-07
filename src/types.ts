@@ -53,6 +53,12 @@ export interface MeetingInfo {
    * rewrites already-settled history.
    */
   extras?: Record<DayKey, number>;
+  /**
+   * Money received up-front per occurrence (booking deposits), keyed by
+   * DayKey. A deposit reduces what's still owed for that day; it does NOT
+   * change the occurrence's total amount.
+   */
+  deposits?: Record<DayKey, number>;
 }
 
 /** A meeting currently in progress (live timer). */
