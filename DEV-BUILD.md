@@ -1,5 +1,12 @@
 # Installing DayFlow on your iPhone (real build)
 
+> **Update (cloud pipeline live):** the project now lives on GitHub
+> (dsdadsasdaaaaaaaa/dayflow) and is connected to EAS Workflows. Pushes to
+> `main` auto-publish over-the-air updates that installed apps pick up on
+> next open; full native builds run from expo.dev → dayflow → Workflows →
+> "Build iOS (preview)" → Run — no laptop needed. The commands below still
+> work but are no longer the primary path.
+
 Expo Go is fine for testing, but a **development build** gives you: the custom app icon,
 Face ID app lock, reliable notifications, and (later) widgets + Live Activities. You have
 an Apple Developer account, so this takes about 15 minutes, mostly waiting.
