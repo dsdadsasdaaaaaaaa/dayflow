@@ -67,6 +67,26 @@ interface TelegramState {
   clearAll: () => void;
 }
 
+/**
+ * Remove synthetic optimistic entries ('<chatId>:local-…') superseded by a
+ * confirmed outbound message in the same chat: same body (photos are both
+ * empty) and created within the last 2 minutes.
+ */
+function dropLocalEchoes(messages: Record<string, TgMessage>, confirmed: TgMessage): void {
+  if (confirmed.direction !== 'out') return;
+  for (const [id, m] of Object.entries(messages)) {
+    if (
+      id.includes(':local-') &&
+      m.counterparty === confirmed.counterparty &&
+      m.direction === 'out' &&
+      m.body === confirmed.body &&
+      Math.abs(confirmed.sentAt - m.sentAt) < 120_000
+    ) {
+      delete messages[id];
+    }
+  }
+}
+
 /** Keep only imported chats, capped at the newest 200 messages per chat. */
 function pruneMessages(
   messages: Record<string, TgMessage>,
@@ -101,6 +121,7 @@ export const useTelegram = create<TelegramState>()(
           let changed = false;
           for (const m of incoming) {
             if (!imported.has(telegramChatId(m.counterparty))) continue;
+            if (!m.id.includes(':local-')) dropLocalEchoes(messages, m);
             messages[m.id] = m;
             changed = true;
           }
@@ -116,6 +137,19 @@ export const useTelegram = create<TelegramState>()(
           switch (u.kind) {
             case 'newMessage':
               mergeMessages([u.message]);
+              return;
+            case 'sendSucceeded':
+              // The pending copy (temporary id) becomes the confirmed one —
+              // drop the old entry or the message renders twice.
+              set((s) => {
+                const messages = { ...s.messages };
+                delete messages[`${u.chatId}:${u.oldMessageId}`];
+                dropLocalEchoes(messages, u.message);
+                if (new Set(s.importedChatIds).has(u.chatId)) {
+                  messages[u.message.id] = u.message;
+                }
+                return { messages: pruneMessages(messages, s.importedChatIds) };
+              });
               return;
             case 'chatLastMessage':
               if (u.message) mergeMessages([u.message]);

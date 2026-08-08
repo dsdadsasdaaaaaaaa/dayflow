@@ -53,6 +53,7 @@ export interface TgChat {
 /** Parsed, typed TDLib updates DayFlow cares about. */
 export type TdUpdate =
   | { kind: 'newMessage'; chatId: string; message: TgMessage }
+  | { kind: 'sendSucceeded'; chatId: string; oldMessageId: number; message: TgMessage }
   | { kind: 'chatLastMessage'; chatId: string; message: TgMessage | null }
   | { kind: 'authState'; state: TdAuthState }
   | { kind: 'file'; fileId: number; localPath: string | null; completed: boolean }
@@ -266,6 +267,21 @@ function handleRawUpdate(event: { type?: string; raw?: string } | null | undefin
       const message = parseMessage(asObject(raw.message));
       if (message) {
         emit({ kind: 'newMessage', chatId: message.counterparty.slice(4), message });
+      }
+      return;
+    }
+    case 'updateMessageSendSucceeded': {
+      // A just-sent message traded its temporary id for the permanent one —
+      // without this, the pending copy and the confirmed copy both render.
+      const message = parseMessage(asObject(raw.message));
+      const oldMessageId = num(raw.old_message_id);
+      if (message && oldMessageId != null) {
+        emit({
+          kind: 'sendSucceeded',
+          chatId: message.counterparty.slice(4),
+          oldMessageId,
+          message,
+        });
       }
       return;
     }

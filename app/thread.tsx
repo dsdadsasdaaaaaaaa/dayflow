@@ -158,6 +158,10 @@ export default function ThreadScreen() {
   useEffect(() => {
     if (!isTelegram && number && lastSyncAt != null) markRead(number);
   }, [isTelegram, number, lastSyncAt, markRead]);
+  // Telegram arrivals while the thread is open get read receipts immediately.
+  useEffect(() => {
+    if (isTelegram && number) tgMarkRead(number);
+  }, [isTelegram, number, tgMessages, tgMarkRead]);
 
   const known = useMemo(() => knownClients(tasks), [tasks]);
   const clientName = useMemo(
@@ -498,7 +502,7 @@ export default function ThreadScreen() {
           },
         ]}
       >
-        {!clientName && !isTelegram ? <LinkClientRow number={number} /> : null}
+        {!clientName ? <LinkClientRow counterparty={number} /> : null}
         {showError ? (
           <ErrorBanner message={lastError} onDismiss={() => setDismissedError(lastError)} />
         ) : null}

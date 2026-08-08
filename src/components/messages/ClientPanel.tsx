@@ -36,6 +36,7 @@ import {
 } from '../../store/telegramAccount';
 import { RADIUS, SPACING, useTheme } from '../../theme';
 import { formatPhoneDisplay } from './format';
+import { ClientPickerChips } from './LinkClientRow';
 
 /** Lead/warning accent from the contract's CRM layer. */
 export const LEAD_AMBER = '#D97706';
@@ -135,6 +136,8 @@ export function ClientPanel({ visible, onClose, number, clientName, onBook }: Pr
 
   // ── Save-this-number (unknown counterparty) ────────────────────────────────
   const [nameDraft, setNameDraft] = useState('');
+  /** "Move this conversation to another client" picker (known contacts). */
+  const [relinking, setRelinking] = useState(false);
   const saveAs = (as: ClientStatus) => {
     const name = nameDraft.trim();
     if (!name) return;
@@ -341,8 +344,44 @@ export function ClientPanel({ visible, onClose, number, clientName, onBook }: Pr
                     <Text style={styles.saveBtnLabel}>Save as client</Text>
                   </Pressable>
                 </View>
+                <Text style={[styles.sectionLabel, styles.orLabel, { color: theme.textSecondary }]}>
+                  Or link to an existing client
+                </Text>
+                <ClientPickerChips counterparty={number} />
               </View>
             )}
+
+            {/* Wrong contact? Move the conversation to another client. */}
+            {clientName ? (
+              <View style={styles.section}>
+                <Pressable
+                  onPress={() => {
+                    tapHaptic();
+                    setRelinking((v) => !v);
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Link this conversation to a different client (currently ${clientName})`}
+                  style={styles.relinkRow}
+                >
+                  <Ionicons name="swap-horizontal-outline" size={15} color={theme.accent} />
+                  <Text style={[styles.relinkLabel, { color: theme.accent }]}>
+                    Link to a different client
+                  </Text>
+                  <Ionicons
+                    name={relinking ? 'chevron-down' : 'chevron-forward'}
+                    size={14}
+                    color={theme.textTertiary}
+                  />
+                </Pressable>
+                {relinking ? (
+                  <ClientPickerChips
+                    counterparty={number}
+                    excludeName={clientName}
+                    onLinked={() => setRelinking(false)}
+                  />
+                ) : null}
+              </View>
+            ) : null}
 
             {/* Notes */}
             {clientName ? (
@@ -526,6 +565,14 @@ const styles = StyleSheet.create({
   numberLine: { fontSize: 13, fontWeight: '500', marginTop: 2 },
   section: { marginTop: SPACING.lg },
   sectionLabel: { fontSize: 12, fontWeight: '600', marginBottom: SPACING.sm },
+  orLabel: { marginTop: SPACING.md },
+  relinkRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    paddingVertical: 6,
+  },
+  relinkLabel: { flex: 1, fontSize: 13, fontWeight: '600' },
   chipRow: { flexDirection: 'row', gap: SPACING.sm },
   chip: {
     borderRadius: 999,

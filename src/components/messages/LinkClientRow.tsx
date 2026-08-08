@@ -2,30 +2,88 @@ import { Ionicons } from '@expo/vector-icons';
 import { useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { successHaptic, tapHaptic } from '../../lib/haptics';
-import { knownClients } from '../../lib/meetings';
-import { useClientMeta } from '../../store/clientMeta';
+import { allClientNames, linkThreadToClient } from '../../lib/linkClient';
+import { clientMetaKey, useClientMeta } from '../../store/clientMeta';
 import { useTasks } from '../../store/tasks';
 import { RADIUS, SPACING, useTheme } from '../../theme';
 
-interface Props {
-  /** The thread's counterparty (E.164) to save on the picked client. */
-  number: string;
-}
-
-/** Slim row above the composer for unlinked numbers: pick a client to attach it to. */
-export function LinkClientRow({ number }: Props) {
+/**
+ * Horizontal chip list of every existing client (meeting clients AND
+ * message-book contacts). Picking one attaches the thread's number/chat to
+ * that client via linkThreadToClient.
+ */
+export function ClientPickerChips({
+  counterparty,
+  excludeName,
+  onLinked,
+}: {
+  counterparty: string;
+  /** Hide this name from the list (the thread's current contact). */
+  excludeName?: string | null;
+  onLinked?: (client: string) => void;
+}) {
   const theme = useTheme();
   const tasks = useTasks((s) => s.tasks);
-  const setPhone = useClientMeta((s) => s.setPhone);
-  const [expanded, setExpanded] = useState(false);
+  const meta = useClientMeta((s) => s.meta);
 
-  const clients = useMemo(() => knownClients(tasks), [tasks]);
+  const clients = useMemo(() => {
+    const all = allClientNames(tasks, meta);
+    const skip = excludeName ? clientMetaKey(excludeName) : null;
+    return skip ? all.filter((c) => clientMetaKey(c) !== skip) : all;
+  }, [tasks, meta, excludeName]);
 
   const pick = (client: string) => {
-    successHaptic();
-    setPhone(client, number);
-    setExpanded(false);
+    const result = linkThreadToClient(counterparty, client);
+    if (result.ok) {
+      successHaptic();
+      onLinked?.(client);
+    }
   };
+
+  if (clients.length === 0) {
+    return (
+      <Text style={[styles.hint, { color: theme.textTertiary }]}>
+        Your other clients and contacts appear here.
+      </Text>
+    );
+  }
+  return (
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      keyboardShouldPersistTaps="handled"
+      contentContainerStyle={styles.chips}
+    >
+      {clients.map((c) => (
+        <Pressable
+          key={c}
+          onPress={() => pick(c)}
+          accessibilityRole="button"
+          accessibilityLabel={`Link to ${c}`}
+          style={({ pressed }) => [
+            styles.chip,
+            { backgroundColor: theme.surface },
+            pressed && { backgroundColor: theme.accentSoft },
+          ]}
+        >
+          <Text style={[styles.chipLabel, { color: theme.text }]} numberOfLines={1}>
+            {c}
+          </Text>
+        </Pressable>
+      ))}
+    </ScrollView>
+  );
+}
+
+interface Props {
+  /** The thread's counterparty — E.164, or 'tgc:<chatId>' for Telegram. */
+  counterparty: string;
+}
+
+/** Slim row above the composer for unlinked threads: attach to an existing client. */
+export function LinkClientRow({ counterparty }: Props) {
+  const theme = useTheme();
+  const [expanded, setExpanded] = useState(false);
 
   return (
     <View
@@ -40,7 +98,7 @@ export function LinkClientRow({ number }: Props) {
           setExpanded((v) => !v);
         }}
         accessibilityRole="button"
-        accessibilityLabel="Link this number to a client"
+        accessibilityLabel="Link this conversation to a client"
         style={styles.row}
       >
         <Ionicons name="person-add-outline" size={16} color={theme.accent} />
@@ -52,35 +110,10 @@ export function LinkClientRow({ number }: Props) {
         />
       </Pressable>
       {expanded ? (
-        clients.length > 0 ? (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            keyboardShouldPersistTaps="handled"
-            contentContainerStyle={styles.chips}
-          >
-            {clients.map((c) => (
-              <Pressable
-                key={c}
-                onPress={() => pick(c)}
-                accessibilityRole="button"
-                style={({ pressed }) => [
-                  styles.chip,
-                  { backgroundColor: theme.surface },
-                  pressed && { backgroundColor: theme.accentSoft },
-                ]}
-              >
-                <Text style={[styles.chipLabel, { color: theme.text }]} numberOfLines={1}>
-                  {c}
-                </Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-        ) : (
-          <Text style={[styles.hint, { color: theme.textTertiary }]}>
-            Clients appear here once you have added a meeting with one.
-          </Text>
-        )
+        <ClientPickerChips
+          counterparty={counterparty}
+          onLinked={() => setExpanded(false)}
+        />
       ) : null}
     </View>
   );
