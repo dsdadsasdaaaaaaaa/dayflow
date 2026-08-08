@@ -100,11 +100,15 @@ export default function MessagesScreen() {
   const tgConfigured = tgImportedChatIds.length > 0;
   const anyConfigured = configured || tgConfigured;
 
-  // Refresh the credential gate and pull new traffic on mount + every focus.
+  // Refresh the credential gate and pull new traffic on mount + every focus,
+  // then keep the list live with a gentle incremental re-sync while it stays
+  // on screen (incremental syncs only fetch past the high-water mark — cheap).
   useFocusEffect(
     useCallback(() => {
       void refreshConfigured().then(() => sync());
       if (tgConfigured) void connectAndSync();
+      const id = setInterval(() => void sync(), 15000);
+      return () => clearInterval(id);
     }, [refreshConfigured, sync, tgConfigured, connectAndSync])
   );
 

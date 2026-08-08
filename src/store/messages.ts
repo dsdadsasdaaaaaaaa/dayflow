@@ -6,6 +6,7 @@ import {
   cancelScheduledSms,
   fetchSmsStatus,
   listOlderSms,
+  listInboundFrom,
   listRecentSms,
   scheduleSms,
   sendSms,
@@ -132,6 +133,11 @@ interface MessagesState {
   /** Drop a failed send without retrying. */
   discardOutbox: (localId: string) => void;
   markRead: (counterparty: string) => void;
+  /**
+   * Live-thread poll: one cheap query for this counterparty's inbound today.
+   * Runs every few seconds while their conversation is open on screen.
+   */
+  pollThread: (counterparty: string) => Promise<void>;
   /** Persist an unsent composer draft per thread ('' clears). Works for
    * Telegram counterparties ('tgc:…') too — one map for both channels. */
   setThreadDraft: (counterparty: string, text: string) => void;
@@ -475,6 +481,32 @@ export const useMessages = create<MessagesState>()(
         set((s) => ({
           lastReadAt: { ...s.lastReadAt, [normalizePhone(counterparty)]: Date.now() },
         })),
+
+      pollThread: async (counterparty) => {
+        const creds = await loadSmsCredentials();
+        if (!creds) return;
+        const gen = get().generation;
+        try {
+          const knownMediaSids = new Set(
+            Object.values(get().messages)
+              .filter((m) => m.mediaUrls && m.mediaUrls.length > 0)
+              .map((m) => m.sid)
+          );
+          const fetched = await listInboundFrom(creds, counterparty, 10, knownMediaSids);
+          const hasNew = fetched.some((m) => !get().messages[m.sid]);
+          if (!hasNew) return;
+          set((s) => {
+            if (s.generation !== gen) return s;
+            const messages = { ...s.messages };
+            for (const m of fetched) mergeMessage(messages, m);
+            // lastSyncAt drives the thread screen's mark-read effect, so the
+            // just-arrived message doesn't linger as "unread" while visible.
+            return { messages, lastSyncAt: Date.now() };
+          });
+        } catch {
+          // Poll misses are fine — the next tick (or full sync) catches up.
+        }
+      },
 
       setThreadDraft: (counterparty, text) =>
         set((s) => {

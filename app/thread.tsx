@@ -223,6 +223,20 @@ export default function ThreadScreen() {
     if (isTelegram && number && focusedRef.current) tgMarkRead(number);
   }, [isTelegram, number, tgMessages, tgMarkRead]);
 
+  // SMS has no live socket — while THIS conversation is open on screen, poll
+  // for their next message every few seconds so it lands before the user has
+  // finished typing a reply. One cheap single-counterparty query per tick;
+  // stops the moment the screen blurs.
+  const pollThread = useMessages((s) => s.pollThread);
+  useFocusEffect(
+    useCallback(() => {
+      if (isTelegram || !number) return;
+      void pollThread(number);
+      const id = setInterval(() => void pollThread(number), 4000);
+      return () => clearInterval(id);
+    }, [isTelegram, number, pollThread])
+  );
+
   const known = useMemo(() => knownClients(tasks), [tasks]);
   const clientName = useMemo(
     () =>

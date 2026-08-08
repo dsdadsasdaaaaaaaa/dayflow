@@ -319,6 +319,29 @@ export async function listOlderSms(
   return merged;
 }
 
+/**
+ * Live-thread poll: ONE query for today's inbound from a single counterparty.
+ * Cheap enough to run every few seconds while a conversation is open on
+ * screen, so their reply appears before the user finishes typing theirs.
+ * Day-granular filter → results overlap already-cached messages; callers
+ * merge by SID (idempotent).
+ */
+export async function listInboundFrom(
+  creds: SmsCredentials,
+  counterparty: string,
+  pageSize = 10,
+  skipMediaSids?: ReadonlySet<string>
+): Promise<SmsMessage[]> {
+  const own = encodeURIComponent(normalizePhone(creds.fromNumber));
+  const other = encodeURIComponent(normalizePhone(counterparty));
+  const floor = `&DateSent%3E=${isoDateOf(Date.now())}`;
+  const url = `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&To=${own}&From=${other}${floor}`;
+  const records = await fetchMessagePages(creds, url, 1);
+  const { merged, needsMedia } = mergeRecords(records, creds.fromNumber, skipMediaSids);
+  await resolveMediaFor(creds, needsMedia);
+  return merged;
+}
+
 /** Refresh one message's record (cheap — used to settle outbound status). */
 export async function fetchSmsStatus(
   creds: SmsCredentials,
