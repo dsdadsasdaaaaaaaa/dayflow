@@ -1,7 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import { listRecentSms, sendSms, type SmsMessage } from '../lib/smsApi';
+import { fetchSmsStatus, listRecentSms, sendSms, type SmsMessage } from '../lib/smsApi';
 import { loadSmsCredentials, normalizePhone } from '../lib/smsCredentials';
 
 /**
@@ -85,6 +85,16 @@ export const useMessages = create<MessagesState>()(
         try {
           const sent = await sendSms(creds, target, body);
           set((s) => ({ messages: { ...s.messages, [sent.sid]: sent } }));
+          // Twilio answers "queued" immediately; settle the real status with
+          // two cheap single-message checks instead of a full history sync.
+          for (const delay of [4000, 15000]) {
+            setTimeout(async () => {
+              const updated = await fetchSmsStatus(creds, sent.sid);
+              if (updated) {
+                set((s) => ({ messages: { ...s.messages, [updated.sid]: updated } }));
+              }
+            }, delay);
+          }
           return true;
         } catch (e) {
           set({ lastError: e instanceof Error ? e.message : 'Send failed' });

@@ -109,8 +109,10 @@ export default function ThreadScreen() {
         type: 'message',
         key: m.sid,
         msg: m,
+        // Only surface real problems — queued/sending settle on their own
+        // (the store re-checks the status after a send).
         showStatus:
-          m.sid === lastOutSid && m.status !== 'delivered' && m.status !== 'sent',
+          m.sid === lastOutSid && (m.status === 'failed' || m.status === 'undelivered'),
       });
     }
     return out.reverse();
@@ -118,11 +120,12 @@ export default function ThreadScreen() {
 
   const handleSend = useCallback(
     async (body: string) => {
-      const ok = await send(number, body);
-      if (ok) void sync();
-      return ok;
+      // The store merges the sent message optimistically and settles its
+      // status itself — no full history re-sync needed here (it was the
+      // cause of multi-second sends).
+      return send(number, body);
     },
-    [send, sync, number]
+    [send, number]
   );
 
   const subtitle = clientName

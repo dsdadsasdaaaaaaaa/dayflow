@@ -123,6 +123,23 @@ export async function listRecentSms(
   return merged;
 }
 
+/** Refresh one message's record (cheap — used to settle outbound status). */
+export async function fetchSmsStatus(
+  creds: SmsCredentials,
+  sid: string
+): Promise<SmsMessage | null> {
+  try {
+    const res = await fetch(`${baseUrl(creds)}/Messages/${encodeURIComponent(sid)}.json`, {
+      headers: { Authorization: authHeader(creds) },
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as TwilioMessageRecord;
+    return toSmsMessage(json, creds.fromNumber);
+  } catch {
+    return null;
+  }
+}
+
 /** Cheap credential check: fetches the account resource. */
 export async function verifySmsCredentials(creds: SmsCredentials): Promise<boolean> {
   try {
