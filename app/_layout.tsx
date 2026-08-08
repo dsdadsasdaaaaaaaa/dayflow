@@ -21,6 +21,8 @@ import {
   registerSafetyCategory,
 } from '../src/lib/safety';
 import { subscribeWidgetSync } from '../src/lib/widgetBridge';
+import { loadSmsCredentials } from '../src/lib/smsCredentials';
+import { ensureVoiceFunctionCurrent } from '../src/lib/voiceApi';
 import { useSettings } from '../src/store/settings';
 import { useTasks } from '../src/store/tasks';
 import { useTheme } from '../src/theme';
@@ -108,6 +110,39 @@ export default function RootLayout() {
     void checkInboundNow();
     const sub = AppState.addEventListener('change', (state) => {
       if (state === 'active') void checkInboundNow();
+    });
+    return () => sub.remove();
+  }, []);
+
+  // Self-healing voice deploy: TwiML fixes ship inside the app, but they only
+  // protect the user once they're ON their Twilio account. Requiring a manual
+  // "Save changes" tap left a real identity leak live for days — so the app
+  // now rolls out voice-function updates itself, once per session, silently.
+  useEffect(() => {
+    if (Platform.OS !== 'ios') return;
+    let attempted = false;
+    const heal = async () => {
+      if (attempted) return;
+      const s = useSettings.getState().settings;
+      if (!s.callingEnabled) return;
+      attempted = true;
+      try {
+        const creds = await loadSmsCredentials();
+        if (!creds) return;
+        const result = await ensureVoiceFunctionCurrent(creds, {
+          forwardTo: s.callForwardTo,
+          showWorkNumber: s.callShowWorkNumber,
+          greeting: s.voicemailGreeting,
+        });
+        // Failure: retry next foreground (deploys are idempotent).
+        if (!result.ok) attempted = false;
+      } catch {
+        attempted = false;
+      }
+    };
+    void heal();
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') void heal();
     });
     return () => sub.remove();
   }, []);

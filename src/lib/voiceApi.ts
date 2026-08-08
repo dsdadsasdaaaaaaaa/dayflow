@@ -584,6 +584,29 @@ export async function setEnvVariables(
   }
 }
 
+/**
+ * Self-healing rollout: if the voice function source shipped in this app
+ * version differs from what's deployed on the user's Twilio account, redeploy
+ * it and refresh the env vars — no manual "Save changes" required. Cheap when
+ * current (one AsyncStorage read). Call on app foreground when calling is on.
+ */
+export async function ensureVoiceFunctionCurrent(
+  creds: SmsCredentials,
+  cfg: CallingConfig
+): Promise<VoiceOkResult> {
+  try {
+    const persisted = await loadPersisted();
+    if (persisted.voiceUrl && persisted.sourceHash === FUNCTION_SOURCE_HASH) {
+      return { ok: true };
+    }
+    const deployed = await deployVoiceFunction(creds);
+    if (!deployed.ok) return deployed;
+    return setEnvVariables(creds, varsFor(cfg));
+  } catch (e) {
+    return fail(e instanceof Error ? e.message : 'Voice update failed.');
+  }
+}
+
 function varsFor(cfg: CallingConfig): VoiceEnvVars {
   return {
     FORWARD_TO: cfg.forwardTo ? normalizePhone(cfg.forwardTo) : '',
