@@ -14,6 +14,7 @@ import {
 } from '../src/components/clients/ClientPhoneRow';
 import { DepositRow } from '../src/components/clients/DepositRow';
 import { MessageButton } from '../src/components/clients/MessageButton';
+import { startClientCall } from '../src/components/messages/ClientPanel';
 import { RebookSuggestion } from '../src/components/clients/RebookSuggestion';
 import { StatTile } from '../src/components/clients/StatTile';
 import { StatusChips } from '../src/components/clients/StatusChips';
@@ -61,6 +62,8 @@ export default function ClientDetailScreen() {
   const togglePaid = useTasks((s) => s.togglePaid);
   const log = useMeetingSession((s) => s.log);
   const symbol = useSettings((s) => s.settings.currencySymbol);
+  const callingEnabled = useSettings((s) => s.settings.callingEnabled);
+  const callForwardTo = useSettings((s) => s.settings.callForwardTo);
   const metaMap = useClientMeta((s) => s.meta);
   const setStatus = useClientMeta((s) => s.setStatus);
 
@@ -78,6 +81,8 @@ export default function ClientDetailScreen() {
     ? effectiveStatus(metaMap, displayName, (profile?.meetingsDone ?? 0) > 0)
     : 'lead';
   const blocked = status === 'blocked';
+  /** Linked phone number (E.164) — gates the Call action. */
+  const phone = metaMap[clientMetaKey(displayName)]?.phone ?? '';
 
   /** Recent completed occurrences for this client, newest first, capped at 20. */
   const history = useMemo(() => {
@@ -219,6 +224,24 @@ export default function ClientDetailScreen() {
         <View>
           <SectionLabel>Phone</SectionLabel>
           <ClientPhoneRow ref={phoneRowRef} client={displayName} />
+          {phone ? (
+            <Pressable
+              onPress={() => {
+                tapHaptic();
+                startClientCall(callingEnabled, callForwardTo, phone, displayName);
+              }}
+              accessibilityRole="button"
+              accessibilityLabel={`Call ${displayName}`}
+              style={({ pressed }) => [
+                styles.callBtn,
+                { backgroundColor: theme.surface },
+                pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] },
+              ]}
+            >
+              <Ionicons name="call-outline" size={17} color={theme.accent} />
+              <Text style={[styles.callBtnLabel, { color: theme.accent }]}>Call</Text>
+            </Pressable>
+          ) : null}
         </View>
 
         {/* Notes */}
@@ -411,6 +434,20 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginTop: SPACING.xl,
     marginBottom: SPACING.sm + 2,
+  },
+  callBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    borderRadius: 12,
+    paddingVertical: 12,
+    marginTop: SPACING.sm,
+  },
+  callBtnLabel: {
+    fontSize: 14,
+    fontWeight: '700',
+    letterSpacing: 0.2,
   },
   settleRow: {
     flexDirection: 'row',

@@ -3,6 +3,7 @@ import * as Clipboard from 'expo-clipboard';
 import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -17,6 +18,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { formatDayRelative } from '../../lib/dates';
 import { selectionHaptic, successHaptic, tapHaptic } from '../../lib/haptics';
 import { clientProfiles, formatMoney, knownClients } from '../../lib/meetings';
+import { loadSmsCredentials } from '../../lib/smsCredentials';
+import { clickToCall } from '../../lib/voiceApi';
 import {
   clientMetaKey,
   effectiveStatus,
@@ -31,6 +34,44 @@ import { formatPhoneDisplay } from './format';
 
 /** Lead/warning accent from the contract's CRM layer. */
 export const LEAD_AMBER = '#D97706';
+
+/**
+ * Shared click-to-call flow: gate on the calling setting, confirm, then ask
+ * Twilio to ring the user's own cell and bridge in the client. The client
+ * only ever sees the work number.
+ */
+export function startClientCall(
+  callingEnabled: boolean,
+  forwardTo: string,
+  number: string,
+  clientName?: string | null
+): void {
+  const label = clientName ?? formatPhoneDisplay(number);
+  if (!callingEnabled) {
+    Alert.alert('Calling is off', 'Turn on calling in Settings → Calling & voicemail first.');
+    return;
+  }
+  Alert.alert(
+    'Call via your work number?',
+    `Your phone rings first — answer and we connect ${label}. They see your work number.`,
+    [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Call',
+        onPress: async () => {
+          const creds = await loadSmsCredentials();
+          if (!creds) {
+            Alert.alert('Call failed', 'Connect messaging in Settings first.');
+            return;
+          }
+          const res = await clickToCall(creds, forwardTo, number);
+          if (res.ok) Alert.alert('Calling — pick up your phone.');
+          else Alert.alert('Call failed', res.error);
+        },
+      },
+    ]
+  );
+}
 
 interface Props {
   visible: boolean;
@@ -59,6 +100,8 @@ export function ClientPanel({ visible, onClose, number, clientName, onBook }: Pr
   const setNotes = useClientMeta((s) => s.setNotes);
   const upsertContact = useClientMeta((s) => s.upsertContact);
   const symbol = useSettings((s) => s.settings.currencySymbol);
+  const callingEnabled = useSettings((s) => s.settings.callingEnabled);
+  const callForwardTo = useSettings((s) => s.settings.callForwardTo);
 
   const hasMeetings = useMemo(
     () =>
@@ -350,6 +393,17 @@ export function ClientPanel({ visible, onClose, number, clientName, onBook }: Pr
 
             {/* Actions */}
             <View style={[styles.actions, { borderTopColor: theme.separator }]}>
+              {clientName ? (
+                <ActionRow
+                  icon="call-outline"
+                  label="Call"
+                  color={theme.accent}
+                  onPress={() => {
+                    tapHaptic();
+                    startClientCall(callingEnabled, callForwardTo, number, clientName);
+                  }}
+                />
+              ) : null}
               {clientName ? (
                 <ActionRow
                   icon="calendar-outline"

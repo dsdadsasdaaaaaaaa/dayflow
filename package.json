@@ -9,6 +9,7 @@
     "@react-native-community/datetimepicker": "9.1.0",
     "dayjs": "^1.11.21",
     "expo": "~57.0.6",
+    "expo-audio": "~57.0.3",
     "expo-background-task": "~57.0.8",
     "expo-blur": "~57.0.2",
     "expo-calendar": "~57.0.1",

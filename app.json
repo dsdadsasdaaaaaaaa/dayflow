@@ -60,7 +60,8 @@
       ],
       "@react-native-community/datetimepicker",
       "expo-secure-store",
-      "expo-background-task"
+      "expo-background-task",
+      "expo-audio"
     ],
     "extra": {
       "router": {},

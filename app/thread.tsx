@@ -13,7 +13,11 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BackButton } from '../src/components/clients/BackButton';
-import { ClientPanel, LEAD_AMBER } from '../src/components/messages/ClientPanel';
+import {
+  ClientPanel,
+  LEAD_AMBER,
+  startClientCall,
+} from '../src/components/messages/ClientPanel';
 import { Composer } from '../src/components/messages/Composer';
 import { ErrorBanner } from '../src/components/messages/ErrorBanner';
 import { LinkClientRow } from '../src/components/messages/LinkClientRow';
@@ -294,12 +298,31 @@ export default function ThreadScreen() {
             <Text style={[styles.title, { color: theme.text }]} numberOfLines={1}>
               {clientName ?? formatPhoneDisplay(number)}
             </Text>
+            {/* Small chevron so the contact panel is discoverable. */}
+            <Ionicons name="chevron-down" size={12} color={theme.textTertiary} />
           </View>
           {subtitle ? (
             <Text style={[styles.subtitle, { color: theme.textSecondary }]} numberOfLines={1}>
               {subtitle}
             </Text>
           ) : null}
+        </Pressable>
+        <Pressable
+          onPress={() => {
+            tapHaptic();
+            startClientCall(
+              settings.callingEnabled,
+              settings.callForwardTo,
+              number,
+              clientName
+            );
+          }}
+          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityLabel={`Call ${clientName ?? formatPhoneDisplay(number)}`}
+          style={[styles.calendarBtn, { backgroundColor: theme.surface }]}
+        >
+          <Ionicons name="call-outline" size={18} color={theme.accent} />
         </Pressable>
         {clientName ? (
           <Pressable

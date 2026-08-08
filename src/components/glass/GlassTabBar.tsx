@@ -2,6 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { selectionHaptic } from '../../lib/haptics';
+import { unheardCount, useCalls } from '../../store/calls';
 import { isPhoneBlocked, useClientMeta } from '../../store/clientMeta';
 import { buildThreads, useMessages } from '../../store/messages';
 import { useTheme } from '../../theme';
@@ -42,6 +43,9 @@ export function GlassTabBar({ state, descriptors, navigation }: TabBarProps) {
       .filter((t) => !isPhoneBlocked(meta, t.counterparty))
       .reduce((sum, t) => sum + t.unread, 0)
   );
+  // Unheard voicemails join unread texts on the messages badge.
+  const unheardVoicemails = useCalls((s) => unheardCount(s, meta));
+  const badgeCount = unread + unheardVoicemails;
 
   return (
     <View
@@ -87,9 +91,9 @@ export function GlassTabBar({ state, descriptors, navigation }: TabBarProps) {
                 size={23}
                 color={focused ? theme.accent : theme.textTertiary}
               />
-              {route.name === 'messages' && unread > 0 ? (
+              {route.name === 'messages' && badgeCount > 0 ? (
                 <View style={[styles.badge, { backgroundColor: theme.accent }]}>
-                  <Text style={styles.badgeLabel}>{unread > 9 ? '9+' : unread}</Text>
+                  <Text style={styles.badgeLabel}>{badgeCount > 9 ? '9+' : badgeCount}</Text>
                 </View>
               ) : null}
             </View>

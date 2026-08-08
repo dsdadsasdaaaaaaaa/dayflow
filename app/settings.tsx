@@ -19,6 +19,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AlertChips } from '../src/components/settings/AlertChips';
 import { BackupsModal } from '../src/components/settings/BackupsModal';
+import { CallingSection } from '../src/components/settings/CallingSection';
 import { GlassSegmented } from '../src/components/settings/GlassSegmented';
 import { CalendarToggles } from '../src/components/settings/CalendarToggles';
 import { CurrencyPicker } from '../src/components/settings/CurrencyPicker';
@@ -473,6 +474,8 @@ export default function SettingsScreen() {
         </SettingsSection>
 
         <MessagingSection />
+
+        <CallingSection />
 
         <SettingsSection title="Focus" delay={135}>
           <SettingsRow

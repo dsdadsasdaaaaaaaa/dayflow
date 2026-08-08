@@ -209,6 +209,14 @@ export interface Settings {
    * Assets) the user can attach to an MMS instantly, with a short label.
    */
   photoQuickReplies: { label: string; url: string }[];
+  /** Calling & voicemail through the user's own Twilio number. */
+  callingEnabled: boolean;
+  /** The user's personal cell (E.164) inbound calls forward to. Empty = straight to voicemail. */
+  callForwardTo: string;
+  /** Show the work (Twilio) number as caller ID on forwarded calls instead of the caller's. */
+  callShowWorkNumber: boolean;
+  /** Greeting spoken before recording a voicemail. */
+  voicemailGreeting: string;
   /** Require Face ID / passcode to open the app. */
   appLock: boolean;
   onboardingDone: boolean;

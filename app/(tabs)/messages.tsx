@@ -21,6 +21,7 @@ import { NewMessageSheet } from '../../src/components/messages/NewMessageSheet';
 import { SetupCard } from '../../src/components/messages/SetupCard';
 import { tapHaptic } from '../../src/lib/haptics';
 import { knownClients } from '../../src/lib/meetings';
+import { unheardCount, useCalls } from '../../src/store/calls';
 import {
   clientMetaKey,
   clientNameForPhone,
@@ -54,6 +55,8 @@ export default function MessagesScreen() {
   const sync = useMessages((s) => s.sync);
   const tasks = useTasks((s) => s.tasks);
   const meta = useClientMeta((s) => s.meta);
+  // Unheard voicemail count for the calls-button badge (blocked excluded).
+  const unheardVoicemails = useCalls((s) => unheardCount(s, meta));
 
   const [sheetOpen, setSheetOpen] = useState(false);
   const [dismissedError, setDismissedError] = useState<string | null>(null);
@@ -179,6 +182,29 @@ export default function MessagesScreen() {
   const headerRight = (
     <View style={styles.headerRight}>
       {syncing ? <ActivityIndicator size="small" color={theme.textTertiary} /> : null}
+      <Pressable
+        onPress={() => {
+          tapHaptic();
+          router.push('/calls');
+        }}
+        hitSlop={8}
+        accessibilityRole="button"
+        accessibilityLabel={
+          unheardVoicemails > 0
+            ? `Calls, ${unheardVoicemails} new voicemail${unheardVoicemails === 1 ? '' : 's'}`
+            : 'Calls'
+        }
+        style={[styles.iconBtn, { backgroundColor: theme.surface }]}
+      >
+        <Ionicons name="call-outline" size={19} color={theme.accent} />
+        {unheardVoicemails > 0 ? (
+          <View style={[styles.callBadge, { backgroundColor: theme.accent }]}>
+            <Text style={styles.callBadgeLabel}>
+              {unheardVoicemails > 9 ? '9+' : unheardVoicemails}
+            </Text>
+          </View>
+        ) : null}
+      </Pressable>
       {configured ? (
         <Pressable
           onPress={() => {
@@ -313,6 +339,18 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  callBadge: {
+    position: 'absolute',
+    top: -2,
+    right: -3,
+    minWidth: 15,
+    height: 15,
+    borderRadius: 8,
+    paddingHorizontal: 3,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  callBadgeLabel: { color: '#FFFFFF', fontSize: 9, fontWeight: '700' },
   setupContent: { paddingHorizontal: SPACING.lg, paddingTop: SPACING.sm },
   emptyContent: { paddingHorizontal: SPACING.lg, alignItems: 'center' },
   newBtn: {

@@ -28,6 +28,10 @@ export const DEFAULT_SETTINGS: Settings = {
     'Running about 10 minutes late, be there soon.',
   ],
   photoQuickReplies: [],
+  callingEnabled: false,
+  callForwardTo: '',
+  callShowWorkNumber: false,
+  voicemailGreeting: "Sorry I missed you — leave a message after the tone and I'll text you back.",
   appLock: false,
   onboardingDone: false,
 };

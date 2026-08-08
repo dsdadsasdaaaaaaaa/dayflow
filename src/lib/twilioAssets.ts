@@ -155,7 +155,7 @@ async function createService(creds: SmsCredentials): Promise<string | null> {
   return str(res.json, 'sid');
 }
 
-interface EnvironmentInfo {
+export interface EnvironmentInfo {
   sid: string;
   domainName: string;
 }
@@ -339,13 +339,54 @@ async function latestAssetVersion(
   return { versionSid, path, visibility: str(rec, 'visibility') ?? 'public' };
 }
 
+interface FunctionEntry {
+  sid: string;
+}
+
+async function listFunctions(
+  creds: SmsCredentials,
+  serviceSid: string
+): Promise<FunctionEntry[] | null> {
+  const res = await restGet(
+    creds,
+    `${SERVERLESS}/Services/${serviceSid}/Functions?PageSize=${MAX_BUNDLED_ASSETS}`
+  );
+  if (!res.ok) return null;
+  const list = res.json?.functions;
+  if (!Array.isArray(list)) return null;
+  const out: FunctionEntry[] = [];
+  for (const item of list) {
+    const sid = str(asRecord(item), 'sid');
+    if (sid) out.push({ sid });
+  }
+  return out;
+}
+
+/** Latest version sid of one Function (any visibility — Functions must stay live). */
+async function latestFunctionVersionSid(
+  creds: SmsCredentials,
+  serviceSid: string,
+  functionSid: string
+): Promise<string | null> {
+  const res = await restGet(
+    creds,
+    `${SERVERLESS}/Services/${serviceSid}/Functions/${functionSid}/Versions?PageSize=1`
+  );
+  if (!res.ok) return null;
+  const list = res.json?.function_versions;
+  if (!Array.isArray(list) || list.length === 0) return null;
+  return str(asRecord(list[0]), 'sid');
+}
+
 async function createBuild(
   creds: SmsCredentials,
   serviceSid: string,
-  assetVersionSids: string[]
+  assetVersionSids: string[],
+  functionVersionSids: string[]
 ): Promise<string | null> {
   const form = new URLSearchParams();
   for (const sid of assetVersionSids) form.append('AssetVersions', sid);
+  for (const sid of functionVersionSids) form.append('FunctionVersions', sid);
   const res = await restPostForm(creds, `${SERVERLESS}/Services/${serviceSid}/Builds`, form);
   if (!res.ok) {
     console.warn('[twilioAssets]', restError('Build create', res));
@@ -415,7 +456,7 @@ export async function ensureAssetService(creds: SmsCredentials): Promise<EnsureS
 }
 
 /** Find-or-create the 'prod' Environment (its domain serves the photos). */
-async function ensureEnvironment(
+export async function ensureEnvironment(
   creds: SmsCredentials,
   serviceSid: string
 ): Promise<{ ok: true; env: EnvironmentInfo } | TwilioAssetsFailure> {
@@ -433,6 +474,58 @@ async function ensureEnvironment(
   if (!env) return fail('Could not set up the photo hosting domain.');
   await savePersisted({ environmentSid: env.sid, domainName: env.domainName });
   return { ok: true, env };
+}
+
+export interface LiveVersions {
+  /** Latest PUBLIC version of every asset. */
+  assetVersionSids: string[];
+  /** Latest version of every Function (any visibility). */
+  functionVersionSids: string[];
+}
+
+/**
+ * Everything currently live in the service that a new Build must re-bundle:
+ * the latest public version of each Asset PLUS the latest version of each
+ * Function. A Build replaces ALL live content on deploy, so omitting the
+ * voice Function here would kill its webhook on the next photo upload (and
+ * vice versa for photos on a voice deploy).
+ */
+export async function collectLiveVersions(
+  creds: SmsCredentials,
+  serviceSid: string
+): Promise<LiveVersions> {
+  const assetVersionSids: string[] = [];
+  const assets = await listAssets(creds, serviceSid);
+  if (assets) {
+    const latest = await Promise.all(
+      assets.slice(0, MAX_BUNDLED_ASSETS).map((a) => latestAssetVersion(creds, serviceSid, a.sid))
+    );
+    for (const v of latest) {
+      if (v && v.visibility === 'public') assetVersionSids.push(v.versionSid);
+    }
+  }
+
+  const functionVersionSids: string[] = [];
+  const fns = await listFunctions(creds, serviceSid);
+  if (fns) {
+    const latest = await Promise.all(
+      fns.map((f) => latestFunctionVersionSid(creds, serviceSid, f.sid))
+    );
+    for (const sid of latest) {
+      if (sid) functionVersionSids.push(sid);
+    }
+  }
+
+  return { assetVersionSids, functionVersionSids };
+}
+
+/** Flat list of every live version sid (assets + functions). */
+export async function collectLiveVersionSids(
+  creds: SmsCredentials,
+  serviceSid: string
+): Promise<string[]> {
+  const live = await collectLiveVersions(creds, serviceSid);
+  return [...live.assetVersionSids, ...live.functionVersionSids];
 }
 
 /** "/photo-....jpg" — URL-safe path for a new asset. */
@@ -470,22 +563,20 @@ export async function uploadPhotoAsset(
     const version = await uploadAssetVersion(creds, serviceSid, assetSid, localUri, path, mimeType);
     if (!version) return fail('Photo upload failed. Check your connection and try again.');
 
-    // A build must include EVERY asset version that should stay live, so
-    // collect the latest public version of each existing asset too.
-    const versionSids = new Set<string>([version.versionSid]);
-    const assets = await listAssets(creds, serviceSid);
-    if (assets) {
-      const others = assets.filter((a) => a.sid !== assetSid).slice(0, MAX_BUNDLED_ASSETS);
-      const latest = await Promise.all(
-        others.map((a) => latestAssetVersion(creds, serviceSid, a.sid))
-      );
-      for (const v of latest) {
-        if (v && v.visibility === 'public') versionSids.add(v.versionSid);
-      }
-    }
+    // A build must include EVERY version that should stay live — existing
+    // public assets AND every Function (e.g. the voice webhook), or they go
+    // offline when this build deploys.
+    const live = await collectLiveVersions(creds, serviceSid);
+    const versionSids = new Set<string>([version.versionSid, ...live.assetVersionSids]);
 
-    console.log('[twilioAssets] building with', versionSids.size, 'asset version(s)');
-    const buildSid = await createBuild(creds, serviceSid, [...versionSids]);
+    console.log(
+      '[twilioAssets] building with',
+      versionSids.size,
+      'asset +',
+      live.functionVersionSids.length,
+      'function version(s)'
+    );
+    const buildSid = await createBuild(creds, serviceSid, [...versionSids], live.functionVersionSids);
     if (!buildSid) return fail('Could not start the photo publish step.');
 
     const buildStatus = await waitForBuild(creds, serviceSid, buildSid);
