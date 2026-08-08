@@ -23,6 +23,7 @@ import {
 import { DepositRow } from '../src/components/clients/DepositRow';
 import { MessageButton } from '../src/components/clients/MessageButton';
 import { startClientCall } from '../src/components/messages/ClientPanel';
+import { buildDepositRequest } from '../src/components/messages/QuickReplies';
 import { RebookSuggestion } from '../src/components/clients/RebookSuggestion';
 import { StatTile } from '../src/components/clients/StatTile';
 import { StatusChips } from '../src/components/clients/StatusChips';
@@ -144,6 +145,20 @@ export default function ClientDetailScreen() {
   const bookAgain = () => {
     tapHaptic();
     router.push(`/task-editor?client=${encodeURIComponent(displayName)}`);
+  };
+
+  /** Open the thread with a deposit-request draft prefilled (phone required). */
+  const requestDeposit = () => {
+    if (!phone) return;
+    tapHaptic();
+    const draft = buildDepositRequest({
+      occurrence: nextOcc ? { task: nextOcc.task, dateKey: nextOcc.dateKey } : null,
+      fallbackRate: profile?.rate ?? 0,
+      symbol,
+    });
+    router.push(
+      `/thread?number=${encodeURIComponent(phone)}&draft=${encodeURIComponent(draft)}`
+    );
   };
 
   const saveName = () => {
@@ -390,6 +405,23 @@ export default function ClientDetailScreen() {
           <View>
             <SectionLabel>Upcoming</SectionLabel>
             <DepositRow task={nextOcc.task} dateKey={nextOcc.dateKey} />
+            {phone ? (
+              <Pressable
+                onPress={requestDeposit}
+                accessibilityRole="button"
+                accessibilityLabel={`Request a deposit from ${displayName}`}
+                style={({ pressed }) => [
+                  styles.callBtn,
+                  { backgroundColor: theme.surface },
+                  pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] },
+                ]}
+              >
+                <Ionicons name="wallet-outline" size={17} color={theme.accent} />
+                <Text style={[styles.callBtnLabel, { color: theme.accent }]}>
+                  Request deposit
+                </Text>
+              </Pressable>
+            ) : null}
           </View>
         ) : null}
 

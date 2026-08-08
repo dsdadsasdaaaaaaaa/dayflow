@@ -51,6 +51,9 @@ export type VoiceOkResult = { ok: true } | VoiceApiFailure;
 export type ClickToCallResult = { ok: true; callSid: string } | VoiceApiFailure;
 export type ListCallsResult = { ok: true; calls: CallEntry[] } | VoiceApiFailure;
 export type ListVoicemailsResult = { ok: true; voicemails: VoicemailEntry[] } | VoiceApiFailure;
+export type ListTranscriptionsResult =
+  | { ok: true; transcriptions: TranscriptionEntry[] }
+  | VoiceApiFailure;
 export type DownloadRecordingResult = { ok: true; uri: string } | VoiceApiFailure;
 
 /** One call in the history list (internal forward legs already filtered out). */
@@ -79,6 +82,17 @@ export interface VoicemailEntry {
   recordedAt: number;
   /** Authed-fetchable .mp3 URL (see downloadRecording). */
   mediaUrl: string;
+}
+
+/** One voicemail transcription, joined to its recording via recordingSid. */
+export interface TranscriptionEntry {
+  /** Transcription SID. */
+  sid: string;
+  /** The recording this transcribes (VoicemailEntry.sid). */
+  recordingSid: string;
+  status: 'completed' | 'in-progress' | 'failed';
+  /** Empty until status is 'completed'. */
+  text: string;
 }
 
 /** What the deployed Function reads from its Environment Variables. */
@@ -120,7 +134,8 @@ const VOICE_FUNCTION_SOURCE = `exports.handler = function (context, event, callb
 
   function voicemail() {
     twiml.say(greeting);
-    twiml.record({ maxLength: 180, playBeep: true });
+    // Twilio only transcribes recordings up to 120s — cap maxLength there.
+    twiml.record({ maxLength: 120, playBeep: true, transcribe: true });
   }
 
   if (event.RecordingSid || event.RecordingUrl) {
@@ -814,6 +829,43 @@ export async function listVoicemails(
     return { ok: true, voicemails };
   } catch (e) {
     return fail(e instanceof Error ? e.message : 'Could not load voicemails.');
+  }
+}
+
+/**
+ * Recent voicemail transcriptions, newest first (as Twilio returns them).
+ * Joined to recordings by recordingSid; a recording with no transcription
+ * simply never shows up here (e.g. voicemails from before transcription
+ * was enabled).
+ */
+export async function listTranscriptions(
+  creds: SmsCredentials,
+  pageSize = 50
+): Promise<ListTranscriptionsResult> {
+  try {
+    const res = await restGet(creds, `${apiBase(creds)}/Transcriptions.json?PageSize=${pageSize}`);
+    if (!res.ok) return fail(restError('Transcription list', res));
+    const list = res.json?.transcriptions;
+    if (!Array.isArray(list)) return fail('Could not read the transcription list.');
+
+    const transcriptions: TranscriptionEntry[] = [];
+    for (const item of list) {
+      const rec = asRecord(item);
+      const sid = str(rec, 'sid');
+      const recordingSid = str(rec, 'recording_sid');
+      if (!sid || !recordingSid) continue;
+      const rawStatus = str(rec, 'status');
+      transcriptions.push({
+        sid,
+        recordingSid,
+        status:
+          rawStatus === 'completed' || rawStatus === 'failed' ? rawStatus : 'in-progress',
+        text: str(rec, 'transcription_text') ?? '',
+      });
+    }
+    return { ok: true, transcriptions };
+  } catch (e) {
+    return fail(e instanceof Error ? e.message : 'Could not load transcriptions.');
   }
 }
 

@@ -79,6 +79,8 @@ export default function CallsScreen() {
   const [dismissedError, setDismissedError] = useState<string | null>(null);
   const [loadingSid, setLoadingSid] = useState<string | null>(null);
   const [playingSid, setPlayingSid] = useState<string | null>(null);
+  /** Recording SID whose transcript is expanded to full text (one at a time). */
+  const [expandedSid, setExpandedSid] = useState<string | null>(null);
   const playerRef = useRef<ActivePlayer | null>(null);
 
   // Pull fresh history on mount + every focus (like the messages tab).
@@ -189,6 +191,11 @@ export default function CallsScreen() {
     router.push(`/thread?number=${encodeURIComponent(counterparty)}`);
   };
 
+  const toggleTranscript = useCallback((sid: string) => {
+    tapHaptic();
+    setExpandedSid((cur) => (cur === sid ? null : sid));
+  }, []);
+
   const playStateFor = (row: CallRowData): PlayState => {
     const sid = row.voicemail?.sid;
     if (!sid) return 'idle';
@@ -242,8 +249,12 @@ export default function CallsScreen() {
                 name={nameByNumber.get(item.counterparty) ?? null}
                 unheard={item.voicemail != null && !heardAt[item.voicemail.sid]}
                 playState={playStateFor(item)}
+                expanded={item.voicemail != null && expandedSid === item.voicemail.sid}
                 onPress={() => openThread(item.counterparty)}
                 onTogglePlay={() => void togglePlay(item)}
+                onToggleTranscript={() => {
+                  if (item.voicemail) toggleTranscript(item.voicemail.sid);
+                }}
               />
             )}
             ItemSeparatorComponent={() => (

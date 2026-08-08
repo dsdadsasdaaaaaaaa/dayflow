@@ -4,6 +4,7 @@ import * as TaskManager from 'expo-task-manager';
 import { Platform } from 'react-native';
 import { useClientMeta, isPhoneBlocked } from '../store/clientMeta';
 import { mergeMessage, useMessages } from '../store/messages';
+import { maybeEscalate } from './safety';
 import { listRecentSms } from './smsApi';
 import { loadSmsCredentials } from './smsCredentials';
 
@@ -77,6 +78,9 @@ async function notifyNewInbound(): Promise<void> {
 }
 
 TaskManager.defineTask(TASK_NAME, async () => {
+  // Missed-check-in escalation piggybacks on this wake (see lib/safety) —
+  // first, so a failed inbound fetch never delays a safety alert.
+  try { await maybeEscalate(); } catch {}
   try {
     await notifyNewInbound();
     return BackgroundTask.BackgroundTaskResult.Success;

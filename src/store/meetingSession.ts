@@ -9,6 +9,7 @@ import {
 import { uid } from '../lib/id';
 import { cancelMeetingAlerts, scheduleMeetingAlerts } from '../lib/meetingNotifications';
 import { formatMoney, meetingKindMeta, occurrenceAmount } from '../lib/meetings';
+import { armSafetyEscalation, disarmSafetyEscalation } from '../lib/safety';
 import type { ActiveMeeting, DayKey, MeetingKind, MeetingLogEntry, Task } from '../types';
 import { useSettings } from './settings';
 
@@ -86,6 +87,9 @@ export const useMeetingSession = create<MeetingSessionState>()(
             notificationIds,
           },
         });
+        // A fresh session proves the user is fine — stand down any pending
+        // missed-check-in escalation from the previous one.
+        void disarmSafetyEscalation();
         const kind = task.meeting?.kind ?? 'incall';
         void startMeetingActivity({
           clientName: label,
@@ -144,6 +148,12 @@ export const useMeetingSession = create<MeetingSessionState>()(
         // schedules the check-in at endedAt + checkInAfterMin.
         if (active.checkInAfterMin != null && active.checkInAfterMin > 0) {
           await scheduleMeetingAlerts('', endedAt, active.checkInAfterMin);
+          // Missed-check-in escalation (no-op unless enabled in Settings).
+          await armSafetyEscalation({
+            endAt: endedAt,
+            checkInAfterMin: active.checkInAfterMin,
+            taskId: active.taskId,
+          });
         }
         const actualMinutes = Math.max(
           1,

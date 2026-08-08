@@ -27,6 +27,7 @@ import { CurrencyPicker } from '../src/components/settings/CurrencyPicker';
 import { GoalStepper } from '../src/components/settings/GoalStepper';
 import { ImportBackupModal } from '../src/components/settings/ImportBackupModal';
 import { MessagingSection } from '../src/components/settings/MessagingSection';
+import { SafetySection } from '../src/components/settings/SafetySection';
 import { SettingsRow } from '../src/components/settings/SettingsRow';
 import { SettingsSection } from '../src/components/settings/SettingsSection';
 import { Stepper } from '../src/components/settings/Stepper';
@@ -528,6 +529,8 @@ export default function SettingsScreen() {
         <MessagingSection />
 
         <CallingSection />
+
+        <SafetySection />
 
         <SettingsSection title="Focus" delay={135}>
           <SettingsRow

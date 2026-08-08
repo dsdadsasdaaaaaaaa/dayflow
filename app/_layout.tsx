@@ -15,6 +15,11 @@ import {
   registerNotificationCategories,
   syncAllNotifications,
 } from '../src/lib/notifications';
+import {
+  handleSafetyNotificationResponse,
+  maybeEscalate,
+  registerSafetyCategory,
+} from '../src/lib/safety';
 import { subscribeWidgetSync } from '../src/lib/widgetBridge';
 import { useSettings } from '../src/store/settings';
 import { useTasks } from '../src/store/tasks';
@@ -41,12 +46,16 @@ export default function RootLayout() {
   useEffect(() => {
     if (Platform.OS !== 'ios') return;
     void registerNotificationCategories();
+    void registerSafetyCategory();
 
     const handleOnce = (response: Notifications.NotificationResponse | null) => {
       if (!response) return;
       const id = response.notification.request.identifier;
       if (handledResponseIds.current.has(id)) return;
       handledResponseIds.current.add(id);
+      // Safety check-in responses ("I'm OK" / a tap on the escalation
+      // warning) disarm the missed-check-in escalation.
+      if (handleSafetyNotificationResponse(response)) return;
       const thread = response.notification.request.content.data?.messageThread;
       if (typeof thread === 'string' && thread) {
         // Defer so the navigator is mounted when launched from a notification.
@@ -91,6 +100,19 @@ export default function RootLayout() {
     void checkInboundNow();
     const sub = AppState.addEventListener('change', (state) => {
       if (state === 'active') void checkInboundNow();
+    });
+    return () => sub.remove();
+  }, []);
+
+  // Missed-check-in escalation: check whenever the app runs. The small delay
+  // lets a launching notification response ("I'm OK", or a tap on the
+  // warning itself) disarm first — never alert a user who just responded.
+  useEffect(() => {
+    if (Platform.OS !== 'ios') return;
+    const check = () => setTimeout(() => void maybeEscalate(), 1200);
+    check();
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') check();
     });
     return () => sub.remove();
   }, []);

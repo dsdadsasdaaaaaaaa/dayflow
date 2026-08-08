@@ -23,7 +23,13 @@ import { ErrorBanner } from '../src/components/messages/ErrorBanner';
 import { LinkClientRow } from '../src/components/messages/LinkClientRow';
 import { MessageBubble } from '../src/components/messages/MessageBubble';
 import { PhotoViewer } from '../src/components/messages/PhotoViewer';
-import { QuickReplies, type PhotoReply } from '../src/components/messages/QuickReplies';
+import {
+  QuickReplies,
+  buildDepositRequest,
+  type PhotoReply,
+  type QuickAction,
+} from '../src/components/messages/QuickReplies';
+import { ShareAvailability } from '../src/components/messages/ShareAvailability';
 import { formatPhoneDisplay } from '../src/components/messages/format';
 import {
   addDays,
@@ -38,6 +44,7 @@ import {
 import { tapHaptic } from '../src/lib/haptics';
 import {
   knownClients,
+  lastMeetingFor,
   meetingOccurrences,
   type MeetingOccurrence,
 } from '../src/lib/meetings';
@@ -80,7 +87,7 @@ export default function ThreadScreen() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const params = useLocalSearchParams<{ number?: string }>();
+  const params = useLocalSearchParams<{ number?: string; draft?: string }>();
   const number = normalizePhone(typeof params.number === 'string' ? params.number : '');
 
   const messages = useMessages((s) => s.messages);
@@ -99,7 +106,18 @@ export default function ThreadScreen() {
   const [draft, setDraft] = useState('');
   const [panelOpen, setPanelOpen] = useState(false);
   const [quickOpen, setQuickOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
+
+  // Seed the composer from ?draft= (e.g. client-detail's "Request deposit").
+  // Once only — never clobber what the user has typed since.
+  const draftParam = typeof params.draft === 'string' ? params.draft : '';
+  const draftSeeded = useRef(false);
+  useEffect(() => {
+    if (!draftParam || draftSeeded.current) return;
+    draftSeeded.current = true;
+    setDraft((d) => (d.trim() ? d : draftParam));
+  }, [draftParam]);
 
   // Read state: clear the unread count on focus and again after each sync.
   useFocusEffect(
@@ -204,6 +222,35 @@ export default function ThreadScreen() {
     setDraft((d) => (d.trim() ? `${d} ${text}` : text));
     setQuickOpen(false);
   }, []);
+
+  // ── Composer power tools (append to the draft, never auto-send) ────────────
+  const insertDepositRequest = useCallback(() => {
+    const fallbackRate = clientName ? lastMeetingFor(tasks, clientName)?.rate ?? 0 : 0;
+    insertTemplate(
+      buildDepositRequest({
+        occurrence: nextBooking
+          ? { task: nextBooking.task, dateKey: nextBooking.dateKey }
+          : null,
+        fallbackRate,
+        symbol: settings.currencySymbol,
+      })
+    );
+  }, [clientName, tasks, nextBooking, settings.currencySymbol, insertTemplate]);
+
+  const quickActions = useMemo<QuickAction[]>(
+    () => [
+      {
+        icon: 'calendar-clear-outline',
+        label: 'Share availability',
+        onPress: () => {
+          setQuickOpen(false);
+          setShareOpen(true);
+        },
+      },
+      { icon: 'wallet-outline', label: 'Request deposit', onPress: insertDepositRequest },
+    ],
+    [insertDepositRequest]
+  );
 
   const sendPhotoReply = useCallback(
     async (photo: PhotoReply) => {
@@ -385,6 +432,7 @@ export default function ThreadScreen() {
           <QuickReplies
             templates={settings.messageTemplates}
             photos={photoReplies}
+            actions={quickActions}
             onPickText={insertTemplate}
             onPickPhoto={sendPhotoReply}
           />
@@ -406,6 +454,11 @@ export default function ThreadScreen() {
         number={number}
         clientName={clientName}
         onBook={openBooking}
+      />
+      <ShareAvailability
+        visible={shareOpen}
+        onClose={() => setShareOpen(false)}
+        onInsert={insertTemplate}
       />
       <PhotoViewer url={viewerUrl} onClose={() => setViewerUrl(null)} />
     </KeyboardAvoidingView>

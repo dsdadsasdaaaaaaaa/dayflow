@@ -1,6 +1,7 @@
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
 import { ensureNotificationPermission } from './notifications';
+import { SAFETY_CATEGORY } from './safety';
 
 /**
  * Schedule the alerts for a live meeting session:
@@ -60,13 +61,16 @@ export async function scheduleMeetingAlerts(
     }
 
     if (checkInAfterMin != null && checkInAfterMin > 0) {
+      // Carries the safety category: the "I'm OK" action disarms a pending
+      // missed-check-in escalation right from the lock screen (lib/safety).
       ids.push(
         await Notifications.scheduleNotificationAsync({
           content: {
             title: 'Check-in reminder',
             body: 'Let your contact know everything went well.',
             sound: true,
-            data: { meetingAlert: 'checkin' },
+            data: { meetingAlert: 'checkin', safety: 'checkin' },
+            categoryIdentifier: SAFETY_CATEGORY,
           },
           trigger: {
             type: Notifications.SchedulableTriggerInputTypes.DATE,

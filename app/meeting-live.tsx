@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import dayjs from 'dayjs';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
@@ -15,11 +16,15 @@ import { todayKey } from '../src/lib/dates';
 import { successHaptic, tapHaptic, warningHaptic } from '../src/lib/haptics';
 import { formatMoney, isPaidOn, occurrenceAmount, occurrenceDeposit } from '../src/lib/meetings';
 import { isInstanceCompleted } from '../src/lib/recurrence';
+import { disarmSafetyEscalation, useSafetyEscalation } from '../src/lib/safety';
 import { useMeetingSession } from '../src/store/meetingSession';
 import { useSettings } from '../src/store/settings';
 import { useTasks } from '../src/store/tasks';
 import { useTheme } from '../src/theme';
 import type { DayKey, MeetingKind } from '../src/types';
+
+/** Warning amber (same constant the other meeting components use). */
+const AMBER = '#D97706';
 
 export default function MeetingLiveScreen() {
   const theme = useTheme();
@@ -38,6 +43,10 @@ export default function MeetingLiveScreen() {
   const togglePaid = useTasks((s) => s.togglePaid);
   const setOccurrenceAmount = useTasks((s) => s.setOccurrenceAmount);
   const symbol = useSettings((s) => s.settings.currencySymbol);
+  const safetyOn = useSettings((s) => s.settings.safetyAlertEnabled);
+  const contactName = useSettings((s) => s.settings.trustedContactName);
+  const contactPhone = useSettings((s) => s.settings.trustedContactPhone);
+  const escalation = useSafetyEscalation();
 
   // ---- Resolution: params → active session → nothing ----------------------
   const paramId = typeof params.id === 'string' && params.id.length > 0 ? params.id : null;
@@ -168,6 +177,45 @@ export default function MeetingLiveScreen() {
     </Pressable>
   );
 
+  // ---- Safety row ----------------------------------------------------------
+  // Armed: a missed-check-in escalation is counting down (see lib/safety).
+  // Pending: this live session will arm one when it ends.
+  const safetyPending =
+    isLive && !!active && active.checkInAfterMin != null && safetyOn && !!contactPhone;
+  const safetyName = contactName.trim() || 'Your contact';
+  const safetyRow =
+    escalation || safetyPending ? (
+      <View style={[styles.safetyRow, { backgroundColor: theme.card, borderColor: theme.border }]}>
+        <Ionicons
+          name="shield-checkmark-outline"
+          size={15}
+          color={escalation ? AMBER : theme.textSecondary}
+        />
+        <Text style={[styles.safetyLabel, { color: theme.textSecondary }]} numberOfLines={2}>
+          {escalation
+            ? `Check-in armed · ${safetyName} will be alerted at ${dayjs(escalation.deadline).format('h:mm A')}`
+            : `Safety on · ${safetyName} will be alerted if you miss your check-in`}
+        </Text>
+        {escalation ? (
+          <Pressable
+            onPress={() => {
+              successHaptic();
+              void disarmSafetyEscalation();
+            }}
+            hitSlop={8}
+            style={({ pressed }) => [
+              styles.safetyOkBtn,
+              { backgroundColor: theme.accent, transform: [{ scale: pressed ? 0.95 : 1 }] },
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="I'm OK — cancel the safety alert"
+          >
+            <Text style={styles.safetyOkLabel}>I&apos;m OK</Text>
+          </Pressable>
+        ) : null}
+      </View>
+    ) : null;
+
   // Celebration / graceful exit while the session tears down.
   if (ending || celebration) {
     return (
@@ -192,6 +240,7 @@ export default function MeetingLiveScreen() {
     return (
       <View style={[styles.screen, { backgroundColor: theme.background, paddingTop: insets.top + 8 }]}>
         <View style={styles.topRow}>{closeBtn}</View>
+        {safetyRow ? <View style={styles.safetyRowWrap}>{safetyRow}</View> : null}
         <View style={[styles.center, styles.flex]}>
           <EmptyState
             icon="timer-outline"
@@ -227,6 +276,7 @@ export default function MeetingLiveScreen() {
         </View>
 
         <View style={[styles.controls, { paddingBottom: insets.bottom + 20 }]}>
+          {safetyRow}
           <View style={styles.extendRow}>
             {[15, 30].map((extra) => (
               <Pressable
@@ -306,6 +356,7 @@ export default function MeetingLiveScreen() {
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
+        {safetyRow}
         {otherRunning ? (
           <Pressable
             onPress={() => {
@@ -424,6 +475,23 @@ const styles = StyleSheet.create({
   extendLabel: { fontSize: 15, fontWeight: '700', fontVariant: ['tabular-nums'] },
   cancelBtn: { alignSelf: 'center', paddingVertical: 6, paddingHorizontal: 12 },
   cancelLabel: { fontSize: 13, fontWeight: '600' },
+  safetyRowWrap: { paddingHorizontal: 16, paddingTop: 4 },
+  safetyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  safetyLabel: { flex: 1, fontSize: 12.5, fontWeight: '600', lineHeight: 16 },
+  safetyOkBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 999,
+  },
+  safetyOkLabel: { color: '#fff', fontSize: 12.5, fontWeight: '700' },
   celebrate: { alignItems: 'center', gap: 14, paddingHorizontal: 32 },
   celebrateCircle: {
     width: 92,

@@ -219,5 +219,15 @@ export interface Settings {
   voicemailGreeting: string;
   /** Require Face ID / passcode to open the app. */
   appLock: boolean;
+  /** Text a trusted contact if a post-meeting check-in is missed. */
+  safetyAlertEnabled: boolean;
+  /** Who gets the safety alert (display name, for UI only). */
+  trustedContactName: string;
+  /** Where the safety alert is sent (E.164). Empty = alerts can't send. */
+  trustedContactPhone: string;
+  /** Minutes past the check-in time before the trusted contact is texted. */
+  safetyGraceMinutes: number;
+  /** Body of the safety alert SMS (user-editable). */
+  safetyMessage: string;
   onboardingDone: boolean;
 }

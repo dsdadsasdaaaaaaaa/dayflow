@@ -33,6 +33,12 @@ export const DEFAULT_SETTINGS: Settings = {
   callShowWorkNumber: false,
   voicemailGreeting: "Sorry I missed you — leave a message after the tone and I'll text you back.",
   appLock: false,
+  safetyAlertEnabled: false,
+  trustedContactName: '',
+  trustedContactPhone: '',
+  safetyGraceMinutes: 10,
+  safetyMessage:
+    "Automated safety alert: I haven't checked in after a meeting. Please check on me.",
   onboardingDone: false,
 };
 

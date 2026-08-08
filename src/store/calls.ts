@@ -5,8 +5,10 @@ import { loadSmsCredentials, normalizePhone } from '../lib/smsCredentials';
 import {
   fetchCallFrom,
   listCallHistory,
+  listTranscriptions,
   listVoicemails,
   type CallEntry,
+  type TranscriptionEntry,
   type VoicemailEntry,
 } from '../lib/voiceApi';
 import { isPhoneBlocked, type ClientMeta } from './clientMeta';
@@ -19,10 +21,23 @@ import { isPhoneBlocked, type ClientMeta } from './clientMeta';
  */
 
 /** A voicemail plus the cached caller number (joined via the parent call). */
-export type StoredVoicemail = VoicemailEntry & { counterparty?: string };
+export type StoredVoicemail = VoicemailEntry & {
+  counterparty?: string;
+  /** Transcribed text (present once transcriptStatus is 'done'). */
+  transcript?: string;
+  /**
+   * 'pending' = Twilio is still transcribing · 'done' = transcript is set ·
+   * 'none' = no transcript is coming (failed, or recorded pre-feature).
+   * Absent on voicemails synced before this field existed — treat as 'none'.
+   */
+  transcriptStatus?: 'pending' | 'done' | 'none';
+};
 
 /** Max parent-call lookups per sync when labeling voicemails (bounded join). */
 const MAX_CALLER_JOINS = 25;
+
+/** A recording with no transcription after this long is never getting one. */
+const TRANSCRIPT_WAIT_MS = 10 * 60 * 1000;
 
 interface CallsState {
   /** All known calls by SID (internal forward legs already filtered out). */
@@ -58,9 +73,10 @@ export const useCalls = create<CallsState>()(
         set({ syncing: true, lastError: null });
         try {
           const fwd = normalizePhone(forwardTo);
-          const [callsResult, vmResult] = await Promise.all([
+          const [callsResult, vmResult, trResult] = await Promise.all([
             listCallHistory(creds, fwd),
             listVoicemails(creds),
+            listTranscriptions(creds),
           ]);
           let error: string | null = null;
 
@@ -74,11 +90,10 @@ export const useCalls = create<CallsState>()(
           const voicemails = { ...get().voicemails };
           if (vmResult.ok) {
             for (const vm of vmResult.voicemails) {
-              // Keep the caller number we already resolved on earlier syncs.
+              // Keep the locally-joined fields (caller number, transcript)
+              // we already resolved on earlier syncs.
               const prev = voicemails[vm.sid];
-              voicemails[vm.sid] = prev?.counterparty
-                ? { ...vm, counterparty: prev.counterparty }
-                : vm;
+              voicemails[vm.sid] = prev ? { ...prev, ...vm } : vm;
             }
           } else {
             error = error ?? vmResult.error;
@@ -102,6 +117,28 @@ export const useCalls = create<CallsState>()(
               if (from) voicemails[vm.sid] = { ...vm, counterparty: from };
             })
           );
+
+          // Join transcripts by recording SID. A voicemail with no
+          // transcription that is old enough is never getting one ('none' —
+          // e.g. recorded before transcription was enabled); a fresh one is
+          // still being transcribed ('pending').
+          if (trResult.ok) {
+            const byRecording = new Map<string, TranscriptionEntry>();
+            for (const t of trResult.transcriptions) byRecording.set(t.recordingSid, t);
+            for (const vm of Object.values(voicemails)) {
+              const t = byRecording.get(vm.sid);
+              if (t?.status === 'completed') {
+                voicemails[vm.sid] = { ...vm, transcript: t.text, transcriptStatus: 'done' };
+              } else if (t?.status === 'failed') {
+                voicemails[vm.sid] = { ...vm, transcriptStatus: 'none' };
+              } else if (vm.transcriptStatus !== 'done') {
+                const waiting = t != null || Date.now() - vm.recordedAt <= TRANSCRIPT_WAIT_MS;
+                voicemails[vm.sid] = { ...vm, transcriptStatus: waiting ? 'pending' : 'none' };
+              }
+            }
+          } else {
+            error = error ?? trResult.error;
+          }
 
           set({ calls, voicemails, lastError: error });
         } catch (e) {

@@ -7,6 +7,7 @@ import { EmptyState } from '../src/components/EmptyState';
 import { BackButton } from '../src/components/clients/BackButton';
 import { ClientAvatar } from '../src/components/clients/ClientAvatar';
 import { ClientChip } from '../src/components/clients/ClientChip';
+import { RegularsStrip } from '../src/components/clients/RegularsStrip';
 import { StatusDot } from '../src/components/clients/StatusDot';
 import { statusColor } from '../src/components/clients/status';
 import { GlassCard } from '../src/components/glass/GlassCard';
@@ -14,6 +15,7 @@ import { formatPhoneDisplay } from '../src/components/messages/format';
 import { formatDayRelative } from '../src/lib/dates';
 import { tapHaptic } from '../src/lib/haptics';
 import { clientProfiles, formatMoney, type ClientProfile } from '../src/lib/meetings';
+import { overdueRegulars } from '../src/lib/rebook';
 import {
   clientMetaKey,
   effectiveStatus,
@@ -152,6 +154,9 @@ export default function ClientsScreen() {
 
   const profiles = useMemo(() => clientProfiles(tasks, log), [tasks, log]);
 
+  /** Rebook radar: regulars past their usual booking rhythm. */
+  const regulars = useMemo(() => overdueRegulars(tasks, log, meta), [tasks, log, meta]);
+
   /** Meeting profiles + contact-only entries from the messenger/lead pipeline. */
   const entries = useMemo<BookEntry[]>(() => {
     const list: BookEntry[] = profiles.map((p) => ({
@@ -239,6 +244,13 @@ export default function ClientsScreen() {
           />
         ) : (
           <>
+            {regulars.length > 0 ? (
+              <View>
+                <SectionLabel>Regulars</SectionLabel>
+                <RegularsStrip regulars={regulars} />
+              </View>
+            ) : null}
+
             {clients.length > 0 ? (
               <View>
                 <SectionLabel>Clients</SectionLabel>
