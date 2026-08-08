@@ -50,6 +50,15 @@ function identifierOf(counterparty: string): { tg: string | null; phone: string 
  * contact that held it; if that contact ends up empty (no numbers, no chats,
  * no notes, no meetings), it is deleted. Its notes and explicit status carry
  * over when the target has none of its own.
+ *
+ * Refuses when the thread's current contact is blocked — linking would hand
+ * the number to a contact whose effective status is 'client', silently
+ * un-muting a number the user explicitly blocked. Unblock first, then link.
+ *
+ * Only the linked channel is overwritten on the target: a phone link keeps
+ * the target's existing Telegram chat and vice versa. Replacing the target's
+ * previous number/chat on the SAME channel is deliberate (that's what
+ * "re-link to the right thread" means).
  */
 export function linkThreadToClient(counterparty: string, targetClient: string): LinkResult {
   const target = targetClient.trim();
@@ -66,6 +75,15 @@ export function linkThreadToClient(counterparty: string, targetClient: string): 
   )?.[0];
 
   if (ownerKey === targetKey) return { ok: true }; // already linked
+
+  // Never let a link quietly undo a block: the target's status would govern
+  // the number from then on, and it's usually 'client'.
+  if (ownerKey && meta[ownerKey]?.status === 'blocked') {
+    return {
+      ok: false,
+      error: 'This contact is blocked. Unblock them first, then link.',
+    };
+  }
 
   const meetingKeys = new Set(knownClients(useTasks.getState().tasks).map(clientMetaKey));
 

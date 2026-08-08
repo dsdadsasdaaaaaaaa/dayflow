@@ -3,14 +3,17 @@ import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import { uid } from '../lib/id';
 import {
+  cancelScheduledSms,
   fetchSmsStatus,
   listOlderSms,
   listRecentSms,
+  scheduleSms,
   sendSms,
   type SmsMessage,
 } from '../lib/smsApi';
 import { loadSmsCredentials, normalizePhone } from '../lib/smsCredentials';
 import { uploadPhotoAsset } from '../lib/twilioAssets';
+import { PERSIST_VERSION, migrateStore } from './persistVersion';
 
 /**
  * Local message cache + sync for the in-app messenger. The provider account
@@ -47,6 +50,21 @@ const PAGE_SIZE = 100;
 /** Terminal outbound statuses that mean the carrier rejected the message. */
 const FAILED_SEND = new Set(['failed', 'undelivered']);
 
+/**
+ * Grace past sendAt before an absent scheduled entry is dropped — covers the
+ * moment where Twilio is mid-send and the record isn't listable yet.
+ */
+const SCHEDULE_SETTLE_SLACK_MS = 60_000;
+
+/** A message Twilio is holding for future delivery (status "scheduled"). */
+export interface ScheduledSend {
+  /** Destination (E.164). */
+  to: string;
+  body: string;
+  /** When Twilio will deliver it (epoch ms). */
+  sendAtMs: number;
+}
+
 interface MessagesState {
   /** All known messages by SID. */
   messages: Record<string, SmsMessage>;
@@ -66,6 +84,13 @@ interface MessagesState {
   hasMoreOlder: Record<string, boolean>;
   /** Failed sends awaiting retry, by localId. */
   outbox: Record<string, OutboxEntry>;
+  /**
+   * Twilio-held scheduled sends by message SID. Kept OUT of `messages` until
+   * they actually send — sync() reconciles: still-"scheduled" records stay
+   * here; sent/canceled ones (or entries missing past their send time) are
+   * dropped and the real message arrives via the normal merge.
+   */
+  scheduled: Record<string, ScheduledSend>;
   /**
    * SIDs of provider records for sends that were moved into the outbox.
    * They stay in Twilio's history forever, so without this set every sync
@@ -90,6 +115,10 @@ interface MessagesState {
   sendPhoto: (to: string, localUri: string) => Promise<boolean>;
   /** Fetch the next page of history older than the oldest cached message. */
   loadOlder: (counterparty: string) => Promise<void>;
+  /** Hand the message to Twilio for future delivery (works phone-off). */
+  scheduleSend: (to: string, body: string, sendAtMs: number) => Promise<boolean>;
+  /** Cancel a scheduled send before it delivers. */
+  cancelScheduled: (sid: string) => Promise<boolean>;
   /** Re-attempt a failed send; removes the outbox entry on success. */
   retryOutbox: (localId: string) => Promise<boolean>;
   /** Drop a failed send without retrying. */
@@ -107,6 +136,9 @@ interface MessagesState {
  */
 export function mergeMessage(messages: Record<string, SmsMessage>, m: SmsMessage): void {
   if (useMessages.getState().hiddenSids[m.sid]) return;
+  // Scheduled sends live in the `scheduled` map until they deliver; canceled
+  // ones never sent at all. Neither belongs in the visible message flow.
+  if (m.status === 'scheduled' || m.status === 'canceled') return;
   const prev = messages[m.sid];
   if (!m.mediaUrls?.length && prev?.mediaUrls?.length) {
     messages[m.sid] = { ...m, mediaUrls: prev.mediaUrls };
@@ -135,6 +167,7 @@ export const useMessages = create<MessagesState>()(
       highWaterMark: null,
       hasMoreOlder: {},
       outbox: {},
+      scheduled: {},
       hiddenSids: {},
       syncing: false,
       sendingTo: null,
@@ -179,12 +212,32 @@ export const useMessages = create<MessagesState>()(
                 });
           // Advance the mark from message timestamps (Twilio's clock), never
           // the device clock — skew-proof by construction.
-          const newestFetched = fetched.reduce((max, m) => Math.max(max, m.sentAt), 0);
+          // Ignore future-dated scheduled records when advancing the mark.
+          const newestFetched = fetched.reduce(
+            (max, m) => (m.status === 'scheduled' ? max : Math.max(max, m.sentAt)),
+            0
+          );
           set((s) => {
             const messages = { ...s.messages };
             for (const m of fetched) mergeMessage(messages, m);
+            // Reconcile scheduled sends: a fetched record still "scheduled"
+            // stays in the map; any other status (sent/delivered/canceled) —
+            // or absence once its send time has passed — drops the entry and
+            // lets the normal merge carry the real message.
+            const fetchedBySid = new Map(fetched.map((m) => [m.sid, m] as const));
+            let scheduled = s.scheduled;
+            for (const [sid, entry] of Object.entries(s.scheduled)) {
+              const rec = fetchedBySid.get(sid);
+              const stillScheduled = rec
+                ? rec.status === 'scheduled'
+                : Date.now() < entry.sendAtMs + SCHEDULE_SETTLE_SLACK_MS;
+              if (stillScheduled) continue;
+              if (scheduled === s.scheduled) scheduled = { ...scheduled };
+              delete scheduled[sid];
+            }
             return {
               messages,
+              scheduled,
               lastSyncAt: Date.now(),
               highWaterMark: Math.max(s.highWaterMark ?? 0, newestFetched) || Date.now(),
             };
@@ -329,6 +382,51 @@ export const useMessages = create<MessagesState>()(
         }
       },
 
+      scheduleSend: async (to, body, sendAtMs) => {
+        const creds = await loadSmsCredentials();
+        if (!creds) {
+          set({ configured: false, lastError: 'Messaging is not set up yet.' });
+          return false;
+        }
+        const target = normalizePhone(to);
+        set({ lastError: null });
+        try {
+          const msg = await scheduleSms(creds, target, body, sendAtMs);
+          set((s) => ({
+            scheduled: { ...s.scheduled, [msg.sid]: { to: target, body, sendAtMs } },
+          }));
+          return true;
+        } catch (e) {
+          set({ lastError: e instanceof Error ? e.message : 'Could not schedule the message' });
+          return false;
+        }
+      },
+
+      cancelScheduled: async (sid) => {
+        const creds = await loadSmsCredentials();
+        if (!creds) {
+          set({ configured: false, lastError: 'Messaging is not set up yet.' });
+          return false;
+        }
+        set({ lastError: null });
+        try {
+          await cancelScheduledSms(creds, sid);
+          set((s) => {
+            const scheduled = { ...s.scheduled };
+            delete scheduled[sid];
+            return { scheduled };
+          });
+          return true;
+        } catch (e) {
+          // Too late to cancel (it already sent) or a network failure — the
+          // entry stays and the next sync() reconciles it either way.
+          set({
+            lastError: e instanceof Error ? e.message : 'Could not cancel the scheduled message',
+          });
+          return false;
+        }
+      },
+
       retryOutbox: async (localId) => {
         const entry = get().outbox[localId];
         if (!entry) return false;
@@ -361,6 +459,7 @@ export const useMessages = create<MessagesState>()(
           highWaterMark: null,
           hasMoreOlder: {},
           outbox: {},
+          scheduled: {},
           hiddenSids: {},
           lastSyncAt: null,
           lastError: null,
@@ -368,6 +467,8 @@ export const useMessages = create<MessagesState>()(
     }),
     {
       name: 'dayflow-messages',
+      version: PERSIST_VERSION,
+      migrate: migrateStore,
       storage: createJSONStorage(() => AsyncStorage),
       // Never persist transient flags.
       partialize: (s) => ({
@@ -377,6 +478,7 @@ export const useMessages = create<MessagesState>()(
         highWaterMark: s.highWaterMark,
         hasMoreOlder: s.hasMoreOlder,
         outbox: s.outbox,
+        scheduled: s.scheduled,
         hiddenSids: s.hiddenSids,
       }) as Partial<MessagesState>,
     }
@@ -419,6 +521,18 @@ export function threadMessages(
   return Object.values(messages)
     .filter((m) => m.counterparty === key && !hiddenSids?.[m.sid])
     .sort((a, b) => a.sentAt - b.sentAt);
+}
+
+/** Pending scheduled sends for one thread, soonest first. */
+export function threadScheduled(
+  scheduled: Record<string, ScheduledSend>,
+  counterparty: string
+): ({ sid: string } & ScheduledSend)[] {
+  const key = normalizePhone(counterparty);
+  return Object.entries(scheduled)
+    .filter(([, e]) => normalizePhone(e.to) === key)
+    .map(([sid, e]) => ({ sid, ...e }))
+    .sort((a, b) => a.sendAtMs - b.sendAtMs);
 }
 
 /** Failed sends waiting for retry in one thread, oldest first. */

@@ -9,9 +9,15 @@ import {
 import { uid } from '../lib/id';
 import { cancelMeetingAlerts, scheduleMeetingAlerts } from '../lib/meetingNotifications';
 import { formatMoney, meetingKindMeta, occurrenceAmount } from '../lib/meetings';
-import { armSafetyEscalation, disarmSafetyEscalation } from '../lib/safety';
+import {
+  armSafetyEscalation,
+  cancelStoredCheckInReminders,
+  disarmSafetyEscalation,
+  storeCheckInReminderIds,
+} from '../lib/safety';
 import type { ActiveMeeting, DayKey, MeetingKind, MeetingLogEntry, Task } from '../types';
 import { useSettings } from './settings';
+import { PERSIST_VERSION, migrateStore } from './persistVersion';
 
 /** SF Symbol for the Live Activity icon, per meeting kind. */
 const KIND_SYMBOLS: Record<MeetingKind, string> = {
@@ -77,6 +83,25 @@ export const useMeetingSession = create<MeetingSessionState>()(
           plannedEndAt,
           checkInAfterMin
         );
+        // Clear leftovers from the previous session (its re-anchored post-end
+        // check-in reminder would otherwise fire into this one), then arm the
+        // missed-check-in escalation NOW — before the session even shows as
+        // live. If the user is incapacitated mid-meeting and never returns to
+        // end the session, the persisted deadline
+        // (plannedEnd + checkIn + grace) still fires. armSafetyEscalation
+        // stands down instead when safety is off in Settings.
+        await cancelStoredCheckInReminders();
+        if (checkInAfterMin != null && checkInAfterMin > 0) {
+          await armSafetyEscalation({
+            endAt: plannedEndAt,
+            checkInAfterMin,
+            taskId: task.id,
+          });
+        } else {
+          // No check-in requested — a fresh session still proves the user is
+          // fine, so stand down anything armed by the previous one.
+          await disarmSafetyEscalation();
+        }
         set({
           active: {
             taskId: task.id,
@@ -87,9 +112,6 @@ export const useMeetingSession = create<MeetingSessionState>()(
             notificationIds,
           },
         });
-        // A fresh session proves the user is fine — stand down any pending
-        // missed-check-in escalation from the previous one.
-        void disarmSafetyEscalation();
         const kind = task.meeting?.kind ?? 'incall';
         void startMeetingActivity({
           clientName: label,
@@ -128,6 +150,15 @@ export const useMeetingSession = create<MeetingSessionState>()(
             return;
           }
           set({ active: { ...current, plannedEndAt, notificationIds } });
+          // Re-anchor the safety escalation to the new planned end (stands
+          // down instead if safety was turned off mid-session).
+          if (current.checkInAfterMin != null && current.checkInAfterMin > 0) {
+            await armSafetyEscalation({
+              endAt: plannedEndAt,
+              checkInAfterMin: current.checkInAfterMin,
+              taskId: current.taskId,
+            });
+          }
           void updateMeetingActivity({ endAtMs: plannedEndAt, overtime: false });
         } finally {
           extendInFlight = false;
@@ -147,8 +178,17 @@ export const useMeetingSession = create<MeetingSessionState>()(
         // scheduleMeetingAlerts skips the warning/time's-up alerts and only
         // schedules the check-in at endedAt + checkInAfterMin.
         if (active.checkInAfterMin != null && active.checkInAfterMin > 0) {
-          await scheduleMeetingAlerts('', endedAt, active.checkInAfterMin);
-          // Missed-check-in escalation (no-op unless enabled in Settings).
+          const checkInIds = await scheduleMeetingAlerts(
+            '',
+            endedAt,
+            active.checkInAfterMin
+          );
+          // The session (and its notificationIds) is gone — park the
+          // reminder's ids where a later disarm ("I'm OK") or the next
+          // start() can still cancel them.
+          await storeCheckInReminderIds(checkInIds);
+          // Re-anchor the escalation to the ACTUAL end time (stands down
+          // instead if safety was turned off mid-session).
           await armSafetyEscalation({
             endAt: endedAt,
             checkInAfterMin: active.checkInAfterMin,
@@ -184,6 +224,8 @@ export const useMeetingSession = create<MeetingSessionState>()(
         const active = get().active;
         if (active) await cancelMeetingAlerts(active.notificationIds);
         set({ active: null });
+        // An abandoned session must not leave a countdown armed.
+        await disarmSafetyEscalation();
         void endMeetingActivity();
       },
 
@@ -205,6 +247,8 @@ export const useMeetingSession = create<MeetingSessionState>()(
     }),
     {
       name: 'dayflow-meeting-session',
+      version: PERSIST_VERSION,
+      migrate: migrateStore,
       storage: createJSONStorage(() => AsyncStorage),
       onRehydrateStorage: () => (state) => {
         // A persisted session more than 24h past its planned end is stale

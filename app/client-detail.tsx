@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { EmptyState } from '../src/components/EmptyState';
+import { ActivityTimeline } from '../src/components/clients/ActivityTimeline';
 import { BackButton } from '../src/components/clients/BackButton';
 import { ClientAvatar } from '../src/components/clients/ClientAvatar';
 import { ClientChip } from '../src/components/clients/ClientChip';
@@ -25,7 +26,10 @@ import {
 import { DepositRow } from '../src/components/clients/DepositRow';
 import { MessageButton } from '../src/components/clients/MessageButton';
 import { startClientCall } from '../src/components/messages/ClientPanel';
-import { buildDepositRequest } from '../src/components/messages/QuickReplies';
+import {
+  buildDepositRequest,
+  buildPaymentReminder,
+} from '../src/components/messages/QuickReplies';
 import { RebookSuggestion } from '../src/components/clients/RebookSuggestion';
 import { StatTile } from '../src/components/clients/StatTile';
 import { StatusChips } from '../src/components/clients/StatusChips';
@@ -36,7 +40,7 @@ import {
   formatMinutes,
   lastNDays,
 } from '../src/lib/dates';
-import { successHaptic, tapHaptic } from '../src/lib/haptics';
+import { successHaptic, tapHaptic, warningHaptic } from '../src/lib/haptics';
 import {
   clientProfiles,
   formatMoney,
@@ -74,6 +78,7 @@ export default function ClientDetailScreen() {
 
   const tasks = useTasks((s) => s.tasks);
   const togglePaid = useTasks((s) => s.togglePaid);
+  const toggleNoShow = useTasks((s) => s.toggleNoShow);
   const log = useMeetingSession((s) => s.log);
   const symbol = useSettings((s) => s.settings.currencySymbol);
   const callingEnabled = useSettings((s) => s.settings.callingEnabled);
@@ -98,15 +103,36 @@ export default function ClientDetailScreen() {
   /** Linked phone number (E.164) — gates the Call action. */
   const phone = metaMap[clientMetaKey(displayName)]?.phone ?? '';
 
-  /** Recent completed occurrences for this client, newest first, capped at 20. */
+  /**
+   * Recent past occurrences for this client, newest first, capped at 20:
+   * completed ones plus days marked as a no-show (which stay uncompleted —
+   * the flag is what keeps them visible here).
+   */
   const history = useMemo(() => {
     if (!profile) return [];
     const key = profile.name.trim().toLowerCase();
     return meetingOccurrences(tasks, lastNDays(90))
-      .filter((o) => o.completed && o.client.trim().toLowerCase() === key)
+      .filter(
+        (o) =>
+          o.client.trim().toLowerCase() === key &&
+          (o.completed || (o.task.meeting?.noShows?.includes(o.dateKey) ?? false))
+      )
       .sort((a, b) => (a.dateKey < b.dateKey ? 1 : a.dateKey > b.dateKey ? -1 : 0))
       .slice(0, 20);
   }, [tasks, profile]);
+
+  /** No-show days recorded across this client's meetings (all time). */
+  const noShowCount = useMemo(() => {
+    const key = displayName.trim().toLowerCase();
+    if (!key) return 0;
+    let n = 0;
+    for (const t of Object.values(tasks)) {
+      if (t.meeting && t.meeting.client.trim().toLowerCase() === key) {
+        n += t.meeting.noShows?.length ?? 0;
+      }
+    }
+    return n;
+  }, [tasks, displayName]);
 
   /** The task behind the next scheduled (uncompleted) occurrence, if any. */
   const nextOcc = useMemo(() => {
@@ -160,6 +186,36 @@ export default function ClientDetailScreen() {
     });
     router.push(
       `/thread?number=${encodeURIComponent(phone)}&draft=${encodeURIComponent(draft)}`
+    );
+  };
+
+  /** Open the thread with a payment-reminder draft prefilled (phone required). */
+  const sendPaymentReminder = () => {
+    if (!phone || !profile || profile.outstanding <= 0 || profile.unpaid.length === 0) return;
+    tapHaptic();
+    const oldestOwedDay = profile.unpaid.reduce(
+      (min, u) => (u.dateKey < min ? u.dateKey : min),
+      profile.unpaid[0].dateKey
+    );
+    const draft = buildPaymentReminder({
+      amount: profile.outstanding,
+      symbol,
+      oldestOwedDay,
+    });
+    router.push(
+      `/thread?number=${encodeURIComponent(phone)}&draft=${encodeURIComponent(draft)}`
+    );
+  };
+
+  /** Long-press on a history row: flip its no-show state (undoable). */
+  const handleNoShowToggle = (taskId: string, dateKey: string, isNoShow: boolean) => {
+    warningHaptic();
+    toggleNoShow(taskId, dateKey);
+    showUndo(
+      isNoShow
+        ? `Unmarked ${formatDayShort(dateKey)} no-show`
+        : `Marked ${formatDayShort(dateKey)} a no-show`,
+      () => toggleNoShow(taskId, dateKey)
     );
   };
 
@@ -327,6 +383,14 @@ export default function ClientDetailScreen() {
               delay={100}
             />
             <StatTile label="Hours" value={formatDuration(profile.loggedMinutes)} delay={130} />
+            {noShowCount > 0 ? (
+              <StatTile
+                label="No-shows"
+                value={String(noShowCount)}
+                tint={amberFg}
+                delay={160}
+              />
+            ) : null}
           </View>
         ) : null}
 
@@ -359,6 +423,9 @@ export default function ClientDetailScreen() {
           <SectionLabel>Notes</SectionLabel>
           <ClientNotesCard client={displayName} />
         </View>
+
+        {/* Activity — renders nothing (no section) when there's no activity */}
+        <ActivityTimeline client={displayName} />
 
         {/* Settle up */}
         {profile && profile.unpaid.length > 0 ? (
@@ -405,6 +472,23 @@ export default function ClientDetailScreen() {
                 </View>
               ))}
             </GlassCard>
+            {phone && profile.outstanding > 0 ? (
+              <Pressable
+                onPress={sendPaymentReminder}
+                accessibilityRole="button"
+                accessibilityLabel={`Send ${displayName} a payment reminder`}
+                style={({ pressed }) => [
+                  styles.callBtn,
+                  { backgroundColor: theme.surface },
+                  pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] },
+                ]}
+              >
+                <Ionicons name="cash-outline" size={17} color={amberFg} />
+                <Text style={[styles.callBtnLabel, { color: amberFg }]}>
+                  Send payment reminder
+                </Text>
+              </Pressable>
+            ) : null}
           </View>
         ) : null}
 
@@ -458,37 +542,64 @@ export default function ClientDetailScreen() {
           <View>
             <SectionLabel>History</SectionLabel>
             <GlassCard padding={6}>
-              {history.map((o, i) => (
-                <View
-                  key={`${o.task.id}-${o.dateKey}`}
-                  style={[
-                    styles.historyRow,
-                    i > 0 && {
-                      borderTopWidth: StyleSheet.hairlineWidth,
-                      borderTopColor: theme.separator,
-                    },
-                  ]}
-                >
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.historyDate, { color: theme.text }]}>
-                      {formatDayShort(o.dateKey)}
-                    </Text>
-                    <Text style={[styles.historyTime, { color: theme.textTertiary }]}>
-                      {o.task.allDay || o.task.startMinutes == null
-                        ? 'All day'
-                        : formatMinutes(o.task.startMinutes)}
-                    </Text>
-                  </View>
-                  <Text style={[styles.historyAmount, { color: money }]}>
-                    {formatMoney(o.rate, symbol)}
-                  </Text>
-                  <Ionicons
-                    name={o.paid ? 'checkmark-circle' : 'ellipse-outline'}
-                    size={18}
-                    color={o.paid ? theme.success : theme.textTertiary}
-                  />
-                </View>
-              ))}
+              {history.map((o, i) => {
+                const noShow = o.task.meeting?.noShows?.includes(o.dateKey) ?? false;
+                return (
+                  <Pressable
+                    key={`${o.task.id}-${o.dateKey}`}
+                    onLongPress={() => handleNoShowToggle(o.task.id, o.dateKey, noShow)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${formatDayShort(o.dateKey)}${
+                      noShow ? ', no-show' : `, ${formatMoney(o.rate, symbol)}`
+                    }`}
+                    accessibilityHint={
+                      noShow ? 'Long press to unmark no-show' : 'Long press to mark as a no-show'
+                    }
+                    style={[
+                      styles.historyRow,
+                      i > 0 && {
+                        borderTopWidth: StyleSheet.hairlineWidth,
+                        borderTopColor: theme.separator,
+                      },
+                      noShow && styles.historyRowDimmed,
+                    ]}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.historyDate, { color: theme.text }]}>
+                        {formatDayShort(o.dateKey)}
+                      </Text>
+                      <Text style={[styles.historyTime, { color: theme.textTertiary }]}>
+                        {o.task.allDay || o.task.startMinutes == null
+                          ? 'All day'
+                          : formatMinutes(o.task.startMinutes)}
+                      </Text>
+                    </View>
+                    {noShow ? (
+                      <View
+                        style={[
+                          styles.noShowTag,
+                          { backgroundColor: theme.dark ? amber.bgDark : amber.bgLight },
+                        ]}
+                      >
+                        <Text style={[styles.noShowTagLabel, { color: amberFg }]}>
+                          No-show
+                        </Text>
+                      </View>
+                    ) : (
+                      <>
+                        <Text style={[styles.historyAmount, { color: money }]}>
+                          {formatMoney(o.rate, symbol)}
+                        </Text>
+                        <Ionicons
+                          name={o.paid ? 'checkmark-circle' : 'ellipse-outline'}
+                          size={18}
+                          color={o.paid ? theme.success : theme.textTertiary}
+                        />
+                      </>
+                    )}
+                  </Pressable>
+                );
+              })}
             </GlassCard>
           </View>
         ) : null}
@@ -658,6 +769,19 @@ const styles = StyleSheet.create({
     gap: SPACING.md,
     paddingHorizontal: SPACING.sm + 2,
     paddingVertical: SPACING.sm + 2,
+  },
+  historyRowDimmed: {
+    opacity: 0.55,
+  },
+  noShowTag: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  noShowTagLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.2,
   },
   historyDate: {
     fontSize: 14,

@@ -16,6 +16,7 @@ import {
   StyleSheet,
   Switch,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -33,8 +34,18 @@ import { SettingsRow } from '../src/components/settings/SettingsRow';
 import { SettingsSection } from '../src/components/settings/SettingsSection';
 import { Stepper } from '../src/components/settings/Stepper';
 import { TelegramSection } from '../src/components/settings/TelegramSection';
-import { deleteAllBackups, startAutoBackup } from '../src/lib/backup';
+import {
+  deleteAllBackups,
+  exportBackupPayload,
+  rewriteTodayBackup,
+  startAutoBackup,
+} from '../src/lib/backup';
 import { ensureCalendarPermission } from '../src/lib/calendar';
+import {
+  clearBackupPassphrase,
+  loadBackupPassphrase,
+  saveBackupPassphrase,
+} from '../src/lib/cryptoBackup';
 import { formatDuration } from '../src/lib/dates';
 import { selectionHaptic, successHaptic, tapHaptic, warningHaptic } from '../src/lib/haptics';
 import { clearMediaMemoryCache } from '../src/lib/mediaCache';
@@ -44,7 +55,6 @@ import {
   syncAllNotifications,
 } from '../src/lib/notifications';
 import { clearSmsCredentials } from '../src/lib/smsCredentials';
-import { clearTelegramCredentials } from '../src/lib/telegramCredentials';
 import { useCalls } from '../src/store/calls';
 import { useClientMeta } from '../src/store/clientMeta';
 import { useDrafts } from '../src/store/drafts';
@@ -54,7 +64,7 @@ import { useMeetingSession } from '../src/store/meetingSession';
 import { useMessages } from '../src/store/messages';
 import { useSettings } from '../src/store/settings';
 import { useTasks } from '../src/store/tasks';
-import { useTelegram } from '../src/store/telegramAccount';
+import { teardownTelegram, useTelegram } from '../src/store/telegramAccount';
 import { taskColor, useTheme } from '../src/theme';
 import type { ThemeMode } from '../src/types';
 
@@ -105,6 +115,29 @@ export default function SettingsScreen() {
   const [importVisible, setImportVisible] = useState(false);
   const [backupsVisible, setBackupsVisible] = useState(false);
   const [notifStatus, setNotifStatus] = useState<NotifStatus>('unknown');
+
+  // ---- Backup passphrase ---------------------------------------------------
+  // Whether a passphrase exists in the keychain (null while loading), plus a
+  // small inline set/change form that lives inside the Data section.
+  const [hasPassphrase, setHasPassphrase] = useState<boolean | null>(null);
+  const [ppFormOpen, setPpFormOpen] = useState(false);
+  const [pp1, setPp1] = useState('');
+  const [pp2, setPp2] = useState('');
+  const [ppError, setPpError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    loadBackupPassphrase()
+      .then((p) => {
+        if (alive) setHasPassphrase(p !== null);
+      })
+      .catch(() => {
+        if (alive) setHasPassphrase(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // Lazy trigger for the once-per-app-open automatic backup (no-op if it
   // already ran — e.g. when the root layout wires startAutoBackup directly).
@@ -230,28 +263,100 @@ export default function SettingsScreen() {
   // ---- Data ----------------------------------------------------------------
 
   const exportBackup = async () => {
-    const payload = {
-      version: 1,
-      exportedAt: new Date().toISOString(),
-      tasks: Object.values(useTasks.getState().tasks),
-      habits: Object.values(useHabits.getState().habits),
-      focusSessions: useFocus.getState().sessions,
-      meetingLog: useMeetingSession.getState().log,
-      // Client book + voicemail read state. Message bodies are deliberately
-      // excluded: threads re-sync from Twilio, and keeping client texts out
-      // of plaintext export files is a privacy choice.
-      clientMeta: useClientMeta.getState().meta,
-      callsHeardAt: useCalls.getState().heardAt,
-      settings: useSettings.getState().settings,
-    };
+    // Payload building (and encryption, when a passphrase is set) lives in
+    // lib/backup. Message bodies are deliberately excluded: threads re-sync
+    // from Twilio, and keeping client texts out of export files is a privacy
+    // choice.
+    const { data, encrypted } = await exportBackupPayload();
     try {
       await Share.share(
-        { message: JSON.stringify(payload) },
-        { subject: 'DayFlow backup' }
+        { message: data },
+        { subject: encrypted ? 'DayFlow backup (encrypted)' : 'DayFlow backup' }
       );
     } catch {
       // User dismissed the share sheet — nothing to do.
     }
+  };
+
+  const savePassphrase = async () => {
+    const a = pp1.trim();
+    const b = pp2.trim();
+    if (a.length < 6) {
+      setPpError('Use at least 6 characters.');
+      warningHaptic();
+      return;
+    }
+    if (a !== b) {
+      setPpError('The two entries do not match.');
+      warningHaptic();
+      return;
+    }
+    try {
+      await saveBackupPassphrase(a);
+    } catch {
+      setPpError('Could not save to the keychain. Try again.');
+      return;
+    }
+    setHasPassphrase(true);
+    setPpFormOpen(false);
+    setPp1('');
+    setPp2('');
+    setPpError(null);
+    successHaptic();
+    // Re-write today's snapshot so what's on disk matches the new passphrase.
+    void rewriteTodayBackup();
+    Alert.alert(
+      'Passphrase set',
+      'Daily snapshots and exported backups are now encrypted. If you lose the passphrase, encrypted backups cannot be opened. Ever.'
+    );
+  };
+
+  const openPassphraseForm = () => {
+    setPp1('');
+    setPp2('');
+    setPpError(null);
+    setPpFormOpen(true);
+  };
+
+  const turnOffPassphrase = () => {
+    Alert.alert(
+      'Turn off backup encryption?',
+      "Today's snapshot and future backups will be saved as plain JSON. Files you already exported still need the old passphrase.",
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Turn Off',
+          style: 'destructive',
+          onPress: () => {
+            warningHaptic();
+            void (async () => {
+              try {
+                await clearBackupPassphrase();
+              } catch {
+                // Keychain entry already gone — proceed with the rewrite.
+              }
+              setHasPassphrase(false);
+              setPpFormOpen(false);
+              // Re-write today's snapshot unencrypted.
+              await rewriteTodayBackup();
+            })();
+          },
+        },
+      ]
+    );
+  };
+
+  const onPassphraseRow = () => {
+    if (hasPassphrase === null) return; // still loading the keychain
+    if (!hasPassphrase) {
+      openPassphraseForm();
+      return;
+    }
+    Alert.alert('Backup passphrase', 'Backups are encrypted with your passphrase.', [
+      { text: 'Change', onPress: openPassphraseForm },
+      { text: 'Turn Off', style: 'destructive', onPress: turnOffPassphrase },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
   };
 
   const exportEarningsCsv = async () => {
@@ -298,25 +403,29 @@ export default function SettingsScreen() {
     } catch {
       // Keychain entry already gone (or unavailable) — nothing left to clear.
     }
-    // Telegram: sign the DayFlow session out (best-effort on old binaries),
-    // drop imported chats, and remove the API keys from the keychain.
+    // Telegram: end the session, wipe the on-disk TDLib database, and clear
+    // the API keys — teardownTelegram verifies each step and reports honestly.
+    let telegramGone = true;
     try {
-      await useTelegram.getState().disconnect();
+      const t = await teardownTelegram();
+      telegramGone = t.ok;
     } catch {
-      // TDLib unavailable — the local wipe below still runs.
+      telegramGone = false;
     }
     useTelegram.getState().clearAll();
-    try {
-      await clearTelegramCredentials();
-    } catch {
-      // Keychain entry already gone — nothing left to clear.
-    }
     clearMediaMemoryCache();
     deleteCachedMediaFiles();
     deleteAllBackups();
     useSettings.getState().reset();
     syncAllNotifications({});
-    Alert.alert('All data erased', 'DayFlow is back to a fresh start.');
+    if (telegramGone) {
+      Alert.alert('All data erased', 'DayFlow is back to a fresh start.');
+    } else {
+      Alert.alert(
+        'Erased — with one exception',
+        'Everything was deleted, but the Telegram session could not be fully removed (are you offline?). Open Settings → Telegram and disconnect again when you have a connection.'
+      );
+    }
   };
 
   const confirmErase = () => {
@@ -726,13 +835,21 @@ export default function SettingsScreen() {
         <SettingsSection
           delay={315}
           title="Data"
-          caption="Backups are plain JSON you keep wherever you like. Nothing is stored in any cloud."
+          caption={
+            hasPassphrase
+              ? 'Backups are encrypted with your passphrase before they touch disk or the share sheet. Nothing is stored in any cloud.'
+              : 'Backups are plain JSON you keep wherever you like. Nothing is stored in any cloud.'
+          }
         >
           <SettingsRow
             icon="share-outline"
             tint={taskColor('sky').solid}
             label="Export backup"
-            sublabel="Tasks, habits, meetings and the client book"
+            sublabel={
+              hasPassphrase
+                ? 'Encrypted with your passphrase'
+                : 'Tasks, habits, meetings and the client book'
+            }
             onPress={exportBackup}
           />
           <SettingsRow
@@ -756,6 +873,115 @@ export default function SettingsScreen() {
             sublabel="Saved daily on your phone"
             onPress={() => setBackupsVisible(true)}
           />
+          <SettingsRow
+            icon="key-outline"
+            tint={taskColor('amber').solid}
+            label="Backup passphrase"
+            sublabel={
+              hasPassphrase === null
+                ? ' '
+                : hasPassphrase
+                  ? 'On — backups are encrypted'
+                  : 'Off — backups are plain JSON'
+            }
+            onPress={onPassphraseRow}
+          />
+          {ppFormOpen ? (
+            <View style={styles.ppForm}>
+              <Text style={[styles.blockLabel, { color: theme.textTertiary }]}>
+                {hasPassphrase ? 'New passphrase' : 'Set a passphrase'}
+              </Text>
+              <TextInput
+                value={pp1}
+                onChangeText={(v) => {
+                  setPp1(v);
+                  if (ppError) setPpError(null);
+                }}
+                placeholder="Passphrase (min 6 characters)"
+                placeholderTextColor={theme.textTertiary}
+                secureTextEntry
+                autoCorrect={false}
+                autoCapitalize="none"
+                style={[
+                  styles.ppInput,
+                  {
+                    color: theme.text,
+                    backgroundColor: theme.surface,
+                    borderColor: theme.border,
+                  },
+                ]}
+                accessibilityLabel="New backup passphrase"
+              />
+              <TextInput
+                value={pp2}
+                onChangeText={(v) => {
+                  setPp2(v);
+                  if (ppError) setPpError(null);
+                }}
+                placeholder="Enter it again"
+                placeholderTextColor={theme.textTertiary}
+                secureTextEntry
+                autoCorrect={false}
+                autoCapitalize="none"
+                style={[
+                  styles.ppInput,
+                  {
+                    color: theme.text,
+                    backgroundColor: theme.surface,
+                    borderColor: ppError ? theme.danger : theme.border,
+                  },
+                ]}
+                accessibilityLabel="Repeat backup passphrase"
+              />
+              <Text
+                style={[
+                  styles.ppWarning,
+                  { color: ppError ? theme.danger : taskColor('amber').solid },
+                ]}
+              >
+                {ppError ??
+                  'If you lose the passphrase, encrypted backups cannot be opened. Ever.'}
+              </Text>
+              <View style={styles.ppButtons}>
+                <Pressable
+                  onPress={() => {
+                    tapHaptic();
+                    setPpFormOpen(false);
+                    setPp1('');
+                    setPp2('');
+                    setPpError(null);
+                  }}
+                  style={({ pressed }) => [
+                    styles.ppBtn,
+                    {
+                      backgroundColor: theme.surface,
+                      borderColor: theme.border,
+                      borderWidth: StyleSheet.hairlineWidth,
+                      opacity: pressed ? 0.7 : 1,
+                    },
+                  ]}
+                  accessibilityLabel="Cancel passphrase"
+                >
+                  <Text style={[styles.ppBtnLabel, { color: theme.text }]}>
+                    Cancel
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    tapHaptic();
+                    void savePassphrase();
+                  }}
+                  style={({ pressed }) => [
+                    styles.ppBtn,
+                    { backgroundColor: theme.accent, opacity: pressed ? 0.85 : 1 },
+                  ]}
+                  accessibilityLabel="Save passphrase"
+                >
+                  <Text style={[styles.ppBtnLabel, { color: '#fff' }]}>Save</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
           <SettingsRow
             icon="trash-outline"
             tint={theme.danger}
@@ -847,6 +1073,35 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   pillLabel: { fontSize: 13, fontWeight: '700', color: '#fff' },
+  ppForm: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    gap: 10,
+  },
+  ppInput: {
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+  },
+  ppWarning: {
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '600',
+  },
+  ppButtons: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  ppBtn: {
+    flex: 1,
+    borderRadius: 14,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  ppBtnLabel: { fontSize: 14, fontWeight: '700' },
   aboutRow: {
     flexDirection: 'row',
     alignItems: 'center',

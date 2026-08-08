@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import { normalizePhone } from '../lib/smsCredentials';
+import { PERSIST_VERSION, migrateStore } from './persistVersion';
 
 /**
  * Relationship stage for the lead pipeline:
@@ -172,6 +173,8 @@ export const useClientMeta = create<ClientMetaState>()(
     }),
     {
       name: 'dayflow-client-meta',
+      version: PERSIST_VERSION,
+      migrate: migrateStore,
       storage: createJSONStorage(() => AsyncStorage),
     }
   )

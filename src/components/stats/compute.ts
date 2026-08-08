@@ -2,9 +2,18 @@
 // Everything here is deterministic on its inputs so the screen can wrap
 // each call in useMemo and stay cheap on re-renders.
 
-import { formatDayShort, formatMinutes, monthShort, toDayKey, weekdayOf } from '../../lib/dates';
-import { earningsForDays, formatMoney } from '../../lib/meetings';
+import {
+  addDays,
+  formatDayShort,
+  formatMinutes,
+  monthShort,
+  toDayKey,
+  todayKey,
+  weekdayOf,
+} from '../../lib/dates';
+import { earningsForDays, formatMoney, occurrenceAmount } from '../../lib/meetings';
 import type { MeetingOccurrence } from '../../lib/meetings';
+import { isInstanceCompleted, taskOccursOn } from '../../lib/recurrence';
 import { minutesFocusedOn } from '../../store/focus';
 import { habitActiveOn, habitStreak } from '../../store/habits';
 import { instancesForDay } from '../../store/tasks';
@@ -329,6 +338,115 @@ export function monthlyEarnings(
     });
   }
   return out;
+}
+
+// ------------------------------------------------------------ lifetime money
+
+export interface LifetimeClient {
+  client: string;
+  /** Lifetime earnings across all completed occurrences. */
+  earned: number;
+  /** Lifetime completed meeting count. */
+  meetings: number;
+}
+
+export interface MoneyStats {
+  /** Lifetime earned across every completed occurrence (occurrenceAmount). */
+  earned: number;
+  /** Lifetime completed meeting count. */
+  meetings: number;
+  /** All-time live-session minutes from the meeting log. */
+  loggedMinutes: number;
+  /** Every client with a completed meeting, biggest lifetime earner first. */
+  clients: LifetimeClient[];
+  /** Lifetime earnings split by kind (only kinds that occurred). */
+  kinds: KindStat[];
+  /** This calendar month to date — same summary as monthlyEarnings' last bar. */
+  monthEarned: number;
+  /** Live-session minutes logged this calendar month. */
+  monthLoggedMinutes: number;
+}
+
+/**
+ * Lifetime money rollup. Walks every completed meeting occurrence from each
+ * task's anchor date through today (clientProfiles-style — clientProfiles
+ * itself is already all-time, but it drops blank client names and does extra
+ * forward-horizon work we don't need here), so totals are all-time rather
+ * than windowed. Uses occurrenceAmount so per-day settled overrides agree
+ * with earningsForDays everywhere on the screen. Deterministic per calendar
+ * day — wrap in useMemo keyed on `tasks` + `log`.
+ */
+export function moneyStats(
+  tasks: Record<string, Task>,
+  log: MeetingLogEntry[]
+): MoneyStats {
+  const today = todayKey();
+  const clientMap = new Map<string, LifetimeClient>();
+  const kindMap = new Map<MeetingKind, KindStat>();
+  let earned = 0;
+  let meetings = 0;
+
+  for (const task of Object.values(tasks)) {
+    if (!task.meeting || !task.date) continue;
+    const end = task.recurrence ? today : task.date;
+    for (let day = task.date; day <= end; day = addDays(day, 1)) {
+      if (!taskOccursOn(task, day)) {
+        if (!task.recurrence) break;
+        continue;
+      }
+      if (day <= today && isInstanceCompleted(task, day)) {
+        const amount = occurrenceAmount(task, day);
+        earned += amount;
+        meetings += 1;
+        const name = task.meeting.client.trim() || 'Client';
+        const key = name.toLowerCase();
+        const c = clientMap.get(key) ?? { client: name, earned: 0, meetings: 0 };
+        c.earned += amount;
+        c.meetings += 1;
+        clientMap.set(key, c);
+        const k =
+          kindMap.get(task.meeting.kind) ??
+          { kind: task.meeting.kind, meetings: 0, earned: 0 };
+        k.meetings += 1;
+        k.earned += amount;
+        kindMap.set(task.meeting.kind, k);
+      }
+      if (!task.recurrence) break;
+    }
+  }
+
+  // This calendar month, via the exact summary the rest of the screen uses.
+  const now = new Date();
+  const monthDays: DayKey[] = [];
+  const cursor = new Date(now.getFullYear(), now.getMonth(), 1);
+  while (cursor <= now) {
+    monthDays.push(toDayKey(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  const monthEarned = earningsForDays(tasks, monthDays).earned;
+  const monthStart = monthDays[0];
+
+  let loggedMinutes = 0;
+  let monthLoggedMinutes = 0;
+  for (const e of log) {
+    loggedMinutes += e.actualMinutes;
+    if (e.dateKey >= monthStart && e.dateKey <= today) {
+      monthLoggedMinutes += e.actualMinutes;
+    }
+  }
+
+  const order: MeetingKind[] = ['incall', 'outcall', 'public'];
+  return {
+    earned,
+    meetings,
+    loggedMinutes,
+    clients: [...clientMap.values()].sort(
+      (a, b) => b.earned - a.earned || b.meetings - a.meetings
+    ),
+    kinds: order.map((k) => kindMap.get(k)).filter((k): k is KindStat => !!k),
+    monthEarned,
+    monthLoggedMinutes,
+  };
 }
 
 export interface SessionStats {

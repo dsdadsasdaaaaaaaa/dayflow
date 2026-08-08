@@ -11,6 +11,7 @@ import { HabitsCard } from '../../src/components/stats/HabitsCard';
 import { HeroTiles } from '../../src/components/stats/HeroTiles';
 import { HourHeatStrip } from '../../src/components/stats/HourHeatStrip';
 import { InsightsCard } from '../../src/components/stats/InsightsCard';
+import { MoneyInsights } from '../../src/components/stats/MoneyInsights';
 import { TimeDonut } from '../../src/components/stats/TimeDonut';
 import {
   buildInsights,
@@ -140,6 +141,8 @@ export default function StatsScreen() {
               rangeLabel={rangeLabel}
               weeklyGoal={weeklyGoal}
             />
+
+            <MoneyInsights tasks={tasks} log={meetingLog} currency={currency} />
 
             <CompletionChart data={perDay} />
 

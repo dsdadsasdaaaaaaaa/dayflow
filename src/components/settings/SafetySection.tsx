@@ -1,6 +1,8 @@
+import dayjs from 'dayjs';
 import { useEffect, useState } from 'react';
-import { StyleSheet, Switch, Text, TextInput, View } from 'react-native';
-import { selectionHaptic } from '../../lib/haptics';
+import { Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { selectionHaptic, successHaptic } from '../../lib/haptics';
+import { disarmSafetyEscalation, useSafetyEscalation } from '../../lib/safety';
 import { normalizePhone } from '../../lib/smsCredentials';
 import { useMessages } from '../../store/messages';
 import { DEFAULT_SETTINGS, useSettings } from '../../store/settings';
@@ -24,6 +26,7 @@ export function SafetySection() {
   const configured = useMessages((s) => s.configured);
   const settings = useSettings((s) => s.settings);
   const update = useSettings((s) => s.update);
+  const escalation = useSafetyEscalation();
 
   const [nameDraft, setNameDraft] = useState(settings.trustedContactName);
   const [phoneDraft, setPhoneDraft] = useState(settings.trustedContactPhone);
@@ -88,6 +91,10 @@ export function SafetySection() {
             onValueChange={(on) => {
               selectionHaptic();
               update({ safetyAlertEnabled: on });
+              // Turning the feature off must stand down a live countdown
+              // immediately — otherwise an already-armed escalation would
+              // still text the contact after the user revoked the feature.
+              if (!on) void disarmSafetyEscalation();
             }}
             trackColor={{ false: theme.surface, true: theme.accent }}
             ios_backgroundColor={theme.surface}
@@ -95,6 +102,28 @@ export function SafetySection() {
           />
         }
       />
+      {escalation ? (
+        <View style={styles.armedRow}>
+          <Text style={[styles.armedText, { color: theme.text }]}>
+            Check-in countdown armed — the alert sends at{' '}
+            {dayjs(escalation.deadline).format('h:mm A')} unless you check in.
+          </Text>
+          <Pressable
+            onPress={() => {
+              successHaptic();
+              void disarmSafetyEscalation();
+            }}
+            style={({ pressed }) => [
+              styles.armedBtn,
+              { backgroundColor: theme.accent, transform: [{ scale: pressed ? 0.95 : 1 }] },
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="I'm OK — cancel the safety alert"
+          >
+            <Text style={styles.armedBtnLabel}>I&apos;m OK</Text>
+          </Pressable>
+        </View>
+      ) : null}
       {enabled ? (
         <View style={styles.form}>
           <View style={styles.field}>
@@ -161,7 +190,10 @@ export function SafetySection() {
               accessibilityLabel="Safety alert message"
             />
             <Text style={[styles.fieldHint, { color: theme.textTertiary }]}>
-              The meeting's location note is added to the text when there is one.
+              {'With the standard message, the meeting’s location note is ' +
+                'added to the end when there is one. In a custom message, write ' +
+                '{location} where the note should go — leave it out to keep ' +
+                'locations out of the alert.'}
             </Text>
           </View>
         </View>
@@ -209,4 +241,18 @@ const styles = StyleSheet.create({
   stepperLabels: { flex: 1, gap: 1 },
   stepperLabel: { fontSize: 15, fontWeight: '600' },
   stepperSublabel: { fontSize: 12.5, fontWeight: '500' },
+  armedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingBottom: 12,
+  },
+  armedText: { flex: 1, fontSize: 12.5, fontWeight: '600', lineHeight: 17 },
+  armedBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 999,
+  },
+  armedBtnLabel: { color: '#fff', fontSize: 12.5, fontWeight: '700' },
 });

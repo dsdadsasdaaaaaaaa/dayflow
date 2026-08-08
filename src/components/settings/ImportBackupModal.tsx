@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -13,7 +13,12 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { sanitizeClientMeta, sanitizeHeardAt } from '../../lib/backup';
-import { successHaptic, tapHaptic } from '../../lib/haptics';
+import {
+  decryptBackup,
+  isEncryptedBackup,
+  loadBackupPassphrase,
+} from '../../lib/cryptoBackup';
+import { successHaptic, tapHaptic, warningHaptic } from '../../lib/haptics';
 import { useCalls } from '../../store/calls';
 import { useClientMeta } from '../../store/clientMeta';
 import { useHabits } from '../../store/habits';
@@ -148,16 +153,54 @@ export function ImportBackupModal({ visible, onClose }: Props) {
   const insets = useSafeAreaInsets();
   const importTasks = useTasks((s) => s.importTasks);
   const [text, setText] = useState('');
+  const [passphrase, setPassphrase] = useState('');
+  const [decryptError, setDecryptError] = useState<string | null>(null);
+  const [decrypting, setDecrypting] = useState(false);
 
   useEffect(() => {
-    if (visible) setText('');
+    if (visible) {
+      setText('');
+      setPassphrase('');
+      setDecryptError(null);
+      setDecrypting(false);
+    }
   }, [visible]);
 
-  const runImport = () => {
+  /** True once the pasted text parses as an encrypted DayFlow envelope. */
+  const encrypted = useMemo(() => isEncryptedBackup(text.trim()), [text]);
+
+  const runImport = async () => {
     tapHaptic();
+    let source = text.trim();
+
+    if (encrypted) {
+      // Prefer the typed passphrase; fall back to the one in the keychain so
+      // importing your own file "just works" without retyping it.
+      const typed = passphrase.trim();
+      const stored = typed ? null : await loadBackupPassphrase();
+      const pass = typed || stored;
+      if (!pass) {
+        setDecryptError('Enter the passphrase this backup was encrypted with.');
+        warningHaptic();
+        return;
+      }
+      // scrypt takes ~1s — let the spinner-ish disabled state paint first.
+      setDecrypting(true);
+      setDecryptError(null);
+      await new Promise((r) => setTimeout(r, 30));
+      const dec = decryptBackup(source, pass);
+      setDecrypting(false);
+      if (!dec.ok) {
+        setDecryptError(dec.error);
+        warningHaptic();
+        return;
+      }
+      source = dec.plaintext;
+    }
+
     let parsed: unknown;
     try {
-      parsed = JSON.parse(text.trim());
+      parsed = JSON.parse(source);
     } catch {
       Alert.alert(
         'Invalid backup',
@@ -239,7 +282,7 @@ export function ImportBackupModal({ visible, onClose }: Props) {
     Alert.alert('Import complete', `Restored ${parts.join(', ')}.`);
   };
 
-  const canImport = text.trim().length > 0;
+  const canImport = text.trim().length > 0 && !decrypting;
 
   return (
     <Modal
@@ -275,7 +318,7 @@ export function ImportBackupModal({ visible, onClose }: Props) {
             Import Backup
           </Text>
           <Pressable
-            onPress={runImport}
+            onPress={() => void runImport()}
             disabled={!canImport}
             hitSlop={8}
             style={({ pressed }) => [
@@ -289,7 +332,9 @@ export function ImportBackupModal({ visible, onClose }: Props) {
             accessibilityLabel="Import"
             accessibilityState={{ disabled: !canImport }}
           >
-            <Text style={styles.importLabel}>Import</Text>
+            <Text style={styles.importLabel}>
+              {decrypting ? 'Unlocking…' : 'Import'}
+            </Text>
           </Pressable>
         </View>
 
@@ -297,6 +342,49 @@ export function ImportBackupModal({ visible, onClose }: Props) {
           Paste the JSON from a DayFlow export below. Tasks, habits and the
           client book are merged into what is already on this device.
         </Text>
+
+        {encrypted ? (
+          <View style={styles.passBlock}>
+            <View
+              style={[
+                styles.passField,
+                {
+                  backgroundColor: theme.card,
+                  borderColor: decryptError ? theme.danger : theme.border,
+                },
+              ]}
+            >
+              <Ionicons
+                name="lock-closed"
+                size={15}
+                color={theme.textSecondary}
+              />
+              <TextInput
+                value={passphrase}
+                onChangeText={(v) => {
+                  setPassphrase(v);
+                  if (decryptError) setDecryptError(null);
+                }}
+                placeholder="Backup passphrase"
+                placeholderTextColor={theme.textTertiary}
+                secureTextEntry
+                autoCorrect={false}
+                autoCapitalize="none"
+                style={[styles.passInput, { color: theme.text }]}
+                accessibilityLabel="Backup passphrase"
+              />
+            </View>
+            <Text
+              style={[
+                styles.passHint,
+                { color: decryptError ? theme.danger : theme.textTertiary },
+              ]}
+            >
+              {decryptError ??
+                'This backup is encrypted. It unlocks with the passphrase it was exported with.'}
+            </Text>
+          </View>
+        ) : null}
 
         <View
           style={[
@@ -356,6 +444,29 @@ const styles = StyleSheet.create({
     lineHeight: 17,
     paddingHorizontal: 16,
     marginBottom: 10,
+  },
+  passBlock: {
+    paddingHorizontal: 16,
+    marginBottom: 10,
+    gap: 6,
+  },
+  passField: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderRadius: RADIUS.lg,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 12,
+  },
+  passInput: {
+    flex: 1,
+    paddingVertical: 10,
+    fontSize: 14,
+  },
+  passHint: {
+    fontSize: 12,
+    lineHeight: 16,
+    marginHorizontal: 2,
   },
   inputWrap: {
     flex: 1,

@@ -51,6 +51,22 @@ export function TelegramSection() {
     };
   }, [available, refreshAuth]);
 
+  const runDisconnect = async () => {
+    warningHaptic();
+    const ok = await disconnect();
+    if (!ok) {
+      // Nothing was deleted — keep the credentials so a retry can still
+      // reach the session, and say so instead of pretending success.
+      const reason = useTelegram.getState().lastError ?? 'Telegram could not be signed out.';
+      Alert.alert('Disconnect failed', `${reason}\n\nNothing was deleted yet.`, [
+        { text: 'Not now', style: 'cancel' },
+        { text: 'Retry', onPress: () => void runDisconnect() },
+      ]);
+      return;
+    }
+    await clearTelegramCredentials();
+  };
+
   const confirmDisconnect = () => {
     Alert.alert(
       'Disconnect Telegram?',
@@ -60,11 +76,7 @@ export function TelegramSection() {
         {
           text: 'Disconnect',
           style: 'destructive',
-          onPress: async () => {
-            warningHaptic();
-            await disconnect();
-            await clearTelegramCredentials();
-          },
+          onPress: () => void runDisconnect(),
         },
       ]
     );

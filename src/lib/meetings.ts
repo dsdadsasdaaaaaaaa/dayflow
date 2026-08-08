@@ -157,7 +157,8 @@ export interface ClientProfile {
   loggedMinutes: number;
   /** Most recent completed occurrence day. */
   lastSeen: DayKey | null;
-  /** Next scheduled occurrence from today, if any. */
+  /** Next uncompleted occurrence — today counts (a booking later today is
+   * still upcoming, and it's when deposit tools matter most). */
   nextMeeting: DayKey | null;
   /** Unpaid completed occurrences, for settling up. */
   unpaid: { task: Task; dateKey: DayKey; amount: number }[];
@@ -233,7 +234,10 @@ export function clientProfiles(
         }
         if (!p.lastSeen || day > p.lastSeen) p.lastSeen = day;
       }
-      if (day > today && !isInstanceCompleted(task, day)) {
+      // >= so a booking later TODAY surfaces (matches thread.tsx's
+      // nextBooking window and rebook radar's hasUpcoming, both of which
+      // already start at today). Once completed it moves to history above.
+      if (day >= today && !isInstanceCompleted(task, day)) {
         if (!p.nextMeeting || day < p.nextMeeting) p.nextMeeting = day;
       }
       if (!task.recurrence) break;

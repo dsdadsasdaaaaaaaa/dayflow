@@ -24,6 +24,8 @@ export interface BubbleMessage {
   mediaUrls?: string[];
   /** Telegram photo attachment — TDLib file id. */
   photoFileId?: number;
+  /** Telegram: TDLib reported the send failed after queuing. */
+  failed?: boolean;
 }
 
 interface Props {
@@ -148,6 +150,10 @@ export function MessageBubble({ msg, showStatus = false, onPressPhoto }: Props) 
         >
           {statusLabel(msg.status)}
         </Text>
+      ) : out && msg.failed ? (
+        // Telegram send that failed after queuing — same styling as the SMS
+        // "Not delivered" line, shown on every failed bubble.
+        <Text style={[styles.status, { color: theme.danger }]}>Not delivered</Text>
       ) : null}
     </View>
   );
@@ -198,8 +204,25 @@ function MediaPhoto({
 const tgPhotoUriCache = new Map<number, string>();
 
 /**
+ * Does a local file uri still exist? TDLib's storage optimizer may delete
+ * rarely-used downloads mid-session, leaving the cache pointing at nothing.
+ * Returns true when unverifiable (web / FS unavailable) — trust the cache.
+ */
+function localFileExists(uri: string): boolean {
+  try {
+    // Static require keeps this synchronous; expo-file-system is in the binary.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { File } = require('expo-file-system') as typeof import('expo-file-system');
+    return new File(uri).exists;
+  } catch {
+    return true;
+  }
+}
+
+/**
  * One Telegram photo attachment: downloads via TDLib (loading placeholder
  * while it resolves), then renders the local file. Tap to view full screen.
+ * Cached paths are stat'd before use and re-resolved when the file is gone.
  */
 function TelegramPhoto({
   fileId,
@@ -211,16 +234,20 @@ function TelegramPhoto({
   onLongPress?: () => void;
 }) {
   const theme = useTheme();
-  const [uri, setUri] = useState<string | null>(tgPhotoUriCache.get(fileId) ?? null);
+  const [uri, setUri] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const retriedRef = useRef(false);
 
   useEffect(() => {
     const cached = tgPhotoUriCache.get(fileId);
-    if (cached) {
+    if (cached && localFileExists(cached)) {
       setUri(cached);
       setFailed(false);
       return;
     }
+    // Evicted by TDLib's storage optimizer (or never resolved) — re-download.
+    if (cached) tgPhotoUriCache.delete(fileId);
     let alive = true;
     setUri(null);
     setFailed(false);
@@ -237,7 +264,7 @@ function TelegramPhoto({
     return () => {
       alive = false;
     };
-  }, [fileId]);
+  }, [fileId, attempt]);
 
   return (
     <Pressable
@@ -255,7 +282,22 @@ function TelegramPhoto({
       ]}
     >
       {uri ? (
-        <Image source={{ uri }} style={styles.photo} resizeMode="cover" />
+        <Image
+          source={{ uri }}
+          style={styles.photo}
+          resizeMode="cover"
+          onError={() => {
+            // Stale/corrupt file — invalidate and re-resolve once.
+            tgPhotoUriCache.delete(fileId);
+            if (retriedRef.current) {
+              setUri(null);
+              setFailed(true);
+              return;
+            }
+            retriedRef.current = true;
+            setAttempt((n) => n + 1);
+          }}
+        />
       ) : (
         <View style={styles.photoPlaceholder}>
           {failed ? (

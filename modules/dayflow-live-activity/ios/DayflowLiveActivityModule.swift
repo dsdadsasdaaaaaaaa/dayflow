@@ -1,5 +1,6 @@
 import ActivityKit
 import ExpoModulesCore
+import Foundation
 
 /// Holds the single tracked Live Activity. Wrapped in an availability-annotated
 /// class so the stored `Activity<...>` type compiles against the iOS 16.2 API
@@ -69,6 +70,23 @@ public final class DayflowLiveActivityModule: Module {
             let activity = MeetingActivityHolder.current else { return }
       MeetingActivityHolder.current = nil
       await activity.end(activity.content, dismissalPolicy: .immediate)
+    }
+
+    // Marks a file or directory with NSURLIsExcludedFromBackupKey so it never
+    // rides iCloud/iTunes device backups (used for TDLib's Documents/tdlib
+    // database). Returns false — never throws — when the path does not exist
+    // or the attribute cannot be set.
+    AsyncFunction("setExcludedFromBackup") { (path: String) -> Bool in
+      guard FileManager.default.fileExists(atPath: path) else { return false }
+      var url = URL(fileURLWithPath: path)
+      var values = URLResourceValues()
+      values.isExcludedFromBackup = true
+      do {
+        try url.setResourceValues(values)
+        return true
+      } catch {
+        return false
+      }
     }
   }
 }

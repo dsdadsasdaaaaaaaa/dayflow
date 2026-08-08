@@ -4,6 +4,7 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import { toDayKey } from '../lib/dates';
 import { uid } from '../lib/id';
 import type { FocusMode, FocusSession } from '../types';
+import { PERSIST_VERSION, migrateStore } from './persistVersion';
 
 interface FocusState {
   /** Completed sessions history (most recent last). */
@@ -44,6 +45,8 @@ export const useFocus = create<FocusState>()(
     }),
     {
       name: 'dayflow-focus',
+      version: PERSIST_VERSION,
+      migrate: migrateStore,
       storage: createJSONStorage(() => AsyncStorage),
     }
   )

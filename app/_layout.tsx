@@ -17,7 +17,7 @@ import {
 } from '../src/lib/notifications';
 import {
   handleSafetyNotificationResponse,
-  maybeEscalate,
+  maybeEscalateForeground,
   registerSafetyCategory,
 } from '../src/lib/safety';
 import { subscribeWidgetSync } from '../src/lib/widgetBridge';
@@ -104,12 +104,16 @@ export default function RootLayout() {
     return () => sub.remove();
   }, []);
 
-  // Missed-check-in escalation: check whenever the app runs. The small delay
-  // lets a launching notification response ("I'm OK", or a tap on the
-  // warning itself) disarm first — never alert a user who just responded.
+  // Missed-check-in escalation: check whenever the app runs. Foregrounding
+  // is strong evidence the user is fine, so this path shows an "Everything
+  // OK?" prompt with a 60s countdown instead of silently texting — only the
+  // background task path (messageAlerts) sends without asking. The small
+  // delay lets a launching notification response ("I'm OK", or a tap on the
+  // warning/check-in reminder) disarm first — never prompt a user who just
+  // responded.
   useEffect(() => {
     if (Platform.OS !== 'ios') return;
-    const check = () => setTimeout(() => void maybeEscalate(), 1200);
+    const check = () => setTimeout(() => void maybeEscalateForeground(), 1200);
     check();
     const sub = AppState.addEventListener('change', (state) => {
       if (state === 'active') check();

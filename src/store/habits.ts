@@ -4,6 +4,7 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import { addDays, todayKey, weekdayOf } from '../lib/dates';
 import { uid } from '../lib/id';
 import type { DayKey, Habit } from '../types';
+import { PERSIST_VERSION, migrateStore } from './persistVersion';
 
 interface HabitState {
   habits: Record<string, Habit>;
@@ -70,6 +71,8 @@ export const useHabits = create<HabitState>()(
     }),
     {
       name: 'dayflow-habits',
+      version: PERSIST_VERSION,
+      migrate: migrateStore,
       storage: createJSONStorage(() => AsyncStorage),
     }
   )

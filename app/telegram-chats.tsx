@@ -101,7 +101,9 @@ export default function TelegramChatsScreen() {
   const ready = authState === 'ready';
 
   const [chats, setChats] = useState<TgChat[] | null>(null);
-  const [loading, setLoading] = useState(available);
+  /** True once the mount-time connect/auth check has fully settled. */
+  const [settled, setSettled] = useState(!available);
+  const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -115,20 +117,42 @@ export default function TelegramChatsScreen() {
     }
   }, []);
 
-  // Make sure TDLib is running (app may have been cold-started), then list.
+  // Make sure TDLib is running (app may have been cold-started). We must NOT
+  // conclude "not signed in" while another connectAndSync is still in flight:
+  // awaiting it now joins that run, and if auth still isn't settled (we may
+  // have joined a run that started mid-login), re-check once before settling.
   useEffect(() => {
     if (!available) return;
     let alive = true;
     (async () => {
       await useTelegram.getState().connectAndSync();
-      if (!alive) return;
-      if (useTelegram.getState().authState === 'ready') await load();
+      if (useTelegram.getState().authState !== 'ready') {
+        await useTelegram.getState().refreshAuth();
+        if (useTelegram.getState().authState === 'ready') {
+          await useTelegram.getState().connectAndSync();
+        }
+      }
+      if (alive) setSettled(true);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [available]);
+
+  // Fetch the chat list whenever we're signed in and don't have one yet —
+  // including when authState flips to 'ready' only after mount.
+  useEffect(() => {
+    if (!available || !ready || chats !== null || error != null) return;
+    let alive = true;
+    setLoading(true);
+    (async () => {
+      await load();
       if (alive) setLoading(false);
     })();
     return () => {
       alive = false;
     };
-  }, [available, load]);
+  }, [available, ready, chats, error, load]);
 
   const refresh = useCallback(async () => {
     setRefreshing(true);
@@ -175,7 +199,7 @@ export default function TelegramChatsScreen() {
         </GlassCard>
       );
     }
-    if (loading) {
+    if (!settled || loading || (ready && chats === null && error == null)) {
       return (
         <View style={styles.loadingWrap}>
           <ActivityIndicator size="small" color={theme.textTertiary} />

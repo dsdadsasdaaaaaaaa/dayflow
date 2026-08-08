@@ -13,6 +13,8 @@ interface DayflowLiveActivityNativeModule {
   ): Promise<void>;
   updateActivity(endAtMs: number, overtime: boolean): Promise<void>;
   endActivity(): Promise<void>;
+  /** Missing on binaries built before it existed — call via optional check. */
+  setExcludedFromBackup?(path: string): Promise<boolean>;
 }
 
 /** Null in Expo Go, on web, and on Android — every wrapper below no-ops then. */
@@ -72,5 +74,21 @@ export async function endMeetingActivity(): Promise<void> {
     await native.endActivity();
   } catch {
     // no-op
+  }
+}
+
+/**
+ * Flag a file/directory with NSURLIsExcludedFromBackupKey so it never rides
+ * iCloud/iTunes device backups (e.g. TDLib's Documents/tdlib database).
+ * `path` is an absolute filesystem path (no file:// scheme). Returns false —
+ * never throws — on web/Expo Go/Android, on binaries built before this
+ * function existed, or when the path does not exist yet.
+ */
+export async function setExcludedFromBackupAsync(path: string): Promise<boolean> {
+  if (!native || typeof native.setExcludedFromBackup !== 'function') return false;
+  try {
+    return (await native.setExcludedFromBackup(path)) === true;
+  } catch {
+    return false;
   }
 }

@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import type { DayKey, Priority, Recurrence, Subtask } from '../types';
+import { PERSIST_VERSION, migrateStore } from './persistVersion';
 
 /**
  * Auto-saved editor drafts. The task editor writes its form state here
@@ -65,6 +66,8 @@ export const useDrafts = create<DraftState>()(
     }),
     {
       name: 'dayflow-drafts',
+      version: PERSIST_VERSION,
+      migrate: migrateStore,
       storage: createJSONStorage(() => AsyncStorage),
       onRehydrateStorage: () => (state) => {
         // Expire stale drafts so weeks-old half-typed tasks don't resurface.

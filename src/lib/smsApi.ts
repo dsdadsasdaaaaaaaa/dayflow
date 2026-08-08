@@ -1,3 +1,4 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { normalizePhone, type SmsCredentials } from './smsCredentials';
 
 /**
@@ -89,10 +90,12 @@ function authHeader(creds: SmsCredentials): string {
 }
 
 function toSmsMessage(rec: TwilioMessageRecord, ownNumber: string): SmsMessage | null {
-  if (!rec.sid || !rec.from || !rec.to) return null;
-  const from = normalizePhone(rec.from);
-  const to = normalizePhone(rec.to);
+  if (!rec.sid || !rec.to) return null;
   const own = normalizePhone(ownNumber);
+  // Scheduled (and canceled-before-send) messages have no From until Twilio
+  // picks a number at send time — they're ours, so treat them as outbound.
+  const from = rec.from ? normalizePhone(rec.from) : own;
+  const to = normalizePhone(rec.to);
   const inbound = to === own;
   const counterparty = inbound ? from : to;
   if (!counterparty || counterparty === own) return null;
@@ -336,6 +339,208 @@ export async function fetchSmsStatus(
     return msg;
   } catch {
     return null;
+  }
+}
+
+// ── Scheduled sends (Twilio-native — deliver even when the phone is off) ─────
+
+/** Twilio requires SendAt to be at least 15 minutes out… */
+export const SCHEDULE_MIN_LEAD_MS = 15 * 60_000;
+/** …and at most 35 days out. */
+export const SCHEDULE_MAX_LEAD_MS = 35 * 24 * 60 * 60_000;
+
+const MESSAGING_BASE = 'https://messaging.twilio.com/v1';
+const MESSAGING_SERVICE_NAME = 'DayFlow Scheduled';
+/** AsyncStorage key caching the Messaging Service SID (find-or-create once). */
+const MESSAGING_SERVICE_STORAGE_KEY = 'dayflow-messaging-service-v1';
+
+export type EnsureMessagingServiceResult =
+  | { ok: true; serviceSid: string }
+  | { ok: false; error: string };
+
+const FORM_HEADERS = (creds: SmsCredentials) => ({
+  Authorization: authHeader(creds),
+  'Content-Type': 'application/x-www-form-urlencoded',
+});
+
+/** The PhoneNumberSid ("PN…") of the user's own sending number, or null. */
+async function findPhoneNumberSid(creds: SmsCredentials): Promise<string | null> {
+  const own = encodeURIComponent(normalizePhone(creds.fromNumber));
+  const res = await fetch(`${baseUrl(creds)}/IncomingPhoneNumbers.json?PhoneNumber=${own}`, {
+    headers: { Authorization: authHeader(creds) },
+  });
+  if (!res.ok) return null;
+  const json = (await res.json().catch(() => null)) as {
+    incoming_phone_numbers?: { sid?: string }[];
+  } | null;
+  return json?.incoming_phone_numbers?.[0]?.sid ?? null;
+}
+
+/** Whether the service already has the user's number attached. */
+async function serviceHasNumber(creds: SmsCredentials, serviceSid: string): Promise<boolean> {
+  const res = await fetch(
+    `${MESSAGING_BASE}/Services/${encodeURIComponent(serviceSid)}/PhoneNumbers?PageSize=100`,
+    { headers: { Authorization: authHeader(creds) } }
+  );
+  if (!res.ok) return false;
+  const json = (await res.json().catch(() => null)) as {
+    phone_numbers?: { phone_number?: string }[];
+  } | null;
+  const own = normalizePhone(creds.fromNumber);
+  return json?.phone_numbers?.some((p) => p.phone_number && normalizePhone(p.phone_number) === own) ?? false;
+}
+
+/**
+ * Find-or-create the "DayFlow Scheduled" Messaging Service (scheduling only
+ * works through one) and make sure the user's number is attached. The SID is
+ * cached in AsyncStorage only after the number is confirmed attached, so a
+ * half-finished setup retries cleanly on the next attempt.
+ */
+export async function ensureMessagingService(
+  creds: SmsCredentials
+): Promise<EnsureMessagingServiceResult> {
+  try {
+    const cached = await AsyncStorage.getItem(MESSAGING_SERVICE_STORAGE_KEY);
+    if (cached) return { ok: true, serviceSid: cached };
+  } catch {
+    // Cache unavailable — fall through to find-or-create.
+  }
+  try {
+    // Find an existing service by friendly name first (e.g. app reinstall).
+    let serviceSid: string | null = null;
+    let existed = false;
+    const listRes = await fetch(`${MESSAGING_BASE}/Services?PageSize=100`, {
+      headers: { Authorization: authHeader(creds) },
+    });
+    if (listRes.ok) {
+      const json = (await listRes.json().catch(() => null)) as {
+        services?: { sid?: string; friendly_name?: string }[];
+      } | null;
+      const hit = json?.services?.find(
+        (s) => s.friendly_name === MESSAGING_SERVICE_NAME && s.sid
+      );
+      if (hit?.sid) {
+        serviceSid = hit.sid;
+        existed = true;
+      }
+    }
+    if (!serviceSid) {
+      const createRes = await fetch(`${MESSAGING_BASE}/Services`, {
+        method: 'POST',
+        headers: FORM_HEADERS(creds),
+        body: new URLSearchParams({ FriendlyName: MESSAGING_SERVICE_NAME }).toString(),
+      });
+      const json = (await createRes.json().catch(() => null)) as {
+        sid?: string;
+        message?: string;
+      } | null;
+      if (!createRes.ok || !json?.sid) {
+        return {
+          ok: false,
+          error: json?.message ?? `Could not set up scheduling (${createRes.status}).`,
+        };
+      }
+      serviceSid = json.sid;
+    }
+    // Attach the sending number unless it's already in the service.
+    const attached = existed ? await serviceHasNumber(creds, serviceSid) : false;
+    if (!attached) {
+      const phoneNumberSid = await findPhoneNumberSid(creds);
+      if (!phoneNumberSid) {
+        return {
+          ok: false,
+          error: `${creds.fromNumber} was not found on this Twilio account.`,
+        };
+      }
+      const addRes = await fetch(
+        `${MESSAGING_BASE}/Services/${encodeURIComponent(serviceSid)}/PhoneNumbers`,
+        {
+          method: 'POST',
+          headers: FORM_HEADERS(creds),
+          body: new URLSearchParams({ PhoneNumberSid: phoneNumberSid }).toString(),
+        }
+      );
+      if (!addRes.ok) {
+        const json = (await addRes.json().catch(() => null)) as { message?: string } | null;
+        // "Already in the service" (a race with another device) is success.
+        if (!json?.message?.toLowerCase().includes('already')) {
+          return {
+            ok: false,
+            error: json?.message ?? `Could not attach your number (${addRes.status}).`,
+          };
+        }
+      }
+    }
+    try {
+      await AsyncStorage.setItem(MESSAGING_SERVICE_STORAGE_KEY, serviceSid);
+    } catch {
+      // Not caching just means re-verifying next time.
+    }
+    return { ok: true, serviceSid };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : 'Could not reach Twilio.' };
+  }
+}
+
+/**
+ * Schedule one SMS for later delivery (Twilio holds and sends it — the phone
+ * can be off). Throws with a readable message on failure. The returned
+ * message has status "scheduled" and sentAt = the future send time; callers
+ * keep it out of the normal message flow until it actually sends.
+ */
+export async function scheduleSms(
+  creds: SmsCredentials,
+  to: string,
+  body: string,
+  sendAtMs: number
+): Promise<SmsMessage> {
+  const lead = sendAtMs - Date.now();
+  if (lead < SCHEDULE_MIN_LEAD_MS) {
+    throw new Error('Scheduled sends need at least 15 minutes of lead time — pick a later time.');
+  }
+  if (lead > SCHEDULE_MAX_LEAD_MS) {
+    throw new Error('Scheduled sends can be at most 35 days out.');
+  }
+  const service = await ensureMessagingService(creds);
+  if (!service.ok) throw new Error(service.error);
+  const target = normalizePhone(to);
+  // NOTE: no From — the Messaging Service picks the (attached) number.
+  const form = new URLSearchParams({
+    MessagingServiceSid: service.serviceSid,
+    To: target,
+    Body: body,
+    SendAt: new Date(sendAtMs).toISOString(),
+    ScheduleType: 'fixed',
+  });
+  const res = await fetch(`${baseUrl(creds)}/Messages.json`, {
+    method: 'POST',
+    headers: FORM_HEADERS(creds),
+    body: form.toString(),
+  });
+  const json = (await res.json()) as TwilioMessageRecord & { message?: string };
+  if (!res.ok || !json.sid) {
+    throw new Error(json.message ?? `Scheduling failed (${res.status})`);
+  }
+  return {
+    sid: json.sid,
+    counterparty: target,
+    direction: 'out',
+    body,
+    sentAt: sendAtMs,
+    status: json.status ?? 'scheduled',
+  };
+}
+
+/** Cancel a scheduled message before it sends. Throws a readable error. */
+export async function cancelScheduledSms(creds: SmsCredentials, sid: string): Promise<void> {
+  const res = await fetch(`${baseUrl(creds)}/Messages/${encodeURIComponent(sid)}.json`, {
+    method: 'POST',
+    headers: FORM_HEADERS(creds),
+    body: new URLSearchParams({ Status: 'canceled' }).toString(),
+  });
+  if (!res.ok) {
+    const json = (await res.json().catch(() => null)) as { message?: string } | null;
+    throw new Error(json?.message ?? `Cancel failed (${res.status})`);
   }
 }
 

@@ -22,6 +22,8 @@ interface Props {
    * isn't duplicated between the input and the "Not delivered" bubble.
    */
   clearOnFail?: boolean;
+  /** Long-press on the (enabled) send button — thread uses it to schedule. */
+  onLongPressSend?: () => void;
 }
 
 /** Pinned message composer: grow-able input + solid accent send circle. */
@@ -34,6 +36,7 @@ export function Composer({
   quickOpen = false,
   onAttach,
   clearOnFail = false,
+  onLongPressSend,
 }: Props) {
   const theme = useTheme();
   const [inner, setInner] = useState('');
@@ -110,9 +113,11 @@ export function Composer({
       />
       <Pressable
         onPress={handleSend}
+        onLongPress={canSend && onLongPressSend ? onLongPressSend : undefined}
         disabled={!canSend}
         accessibilityRole="button"
         accessibilityLabel="Send message"
+        accessibilityHint={onLongPressSend ? 'Long press to schedule for later' : undefined}
         style={({ pressed }) => [
           styles.sendBtn,
           {

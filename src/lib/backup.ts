@@ -15,6 +15,12 @@ import type {
   Settings,
   Task,
 } from '../types';
+import {
+  decryptBackup,
+  encryptBackup,
+  isEncryptedBackup,
+  loadBackupPassphrase,
+} from './cryptoBackup';
 import { todayKey } from './dates';
 import { uid } from './id';
 import { syncAllNotifications } from './notifications';
@@ -26,6 +32,11 @@ import { syncAllNotifications } from './notifications';
  * `<documents>/backups/dayflow-YYYY-MM-DD.json`. Documents are covered by the
  * user's iCloud device backup, so this doubles as off-device protection without
  * DayFlow ever talking to a server. Only the newest 7 days are kept.
+ *
+ * When a backup passphrase is set (src/lib/cryptoBackup.ts), snapshots and
+ * exports are written as encrypted envelopes instead of plain JSON; restoring
+ * decrypts with the stored passphrase (or one supplied by the caller). Plain
+ * files from before a passphrase existed still restore fine.
  *
  * Everything here is a no-op on web (no usable filesystem).
  */
@@ -74,6 +85,36 @@ function backupsDir(): Directory {
 // Writing
 // ---------------------------------------------------------------------------
 
+/** Snapshot every store into the backup payload shape. */
+function currentPayload(): BackupPayload {
+  return {
+    version: 1,
+    createdAt: new Date().toISOString(),
+    tasks: Object.values(useTasks.getState().tasks),
+    habits: Object.values(useHabits.getState().habits),
+    focusSessions: useFocus.getState().sessions,
+    meetingLog: useMeetingSession.getState().log,
+    clientMeta: useClientMeta.getState().meta,
+    callsHeardAt: useCalls.getState().heardAt,
+    settings: useSettings.getState().settings,
+  };
+}
+
+/**
+ * The share-sheet export payload: current data as JSON, encrypted into an
+ * envelope when a backup passphrase is set. `encrypted` lets the UI say so.
+ */
+export async function exportBackupPayload(): Promise<{ data: string; encrypted: boolean }> {
+  const json = JSON.stringify({ ...currentPayload(), exportedAt: new Date().toISOString() });
+  try {
+    const passphrase = await loadBackupPassphrase();
+    if (passphrase) return { data: encryptBackup(json, passphrase), encrypted: true };
+  } catch {
+    // Keychain hiccup — fall through to a plain export rather than failing.
+  }
+  return { data: json, encrypted: false };
+}
+
 /**
  * Write today's backup if it doesn't exist yet, then prune to the newest
  * {@link KEEP_COUNT} files. Best-effort: never throws.
@@ -86,19 +127,12 @@ export async function runAutoBackup(): Promise<void> {
 
     const file = new File(dir, `dayflow-${todayKey()}.json`);
     if (!file.exists) {
-      const payload: BackupPayload = {
-        version: 1,
-        createdAt: new Date().toISOString(),
-        tasks: Object.values(useTasks.getState().tasks),
-        habits: Object.values(useHabits.getState().habits),
-        focusSessions: useFocus.getState().sessions,
-        meetingLog: useMeetingSession.getState().log,
-        clientMeta: useClientMeta.getState().meta,
-        callsHeardAt: useCalls.getState().heardAt,
-        settings: useSettings.getState().settings,
-      };
+      const json = JSON.stringify(currentPayload());
+      // With a passphrase set, on-device snapshots are encrypted envelopes
+      // too — an unlocked phone backup (or iCloud copy) exposes nothing.
+      const passphrase = await loadBackupPassphrase();
       file.create();
-      file.write(JSON.stringify(payload));
+      file.write(passphrase ? encryptBackup(json, passphrase) : json);
     }
 
     // Prune. Names embed the date, so lexicographic order is chronological.
@@ -116,6 +150,22 @@ export async function runAutoBackup(): Promise<void> {
   } catch {
     // Backups are best-effort; they must never crash the app.
   }
+}
+
+/**
+ * Delete today's snapshot and write it again (used right after the backup
+ * passphrase is set, changed, or turned off, so the freshest snapshot on disk
+ * always matches the current encryption choice). Best-effort: never throws.
+ */
+export async function rewriteTodayBackup(): Promise<void> {
+  if (Platform.OS === 'web') return;
+  try {
+    const file = new File(backupsDir(), `dayflow-${todayKey()}.json`);
+    if (file.exists) file.delete();
+  } catch {
+    // Couldn't remove the old snapshot — runAutoBackup will then keep it.
+  }
+  await runAutoBackup();
 }
 
 interface PersistApi {
@@ -411,15 +461,28 @@ function notNull<T>(v: T | null): v is T {
 /**
  * Replace all on-device data with the named backup file.
  * Returns false (and changes nothing) if the file is missing or malformed.
+ *
+ * Encrypted snapshots decrypt with the keychain passphrase, or with
+ * `passphrase` when supplied (e.g. a file written under an older passphrase).
+ * Returns false when neither opens the file.
  */
-export async function restoreBackup(name: string): Promise<boolean> {
+export async function restoreBackup(name: string, passphrase?: string): Promise<boolean> {
   if (Platform.OS === 'web') return false;
   if (!BACKUP_NAME_RE.test(name)) return false;
   try {
     const file = new File(backupsDir(), name);
     if (!file.exists) return false;
 
-    const parsed: unknown = JSON.parse(await file.text());
+    let raw = await file.text();
+    if (isEncryptedBackup(raw)) {
+      const pass = passphrase ?? (await loadBackupPassphrase());
+      if (!pass) return false;
+      const dec = decryptBackup(raw, pass);
+      if (!dec.ok) return false;
+      raw = dec.plaintext;
+    }
+
+    const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
     const p = parsed as Record<string, unknown>;
 

@@ -38,6 +38,8 @@ export interface TgMessage {
   /** Largest photo size's TDLib file id, when the message is a photo. */
   photoFileId?: number;
   senderName?: string;
+  /** True when TDLib reported the send failed (blocked peer, upload error…). */
+  failed?: boolean;
 }
 
 /** A private chat from the user's Telegram account. */
@@ -54,6 +56,7 @@ export interface TgChat {
 export type TdUpdate =
   | { kind: 'newMessage'; chatId: string; message: TgMessage }
   | { kind: 'sendSucceeded'; chatId: string; oldMessageId: number; message: TgMessage }
+  | { kind: 'sendFailed'; chatId: string; oldMessageId: number; message: TgMessage }
   | { kind: 'chatLastMessage'; chatId: string; message: TgMessage | null }
   | { kind: 'authState'; state: TdAuthState }
   | { kind: 'file'; fileId: number; localPath: string | null; completed: boolean }
@@ -210,6 +213,9 @@ function parseMessage(rawMsg: RawObject | null): TgMessage | null {
   };
   if (photoFileId != null) message.photoFileId = photoFileId;
   if (senderName) message.senderName = senderName;
+  if (typeOf(asObject(rawMsg.sending_state)) === 'messageSendingStateFailed') {
+    message.failed = true;
+  }
   return message;
 }
 
@@ -256,7 +262,15 @@ function handleRawUpdate(event: { type?: string; raw?: string } | null | undefin
 
   switch (tdType) {
     case 'updateAuthorizationState': {
-      const state = mapAuthState(typeOf(asObject(raw.authorization_state)));
+      const rawStateType = typeOf(asObject(raw.authorization_state));
+      if (rawStateType === 'authorizationStateClosed') {
+        // The native side destroys its client on Closed (remote session
+        // revocation, logout, destroy). Reset the JS flag so the next tdStart
+        // creates a fresh client instead of no-op'ing against a dead one.
+        started = false;
+        userNames.clear();
+      }
+      const state = mapAuthState(rawStateType);
       if (state) {
         currentAuthState = state;
         emit({ kind: 'authState', state });
@@ -278,6 +292,24 @@ function handleRawUpdate(event: { type?: string; raw?: string } | null | undefin
       if (message && oldMessageId != null) {
         emit({
           kind: 'sendSucceeded',
+          chatId: message.counterparty.slice(4),
+          oldMessageId,
+          message,
+        });
+      }
+      return;
+    }
+    case 'updateMessageSendFailed': {
+      // The send was rejected after queuing (blocked peer, upload failure,
+      // network error) — the pending copy trades its temporary id for a
+      // permanent one carrying the failed state. Without this the bubble
+      // renders as delivered forever.
+      const message = parseMessage(asObject(raw.message));
+      const oldMessageId = num(raw.old_message_id);
+      if (message && oldMessageId != null) {
+        message.failed = true;
+        emit({
+          kind: 'sendFailed',
           chatId: message.counterparty.slice(4),
           oldMessageId,
           message,
@@ -380,9 +412,52 @@ export async function tdStart(): Promise<TdOutcome> {
       application_version: '1.0.0',
     });
     started = true;
+    void excludeTdlibDirFromBackup();
     return { ok: true, value: undefined };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : 'Telegram failed to start.' };
+  }
+}
+
+/** Absolute filesystem path of TDLib's on-disk database (Documents/tdlib). */
+function tdlibDatabasePath(): string | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { Paths } = require('expo-file-system') as typeof import('expo-file-system');
+    const docUri = Paths.document.uri;
+    const base = docUri.startsWith('file://')
+      ? decodeURIComponent(docUri.slice('file://'.length))
+      : docUri;
+    return `${base.endsWith('/') ? base.slice(0, -1) : base}/tdlib`;
+  } catch {
+    return null;
+  }
+}
+
+let backupExclusionDone = false;
+
+/**
+ * Best-effort: flag Documents/tdlib with NSURLIsExcludedFromBackupKey so the
+ * Telegram database never rides iCloud/iTunes device backups. Old binaries
+ * lack the native helper — degrade silently (the exclusion arrives with the
+ * next app build). Retries once because TDLib creates the directory shortly
+ * AFTER startTdLib resolves.
+ */
+async function excludeTdlibDirFromBackup(): Promise<void> {
+  if (backupExclusionDone || Platform.OS !== 'ios') return;
+  try {
+    const path = tdlibDatabasePath();
+    if (!path) return;
+    const { setExcludedFromBackupAsync } = await import('../../modules/dayflow-live-activity');
+    for (const delayMs of [1000, 5000]) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      if (await setExcludedFromBackupAsync(path)) {
+        backupExclusionDone = true;
+        return;
+      }
+    }
+  } catch {
+    // Native helper missing on this binary — nothing to do.
   }
 }
 
@@ -457,6 +532,60 @@ export async function tdLogout(): Promise<TdOutcome> {
     return { ok: true, value: undefined };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : 'Logout failed.' };
+  }
+}
+
+/** Was this rejection the native "no client" error (nothing left to act on)? */
+function isClientNotInitialized(e: unknown): boolean {
+  const code = (e as { code?: unknown } | null)?.code;
+  if (code === 'CLIENT_NOT_INITIALIZED') return true;
+  return e instanceof Error && e.message.includes('not initialized');
+}
+
+/**
+ * Destroy the TDLib client (TDLib's `destroy`: closes the instance and wipes
+ * its local data WITHOUT a server round-trip — works offline). The fallback
+ * when tdLogout cannot reach Telegram. A never-started client counts as
+ * success: there is nothing to destroy.
+ */
+export async function tdDestroy(): Promise<TdOutcome> {
+  const td = tdModule();
+  if (!td) return UNAVAILABLE;
+  try {
+    await td.destroy();
+  } catch (e) {
+    if (!isClientNotInitialized(e)) {
+      return {
+        ok: false,
+        error: e instanceof Error ? e.message : 'Could not destroy the Telegram session.',
+      };
+    }
+  }
+  started = false;
+  currentAuthState = 'unconfigured';
+  userNames.clear();
+  return { ok: true, value: undefined };
+}
+
+/**
+ * Delete TDLib's on-disk database directory (Documents/tdlib) with
+ * expo-file-system. Safe when the directory does not exist. Call AFTER
+ * tdLogout/tdDestroy — belt and suspenders so no session keys or message
+ * database ever linger on disk once the user disconnects.
+ */
+export async function tdWipeDatabase(): Promise<TdOutcome> {
+  if (Platform.OS === 'web') return { ok: true, value: undefined };
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { Directory, Paths } = require('expo-file-system') as typeof import('expo-file-system');
+    const dir = new Directory(Paths.document, 'tdlib');
+    if (dir.exists) dir.delete();
+    return { ok: true, value: undefined };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : 'Could not delete Telegram data.',
+    };
   }
 }
 
@@ -625,41 +754,81 @@ function completedLocalPath(file: RawObject | null): string | null {
   return str(local.path);
 }
 
+/** In-flight photo resolves by file id — concurrent mounts share one loop. */
+const photoResolveInFlight = new Map<number, Promise<string | null>>();
+/** At most this many download/poll loops run at once; extras wait for a slot. */
+const MAX_PHOTO_RESOLVES = 4;
+let activePhotoResolves = 0;
+const photoResolveQueue: Array<() => void> = [];
+
+async function acquirePhotoSlot(): Promise<void> {
+  if (activePhotoResolves < MAX_PHOTO_RESOLVES) {
+    activePhotoResolves += 1;
+    return;
+  }
+  await new Promise<void>((resolve) => photoResolveQueue.push(resolve));
+  // The releasing loop handed its slot over directly — already counted.
+}
+
+function releasePhotoSlot(): void {
+  const next = photoResolveQueue.shift();
+  if (next) next();
+  else activePhotoResolves -= 1;
+}
+
 /**
  * Download a photo file and resolve its local path. Waits on both updateFile
- * events and getFile polling; gives up (null) after ~15s.
+ * events and getFile polling; gives up (null) after ~15s. Concurrent calls
+ * for the SAME file share one download+poll loop (scrolling a photo-heavy
+ * thread mounts/unmounts bubbles rapidly), and at most MAX_PHOTO_RESOLVES
+ * loops run at once so the native bridge never floods with pollers.
  */
-export async function tdResolvePhoto(fileId: number): Promise<string | null> {
+export function tdResolvePhoto(fileId: number): Promise<string | null> {
+  const existing = photoResolveInFlight.get(fileId);
+  if (existing) return existing;
+  const promise = resolvePhotoNow(fileId).finally(() => {
+    photoResolveInFlight.delete(fileId);
+  });
+  photoResolveInFlight.set(fileId, promise);
+  return promise;
+}
+
+async function resolvePhotoNow(fileId: number): Promise<string | null> {
   const td = tdModule();
   if (!td) return null;
+  await acquirePhotoSlot();
   try {
-    const initial = completedLocalPath(safeParse((await td.downloadFile(fileId))?.raw));
-    if (initial) return initial;
-  } catch {
-    return null;
-  }
+    try {
+      const initial = completedLocalPath(safeParse((await td.downloadFile(fileId))?.raw));
+      if (initial) return initial;
+    } catch {
+      return null;
+    }
 
-  return new Promise<string | null>((resolve) => {
-    let done = false;
-    const finish = (path: string | null) => {
-      if (done) return;
-      done = true;
-      unsubscribe();
-      clearInterval(poll);
-      clearTimeout(cap);
-      resolve(path);
-    };
-    const unsubscribe = onTdUpdate((u) => {
-      if (u.kind === 'file' && u.fileId === fileId && u.completed) finish(u.localPath);
+    return await new Promise<string | null>((resolve) => {
+      let done = false;
+      const finish = (path: string | null) => {
+        if (done) return;
+        done = true;
+        unsubscribe();
+        clearInterval(poll);
+        clearTimeout(cap);
+        resolve(path);
+      };
+      const unsubscribe = onTdUpdate((u) => {
+        if (u.kind === 'file' && u.fileId === fileId && u.completed) finish(u.localPath);
+      });
+      const poll = setInterval(async () => {
+        try {
+          const path = completedLocalPath(safeParse((await td.getFile(fileId))?.raw));
+          if (path) finish(path);
+        } catch {
+          // keep waiting until the cap
+        }
+      }, 750);
+      const cap = setTimeout(() => finish(null), 15000);
     });
-    const poll = setInterval(async () => {
-      try {
-        const path = completedLocalPath(safeParse((await td.getFile(fileId))?.raw));
-        if (path) finish(path);
-      } catch {
-        // keep waiting until the cap
-      }
-    }, 750);
-    const cap = setTimeout(() => finish(null), 15000);
-  });
+  } finally {
+    releasePhotoSlot();
+  }
 }

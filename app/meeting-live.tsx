@@ -1,8 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
 import dayjs from 'dayjs';
+import * as Notifications from 'expo-notifications';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeIn } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { EmptyState } from '../src/components/EmptyState';
@@ -178,43 +179,75 @@ export default function MeetingLiveScreen() {
   );
 
   // ---- Safety row ----------------------------------------------------------
-  // Armed: a missed-check-in escalation is counting down (see lib/safety).
-  // Pending: this live session will arm one when it ends.
+  // The escalation arms at session START (lib/safety) — so while a safety
+  // session is live, an armed record with a concrete deadline exists. The
+  // copy must stay truthful in every state: armed shows the real alert time;
+  // live-but-not-armed means arming was refused (notifications denied) or
+  // the user already checked in, and must never promise an alert that
+  // cannot fire.
+  const safetyConfigured = safetyOn && !!contactPhone;
   const safetyPending =
-    isLive && !!active && active.checkInAfterMin != null && safetyOn && !!contactPhone;
+    isLive && !!active && active.checkInAfterMin != null && safetyConfigured;
   const safetyName = contactName.trim() || 'Your contact';
-  const safetyRow =
-    escalation || safetyPending ? (
-      <View style={[styles.safetyRow, { backgroundColor: theme.card, borderColor: theme.border }]}>
-        <Ionicons
-          name="shield-checkmark-outline"
-          size={15}
-          color={escalation ? AMBER : theme.textSecondary}
-        />
-        <Text style={[styles.safetyLabel, { color: theme.textSecondary }]} numberOfLines={2}>
-          {escalation
-            ? `Check-in armed · ${safetyName} will be alerted at ${dayjs(escalation.deadline).format('h:mm A')}`
-            : `Safety on · ${safetyName} will be alerted if you miss your check-in`}
-        </Text>
-        {escalation ? (
-          <Pressable
-            onPress={() => {
-              successHaptic();
-              void disarmSafetyEscalation();
-            }}
-            hitSlop={8}
-            style={({ pressed }) => [
-              styles.safetyOkBtn,
-              { backgroundColor: theme.accent, transform: [{ scale: pressed ? 0.95 : 1 }] },
-            ]}
-            accessibilityRole="button"
-            accessibilityLabel="I'm OK — cancel the safety alert"
-          >
-            <Text style={styles.safetyOkLabel}>I&apos;m OK</Text>
-          </Pressable>
-        ) : null}
-      </View>
-    ) : null;
+
+  // Distinguish "arming refused: notifications denied" from "checked in".
+  const [notifBlocked, setNotifBlocked] = useState(false);
+  useEffect(() => {
+    if (Platform.OS === 'web' || !safetyPending || escalation) return;
+    let alive = true;
+    Notifications.getPermissionsAsync()
+      .then((p) => {
+        if (alive) setNotifBlocked(!p.granted);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [safetyPending, escalation]);
+
+  let safetyText: string | null = null;
+  let safetyAmber = false;
+  if (escalation) {
+    const at = dayjs(escalation.deadline).format('h:mm A');
+    safetyText = isLive
+      ? `Safety on · ${safetyName} will be alerted at ${at} unless you check in`
+      : `Check-in armed · ${safetyName} will be alerted at ${at}`;
+    safetyAmber = !isLive;
+  } else if (safetyPending) {
+    safetyText = notifBlocked
+      ? 'Safety alert is not armed — allow notifications for DayFlow to enable it'
+      : 'Checked in — the alert countdown is off';
+    safetyAmber = notifBlocked;
+  }
+  const safetyRow = safetyText ? (
+    <View style={[styles.safetyRow, { backgroundColor: theme.card, borderColor: theme.border }]}>
+      <Ionicons
+        name={escalation ? 'shield-checkmark-outline' : 'shield-outline'}
+        size={15}
+        color={safetyAmber ? AMBER : theme.textSecondary}
+      />
+      <Text style={[styles.safetyLabel, { color: theme.textSecondary }]} numberOfLines={2}>
+        {safetyText}
+      </Text>
+      {escalation && !isLive ? (
+        <Pressable
+          onPress={() => {
+            successHaptic();
+            void disarmSafetyEscalation();
+          }}
+          hitSlop={8}
+          style={({ pressed }) => [
+            styles.safetyOkBtn,
+            { backgroundColor: theme.accent, transform: [{ scale: pressed ? 0.95 : 1 }] },
+          ]}
+          accessibilityRole="button"
+          accessibilityLabel="I'm OK — cancel the safety alert"
+        >
+          <Text style={styles.safetyOkLabel}>I&apos;m OK</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  ) : null;
 
   // Celebration / graceful exit while the session tears down.
   if (ending || celebration) {

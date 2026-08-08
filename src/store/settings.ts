@@ -3,6 +3,7 @@ import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import { setRecurrenceWeekStart } from '../lib/recurrence';
 import type { Settings } from '../types';
+import { PERSIST_VERSION, migrateStore } from './persistVersion';
 
 export const DEFAULT_SETTINGS: Settings = {
   themeMode: 'system',
@@ -58,6 +59,8 @@ export const useSettings = create<SettingsState>()(
     }),
     {
       name: 'dayflow-settings',
+      version: PERSIST_VERSION,
+      migrate: migrateStore,
       storage: createJSONStorage(() => AsyncStorage),
       merge: (persisted, current) => ({
         ...current,

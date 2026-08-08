@@ -59,6 +59,12 @@ export interface MeetingInfo {
    * change the occurrence's total amount.
    */
   deposits?: Record<DayKey, number>;
+  /**
+   * Occurrence dates where the client didn't show. A no-show day stays
+   * uncompleted/unpaid (it never earns); the flag only keeps the row visible
+   * in history with a "No-show" tag.
+   */
+  noShows?: DayKey[];
 }
 
 /** A meeting currently in progress (live timer). */

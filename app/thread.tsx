@@ -32,6 +32,10 @@ import {
   type PhotoReply,
   type QuickAction,
 } from '../src/components/messages/QuickReplies';
+import {
+  ScheduleSendSheet,
+  ScheduledBanner,
+} from '../src/components/messages/ScheduleSendSheet';
 import { ShareAvailability } from '../src/components/messages/ShareAvailability';
 import { formatPhoneDisplay } from '../src/components/messages/format';
 import {
@@ -129,6 +133,7 @@ export default function ThreadScreen() {
   const loadOlder = useMessages((s) => s.loadOlder);
   const retryOutbox = useMessages((s) => s.retryOutbox);
   const discardOutbox = useMessages((s) => s.discardOutbox);
+  const scheduleSend = useMessages((s) => s.scheduleSend);
   const tgMessages = useTelegram((s) => s.messages);
   const tgChats = useTelegram((s) => s.chats);
   const tgSendingTo = useTelegram((s) => s.sendingTo);
@@ -148,6 +153,7 @@ export default function ThreadScreen() {
   const [panelOpen, setPanelOpen] = useState(false);
   const [quickOpen, setQuickOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
   /** Full-screen viewer for Telegram photos (local files, no auth fetch). */
   const [localViewerUri, setLocalViewerUri] = useState<string | null>(null);
@@ -163,19 +169,26 @@ export default function ThreadScreen() {
   }, [draftParam]);
 
   // Read state: clear the unread count on focus and again after each sync.
+  const focusedRef = useRef(false);
   useFocusEffect(
     useCallback(() => {
-      if (!number) return;
-      if (isTelegram) tgMarkRead(number);
-      else markRead(number);
+      focusedRef.current = true;
+      if (number) {
+        if (isTelegram) tgMarkRead(number);
+        else markRead(number);
+      }
+      return () => {
+        focusedRef.current = false;
+      };
     }, [number, isTelegram, markRead, tgMarkRead])
   );
   useEffect(() => {
     if (!isTelegram && number && lastSyncAt != null) markRead(number);
   }, [isTelegram, number, lastSyncAt, markRead]);
-  // Telegram arrivals while the thread is open get read receipts immediately.
+  // Telegram arrivals while the thread is FOCUSED get read receipts
+  // immediately — a thread merely buried in the nav stack must not mark.
   useEffect(() => {
-    if (isTelegram && number) tgMarkRead(number);
+    if (isTelegram && number && focusedRef.current) tgMarkRead(number);
   }, [isTelegram, number, tgMessages, tgMarkRead]);
 
   const known = useMemo(() => knownClients(tasks), [tasks]);
@@ -314,6 +327,37 @@ export default function ThreadScreen() {
     [isTelegram, tgSend, send, number]
   );
 
+  // ── Scheduled sends (SMS only — Twilio holds the message, phone can be off)
+  const openScheduleSheet = useCallback(() => {
+    if (isTelegram) return;
+    if (!draft.trim()) {
+      Alert.alert('Nothing to schedule', 'Type the message first, then schedule it.');
+      return;
+    }
+    tapHaptic();
+    setQuickOpen(false);
+    setScheduleOpen(true);
+  }, [isTelegram, draft]);
+
+  const handleSchedule = useCallback(
+    async (sendAtMs: number) => {
+      const body = draft.trim();
+      if (!body) return false;
+      const ok = await scheduleSend(number, body, sendAtMs);
+      if (ok) {
+        setDraft('');
+        setScheduleOpen(false);
+      } else {
+        Alert.alert(
+          'Could not schedule',
+          useMessages.getState().lastError ?? 'Something went wrong.'
+        );
+      }
+      return ok;
+    },
+    [draft, number, scheduleSend]
+  );
+
   // ── Quick replies ──────────────────────────────────────────────────────────
   const photoReplies = settings.photoQuickReplies;
 
@@ -336,8 +380,8 @@ export default function ThreadScreen() {
     );
   }, [clientName, tasks, nextBooking, settings.currencySymbol, insertTemplate]);
 
-  const quickActions = useMemo<QuickAction[]>(
-    () => [
+  const quickActions = useMemo<QuickAction[]>(() => {
+    const actions: QuickAction[] = [
       {
         icon: 'calendar-clear-outline',
         label: 'Share availability',
@@ -347,9 +391,17 @@ export default function ThreadScreen() {
         },
       },
       { icon: 'wallet-outline', label: 'Request deposit', onPress: insertDepositRequest },
-    ],
-    [insertDepositRequest]
-  );
+    ];
+    // Scheduled sends are Twilio-native — SMS threads only.
+    if (!isTelegram) {
+      actions.push({
+        icon: 'time-outline',
+        label: 'Schedule message',
+        onPress: openScheduleSheet,
+      });
+    }
+    return actions;
+  }, [insertDepositRequest, isTelegram, openScheduleSheet]);
 
   const sendPhotoReply = useCallback(
     async (photo: PhotoReply) => {
@@ -586,6 +638,8 @@ export default function ThreadScreen() {
           },
         ]}
       >
+        {/* Pending scheduled sends for this thread (renders nothing if none). */}
+        {!isTelegram ? <ScheduledBanner counterparty={number} /> : null}
         {!clientName ? <LinkClientRow counterparty={number} /> : null}
         {showError ? (
           <ErrorBanner message={lastError} onDismiss={() => setDismissedError(lastError)} />
@@ -616,6 +670,12 @@ export default function ThreadScreen() {
           // SMS failures land in the retry outbox, so the draft can clear;
           // Telegram keeps the draft (no outbox on that channel).
           clearOnFail={!isTelegram}
+          // CROSS-FILE NEED (Composer.tsx is not owned by this change): the
+          // send button should fire an optional `onLongPressSend` prop from
+          // its Pressable's onLongPress. Passed via spread so long-press-to-
+          // schedule lights up the moment Composer supports it; until then
+          // the ⚡ quick action "Schedule message" opens the same sheet.
+          {...(!isTelegram ? { onLongPressSend: openScheduleSheet } : {})}
         />
       </View>
 
@@ -631,6 +691,14 @@ export default function ThreadScreen() {
         onClose={() => setShareOpen(false)}
         onInsert={insertTemplate}
       />
+      {!isTelegram ? (
+        <ScheduleSendSheet
+          visible={scheduleOpen}
+          onClose={() => setScheduleOpen(false)}
+          body={draft.trim()}
+          onSchedule={handleSchedule}
+        />
+      ) : null}
       <PhotoViewer url={viewerUrl} onClose={() => setViewerUrl(null)} />
       <LocalPhotoViewer uri={localViewerUri} onClose={() => setLocalViewerUri(null)} />
     </KeyboardAvoidingView>

@@ -3,12 +3,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   FlatList,
+  Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { EmptyState } from '../src/components/EmptyState';
 import { BackButton } from '../src/components/clients/BackButton';
@@ -39,6 +42,106 @@ interface ActivePlayer {
   sub: { remove: () => void };
 }
 
+const NOTE_SAVE_DEBOUNCE_MS = 600;
+
+/**
+ * Inline note row shown under an expanded call: "Add note" / the saved note;
+ * tapping swaps in a TextInput that autosaves on blur (debounced while
+ * typing, like the client notes card). Notes are private context.
+ */
+function CallNoteEditor({ sid }: { sid: string }) {
+  const theme = useTheme();
+  const saved = useCalls((s) => s.callNotes[sid] ?? '');
+  const setCallNote = useCalls((s) => s.setCallNote);
+
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(saved);
+  const dirty = useRef(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latest = useRef(text);
+
+  // Adopt store changes (e.g. late rehydration) until the user has typed.
+  useEffect(() => {
+    if (!dirty.current) {
+      setText(saved);
+      latest.current = saved;
+    }
+  }, [saved]);
+
+  // Flush any pending edit on unmount (row collapsed / screen left).
+  useEffect(
+    () => () => {
+      if (timer.current) {
+        clearTimeout(timer.current);
+        setCallNote(sid, latest.current);
+      }
+    },
+    [sid, setCallNote]
+  );
+
+  const onChange = (t: string) => {
+    dirty.current = true;
+    latest.current = t;
+    setText(t);
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => {
+      timer.current = null;
+      setCallNote(sid, t);
+    }, NOTE_SAVE_DEBOUNCE_MS);
+  };
+
+  const onBlur = () => {
+    if (timer.current) {
+      clearTimeout(timer.current);
+      timer.current = null;
+    }
+    setCallNote(sid, latest.current);
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <TextInput
+        value={text}
+        onChangeText={onChange}
+        onBlur={onBlur}
+        autoFocus
+        multiline
+        placeholder="Private note about this call…"
+        placeholderTextColor={theme.textTertiary}
+        style={[
+          styles.noteInput,
+          { backgroundColor: theme.surface, color: theme.text },
+        ]}
+        accessibilityLabel="Call note"
+      />
+    );
+  }
+
+  return (
+    <Pressable
+      onPress={() => {
+        tapHaptic();
+        setEditing(true);
+      }}
+      accessibilityRole="button"
+      accessibilityLabel={saved ? `Edit note: ${saved}` : 'Add note'}
+      style={({ pressed }) => [styles.noteRow, pressed && { opacity: 0.6 }]}
+    >
+      <Ionicons name="create-outline" size={13} color={theme.textTertiary} />
+      <Text
+        style={[
+          styles.noteRowText,
+          { color: saved ? theme.textSecondary : theme.textTertiary },
+        ]}
+        numberOfLines={1}
+      >
+        {saved || 'Add note'}
+      </Text>
+    </Pressable>
+  );
+}
+
 const EMPTY_STATES: Record<CallFilter, { icon: string; title: string; subtitle: string }> = {
   all: {
     icon: 'call-outline',
@@ -66,6 +169,7 @@ export default function CallsScreen() {
   const calls = useCalls((s) => s.calls);
   const voicemails = useCalls((s) => s.voicemails);
   const heardAt = useCalls((s) => s.heardAt);
+  const callNotes = useCalls((s) => s.callNotes);
   const syncing = useCalls((s) => s.syncing);
   const lastError = useCalls((s) => s.lastError);
   const sync = useCalls((s) => s.sync);
@@ -79,7 +183,7 @@ export default function CallsScreen() {
   const [dismissedError, setDismissedError] = useState<string | null>(null);
   const [loadingSid, setLoadingSid] = useState<string | null>(null);
   const [playingSid, setPlayingSid] = useState<string | null>(null);
-  /** Recording SID whose transcript is expanded to full text (one at a time). */
+  /** Call SID whose row is expanded — full transcript + note editor (one at a time). */
   const [expandedSid, setExpandedSid] = useState<string | null>(null);
   const playerRef = useRef<ActivePlayer | null>(null);
 
@@ -191,10 +295,19 @@ export default function CallsScreen() {
     router.push(`/thread?number=${encodeURIComponent(counterparty)}`);
   };
 
-  const toggleTranscript = useCallback((sid: string) => {
-    tapHaptic();
-    setExpandedSid((cur) => (cur === sid ? null : sid));
-  }, []);
+  const toggleExpanded = useCallback(
+    (sid: string, voicemailSid?: string) => {
+      tapHaptic();
+      setExpandedSid((cur) => {
+        const expanding = cur !== sid;
+        // Reading the transcript counts as hearing the voicemail — the
+        // unheard dot must not survive an expanded read.
+        if (expanding && voicemailSid) markHeard(voicemailSid);
+        return expanding ? sid : null;
+      });
+    },
+    [markHeard]
+  );
 
   const playStateFor = (row: CallRowData): PlayState => {
     const sid = row.voicemail?.sid;
@@ -244,18 +357,21 @@ export default function CallsScreen() {
             data={visibleRows}
             keyExtractor={(r: CallRowData) => r.sid}
             renderItem={({ item }) => (
-              <CallRow
-                row={item}
-                name={nameByNumber.get(item.counterparty) ?? null}
-                unheard={item.voicemail != null && !heardAt[item.voicemail.sid]}
-                playState={playStateFor(item)}
-                expanded={item.voicemail != null && expandedSid === item.voicemail.sid}
-                onPress={() => openThread(item.counterparty)}
-                onTogglePlay={() => void togglePlay(item)}
-                onToggleTranscript={() => {
-                  if (item.voicemail) toggleTranscript(item.voicemail.sid);
-                }}
-              />
+              <View>
+                <CallRow
+                  row={item}
+                  name={nameByNumber.get(item.counterparty) ?? null}
+                  unheard={item.voicemail != null && !heardAt[item.voicemail.sid]}
+                  playState={playStateFor(item)}
+                  expanded={expandedSid === item.sid}
+                  note={callNotes[item.sid] ?? null}
+                  onPress={() => openThread(item.counterparty)}
+                  onLongPress={() => toggleExpanded(item.sid, item.voicemail?.sid)}
+                  onTogglePlay={() => void togglePlay(item)}
+                  onToggleTranscript={() => toggleExpanded(item.sid, item.voicemail?.sid)}
+                />
+                {expandedSid === item.sid ? <CallNoteEditor sid={item.sid} /> : null}
+              </View>
             )}
             ItemSeparatorComponent={() => (
               <View style={[styles.separator, { backgroundColor: theme.separator }]} />
@@ -264,6 +380,8 @@ export default function CallsScreen() {
               <EmptyState icon={empty.icon} title={empty.title} subtitle={empty.subtitle} />
             }
             contentContainerStyle={{ paddingBottom: bottomPad }}
+            keyboardShouldPersistTaps="handled"
+            automaticallyAdjustKeyboardInsets
             refreshControl={
               <RefreshControl
                 refreshing={syncing}
@@ -302,5 +420,32 @@ const styles = StyleSheet.create({
   separator: {
     height: StyleSheet.hairlineWidth,
     marginLeft: SPACING.lg + 40 + SPACING.md,
+  },
+  // Note affordance/input line up with the row's text column (glyph + gap).
+  noteRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginLeft: SPACING.lg + 40 + SPACING.md,
+    marginRight: SPACING.lg,
+    paddingVertical: 6,
+    marginBottom: SPACING.sm,
+  },
+  noteRowText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  noteInput: {
+    marginLeft: SPACING.lg + 40 + SPACING.md,
+    marginRight: SPACING.lg,
+    marginBottom: SPACING.sm,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    fontSize: 13,
+    lineHeight: 18,
+    minHeight: 52,
+    textAlignVertical: 'top',
   },
 });

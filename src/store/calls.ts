@@ -12,6 +12,7 @@ import {
   type VoicemailEntry,
 } from '../lib/voiceApi';
 import { isPhoneBlocked, type ClientMeta } from './clientMeta';
+import { PERSIST_VERSION, migrateStore } from './persistVersion';
 
 /**
  * Local call-log + voicemail cache. The provider account (user-owned) is the
@@ -46,11 +47,18 @@ interface CallsState {
   voicemails: Record<string, StoredVoicemail>;
   /** When each voicemail was first listened to, by recording SID. */
   heardAt: Record<string, number>;
+  /**
+   * Private note per call, keyed by call SID. Local-only context (who it was,
+   * what was agreed) — never sent anywhere, like client notes.
+   */
+  callNotes: Record<string, string>;
   syncing: boolean;
   lastError: string | null;
 
   sync: (forwardTo: string) => Promise<void>;
   markHeard: (sid: string) => void;
+  /** Save (or clear, with empty text) the private note on one call. */
+  setCallNote: (sid: string, text: string) => void;
   clearAll: () => void;
 }
 
@@ -60,6 +68,7 @@ export const useCalls = create<CallsState>()(
       calls: {},
       voicemails: {},
       heardAt: {},
+      callNotes: {},
       syncing: false,
       lastError: null,
 
@@ -151,16 +160,32 @@ export const useCalls = create<CallsState>()(
       markHeard: (sid) =>
         set((s) => (s.heardAt[sid] ? s : { heardAt: { ...s.heardAt, [sid]: Date.now() } })),
 
-      clearAll: () => set({ calls: {}, voicemails: {}, heardAt: {}, lastError: null }),
+      setCallNote: (sid, text) =>
+        set((s) => {
+          const trimmed = text.trim();
+          if (!trimmed) {
+            if (!(sid in s.callNotes)) return s;
+            const { [sid]: _removed, ...rest } = s.callNotes;
+            return { callNotes: rest };
+          }
+          if (s.callNotes[sid] === trimmed) return s;
+          return { callNotes: { ...s.callNotes, [sid]: trimmed } };
+        }),
+
+      clearAll: () =>
+        set({ calls: {}, voicemails: {}, heardAt: {}, callNotes: {}, lastError: null }),
     }),
     {
       name: 'dayflow-calls',
+      version: PERSIST_VERSION,
+      migrate: migrateStore,
       storage: createJSONStorage(() => AsyncStorage),
       // Never persist transient flags.
       partialize: (s) => ({
         calls: s.calls,
         voicemails: s.voicemails,
         heardAt: s.heardAt,
+        callNotes: s.callNotes,
       }) as Partial<CallsState>,
     }
   )

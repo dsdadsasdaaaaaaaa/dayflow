@@ -1,11 +1,20 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useEffect, useMemo, useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Modal,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
-  computeFreeSlots,
+  computeFreeSlotsWithCalendar,
   formatSlotRange,
   formatSlotsMessage,
+  type DayFreeSlots,
   type FreeSlot,
 } from '../../lib/availability';
 import { formatDayRelative } from '../../lib/dates';
@@ -40,12 +49,33 @@ export function ShareAvailability({ visible, onClose, onInsert }: Props) {
   const tasks = useTasks((s) => s.tasks);
   const dayStartHour = useSettings((s) => s.settings.dayStartHour);
   const dayEndHour = useSettings((s) => s.settings.dayEndHour);
+  const showCalendarEvents = useSettings((s) => s.settings.showCalendarEvents);
+  const hiddenCalendarIds = useSettings((s) => s.settings.hiddenCalendarIds);
 
   // Recomputed on open so "today" and its floor track the current time.
-  const days = useMemo(
-    () => (visible ? computeFreeSlots(tasks, { dayStartHour, dayEndHour }, DAYS_AHEAD) : []),
-    [visible, tasks, dayStartHour, dayEndHour]
-  );
+  // Async because device-calendar events subtract from availability too.
+  const [days, setDays] = useState<DayFreeSlots[]>([]);
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    if (!visible) {
+      setDays([]);
+      return;
+    }
+    let alive = true;
+    setLoading(true);
+    computeFreeSlotsWithCalendar(
+      tasks,
+      { dayStartHour, dayEndHour, showCalendarEvents, hiddenCalendarIds },
+      DAYS_AHEAD
+    ).then((result) => {
+      if (!alive) return;
+      setDays(result);
+      setLoading(false);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [visible, tasks, dayStartHour, dayEndHour, showCalendarEvents, hiddenCalendarIds]);
 
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   useEffect(() => {
@@ -69,7 +99,8 @@ export function ShareAvailability({ visible, onClose, onInsert }: Props) {
     onClose();
   };
 
-  const fullyBooked = days.every((d) => d.slots.length === 0);
+  // Never claim "fully booked" while the calendar is still being read.
+  const fullyBooked = !loading && days.every((d) => d.slots.length === 0);
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -93,7 +124,11 @@ export function ShareAvailability({ visible, onClose, onInsert }: Props) {
           <View style={[styles.handle, { backgroundColor: theme.border }]} />
           <Text style={[styles.title, { color: theme.text }]}>Share availability</Text>
 
-          {fullyBooked ? (
+          {loading ? (
+            <View style={styles.emptyWrap}>
+              <ActivityIndicator color={theme.textTertiary} />
+            </View>
+          ) : fullyBooked ? (
             <View style={styles.emptyWrap}>
               <Ionicons name="calendar-outline" size={28} color={theme.textTertiary} />
               <Text style={[styles.emptyText, { color: theme.textSecondary }]}>
@@ -153,7 +188,7 @@ export function ShareAvailability({ visible, onClose, onInsert }: Props) {
             </ScrollView>
           )}
 
-          {!fullyBooked ? (
+          {!loading && !fullyBooked ? (
             <Pressable
               onPress={insert}
               disabled={chosen.length === 0}

@@ -75,6 +75,29 @@ export function buildDepositRequest(opts: {
     : `To lock in a booking, I ask for a deposit up front.`;
 }
 
+/**
+ * Payment-reminder draft for the composer: friendly, firm, discreet — no
+ * detail about what the money is for. One variant, no emoji. Never auto-sends.
+ */
+export function buildPaymentReminder(opts: {
+  /** Total outstanding across unpaid occurrences. */
+  amount: number;
+  symbol: string;
+  /** Day of the oldest unpaid occurrence. */
+  oldestOwedDay: DayKey;
+}): string {
+  const { amount, symbol, oldestOwedDay } = opts;
+  // Same day-labeling ladder as the deposit request, mirrored into the past.
+  const diff = daysBetween(oldestOwedDay, todayKey());
+  const dayLabel =
+    diff <= 1
+      ? formatDayRelative(oldestOwedDay).toLowerCase()
+      : diff < 7
+        ? fromDayKey(oldestOwedDay).toLocaleDateString('en-US', { weekday: 'long' })
+        : formatDayLong(oldestOwedDay);
+  return `Hi! Gentle reminder — ${formatMoney(amount, symbol)} outstanding from ${dayLabel}. Whenever's easy today or tomorrow.`;
+}
+
 interface Props {
   /** Text templates from settings.messageTemplates. */
   templates: string[];

@@ -15,9 +15,16 @@ interface Props {
   /** Voicemail not yet listened to — shows the accent dot. */
   unheard: boolean;
   playState: PlayState;
-  /** Transcript shown in full instead of the 2-line clamp. */
+  /**
+   * Row expanded: transcript shown in full (no 2-line clamp) and the screen
+   * renders the note editor beneath, so the caption here hides.
+   */
   expanded: boolean;
+  /** Private note saved on this call (one-line caption when collapsed). */
+  note: string | null;
   onPress: () => void;
+  /** Long-press on the row — the screen uses it to expand/collapse. */
+  onLongPress: () => void;
   onTogglePlay: () => void;
   onToggleTranscript: () => void;
 }
@@ -33,7 +40,9 @@ function formatCallDuration(sec: number): string {
  * One call-log row: direction glyph (missed calls in danger red), name or
  * number, relative day + time + duration, and a play/pause control when the
  * caller left a voicemail. Transcribed voicemails show the text quoted
- * beneath (2-line clamp; tap to expand).
+ * beneath (2-line clamp; tap to expand). A saved call note renders as a
+ * one-line caption (private context, like client notes); long-press the row
+ * to expand it for editing.
  */
 export function CallRow({
   row,
@@ -41,7 +50,9 @@ export function CallRow({
   unheard,
   playState,
   expanded,
+  note,
   onPress,
+  onLongPress,
   onTogglePlay,
   onToggleTranscript,
 }: Props) {
@@ -73,8 +84,10 @@ export function CallRow({
       <View style={styles.topRow}>
         <Pressable
           onPress={onPress}
+          onLongPress={onLongPress}
           accessibilityRole="button"
           accessibilityLabel={`${row.missed ? 'Missed call' : row.direction === 'in' ? 'Call from' : 'Call to'} ${title}`}
+          accessibilityHint="Long press to add a note"
           style={({ pressed }) => [styles.main, pressed && { backgroundColor: theme.surface }]}
         >
           <View style={[styles.glyph, { backgroundColor: theme.surface }]}>
@@ -142,6 +155,14 @@ export function CallRow({
           </Text>
         </Pressable>
       ) : null}
+      {!expanded && note ? (
+        <View style={styles.noteRow} accessible accessibilityLabel={`Call note: ${note}`}>
+          <Ionicons name="create-outline" size={12} color={theme.textTertiary} />
+          <Text style={[styles.note, { color: theme.textSecondary }]} numberOfLines={1}>
+            {note}
+          </Text>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -204,5 +225,20 @@ const styles = StyleSheet.create({
     marginRight: SPACING.lg,
     marginTop: -SPACING.xs,
     paddingBottom: SPACING.md,
+  },
+  noteRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginLeft: TRANSCRIPT_INSET,
+    marginRight: SPACING.lg,
+    marginTop: -SPACING.xs,
+    paddingBottom: SPACING.md,
+  },
+  note: {
+    flex: 1,
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '400',
   },
 });

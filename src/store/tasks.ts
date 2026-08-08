@@ -4,6 +4,7 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import { uid } from '../lib/id';
 import { isInstanceCompleted, taskOccursOn } from '../lib/recurrence';
 import type { DayKey, Task, TaskInstance } from '../types';
+import { PERSIST_VERSION, migrateStore } from './persistVersion';
 
 export interface NewTaskInput {
   title: string;
@@ -41,6 +42,12 @@ interface TaskState {
   toggleComplete: (id: string, day: DayKey) => void;
   /** Toggle whether a meeting occurrence's payment has been collected. */
   togglePaid: (id: string, day: DayKey) => void;
+  /**
+   * Mark/unmark a meeting occurrence as a client no-show. Marking forces the
+   * occurrence uncompleted (no-shows never earn); unmarking restores it to
+   * completed so a history row survives the round-trip.
+   */
+  toggleNoShow: (id: string, day: DayKey) => void;
   /**
    * Record the settled final amount for one meeting occurrence
    * (tip/overtime/discount). Stored as an ABSOLUTE per-day override so later
@@ -82,6 +89,7 @@ function remapMeetingDay(task: Task, oldDate: DayKey | null, newDate: DayKey | n
       ...task.meeting.paidDates,
       ...Object.keys(task.meeting.extras ?? {}),
       ...Object.keys(task.meeting.deposits ?? {}),
+      ...(task.meeting.noShows ?? []),
     ]);
     keys.delete(newDate);
     if (keys.size !== 1) return task;
@@ -105,6 +113,10 @@ function remapMeetingDay(task: Task, oldDate: DayKey | null, newDate: DayKey | n
     deposits[newDate] = deposits[oldDate];
     delete deposits[oldDate];
     meeting.deposits = deposits;
+    changed = true;
+  }
+  if (meeting.noShows?.includes(oldDate)) {
+    meeting.noShows = meeting.noShows.map((d) => (d === oldDate ? newDate : d));
     changed = true;
   }
   return changed ? { ...task, meeting } : task;
@@ -171,6 +183,9 @@ function sanitizeImportedTask(raw: unknown): Task | null {
                 .map(([k, v]) => [k, v as number])
             )
           : {},
+      noShows: Array.isArray(m.noShows)
+        ? m.noShows.filter((d): d is DayKey => dayKey(d) != null)
+        : [],
     };
   }
 
@@ -337,6 +352,7 @@ export const useTasks = create<TaskState>()(
                   t.meeting.deposits && t.meeting.deposits[day] != null
                     ? { [day]: t.meeting.deposits[day] }
                     : {},
+                noShows: t.meeting.noShows?.includes(day) ? [day] : [],
               }
             : null,
           createdAt: Date.now(),
@@ -370,6 +386,32 @@ export const useTasks = create<TaskState>()(
               [id]: { ...t, meeting: { ...t.meeting, paidDates }, updatedAt: Date.now() },
             },
           };
+        }),
+
+      toggleNoShow: (id, day) =>
+        set((s) => {
+          const t = s.tasks[id];
+          if (!t || !t.meeting) return s;
+          const cur = t.meeting.noShows ?? [];
+          const marking = !cur.includes(day);
+          const noShows = marking ? [...cur, day] : cur.filter((d) => d !== day);
+          let next: Task = {
+            ...t,
+            meeting: { ...t.meeting, noShows },
+            updatedAt: Date.now(),
+          };
+          // A no-show never earns: marking forces the occurrence uncompleted;
+          // unmarking restores it to completed (history rows round-trip).
+          if (t.recurrence) {
+            next = { ...next, completions: { ...t.completions, [day]: !marking } };
+          } else {
+            next = {
+              ...next,
+              completed: !marking,
+              completedAt: marking ? null : Date.now(),
+            };
+          }
+          return { tasks: { ...s.tasks, [id]: next } };
         }),
 
       setOccurrenceAmount: (id, day, amount) =>
@@ -422,7 +464,7 @@ export const useTasks = create<TaskState>()(
           skips: [],
           subtasks: t.subtasks.map((st) => ({ ...st, id: uid(), done: false })),
           meeting: t.meeting
-            ? { ...t.meeting, paidDates: [], extras: {}, deposits: {} }
+            ? { ...t.meeting, paidDates: [], extras: {}, deposits: {}, noShows: [] }
             : null,
           createdAt: Date.now(),
           updatedAt: Date.now(),
@@ -472,6 +514,8 @@ export const useTasks = create<TaskState>()(
     }),
     {
       name: 'dayflow-tasks',
+      version: PERSIST_VERSION,
+      migrate: migrateStore,
       storage: createJSONStorage(() => AsyncStorage),
     }
   )
