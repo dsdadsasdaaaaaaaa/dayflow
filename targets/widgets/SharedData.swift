@@ -109,6 +109,24 @@ struct GradientProgressCapsule: View {
   }
 }
 
+/// Flat unread-messages count pill (icon + number). Counts only — no content.
+struct UnreadPill: View {
+  let count: Int
+
+  var body: some View {
+    HStack(spacing: 3) {
+      Image(systemName: "message.fill")
+        .font(.system(size: 9, weight: .semibold))
+      Text("\(count)")
+        .font(.system(size: 11, weight: .bold, design: .rounded))
+    }
+    .foregroundStyle(DayFlowStyle.cyan)
+    .padding(.horizontal, 7)
+    .padding(.vertical, 3)
+    .background(Capsule().fill(DayFlowStyle.cyan.opacity(0.16)))
+  }
+}
+
 // MARK: - widget.today schema
 
 struct WidgetTaskItem: Decodable {
@@ -156,23 +174,35 @@ struct TodayWidgetData: Decodable {
   let total: Int
   let earnedTodayLabel: String
   let tasks: [WidgetTaskItem]
+  /// Unread SMS + Telegram + unheard voicemails. Counts only — safe everywhere.
+  let unreadCount: Int
+  /// PRIVACY: home-screen families only — never render on lock-screen families.
+  let nextMeetingClient: String
+  let nextMeetingTimeLabel: String
 
   init(
     dateKey: String,
     done: Int,
     total: Int,
     earnedTodayLabel: String,
-    tasks: [WidgetTaskItem]
+    tasks: [WidgetTaskItem],
+    unreadCount: Int,
+    nextMeetingClient: String,
+    nextMeetingTimeLabel: String
   ) {
     self.dateKey = dateKey
     self.done = done
     self.total = total
     self.earnedTodayLabel = earnedTodayLabel
     self.tasks = tasks
+    self.unreadCount = unreadCount
+    self.nextMeetingClient = nextMeetingClient
+    self.nextMeetingTimeLabel = nextMeetingTimeLabel
   }
 
   private enum CodingKeys: String, CodingKey {
     case dateKey, done, total, earnedTodayLabel, tasks
+    case unreadCount, nextMeetingClient, nextMeetingTimeLabel
   }
 
   init(from decoder: Decoder) throws {
@@ -182,6 +212,10 @@ struct TodayWidgetData: Decodable {
     total = (try? container.decodeIfPresent(Int.self, forKey: .total)) ?? 0
     earnedTodayLabel = (try? container.decodeIfPresent(String.self, forKey: .earnedTodayLabel)) ?? ""
     tasks = (try? container.decodeIfPresent([WidgetTaskItem].self, forKey: .tasks)) ?? []
+    unreadCount = (try? container.decodeIfPresent(Int.self, forKey: .unreadCount)) ?? 0
+    nextMeetingClient = (try? container.decodeIfPresent(String.self, forKey: .nextMeetingClient)) ?? ""
+    nextMeetingTimeLabel =
+      (try? container.decodeIfPresent(String.self, forKey: .nextMeetingTimeLabel)) ?? ""
   }
 
   var remaining: Int { max(total - done, 0) }
@@ -214,7 +248,10 @@ struct TodayWidgetData: Decodable {
       WidgetTaskItem(
         id: "p3", title: "Gym", timeLabel: "6:30 PM",
         colorHex: "#22D3EE", completed: false, isMeeting: false),
-    ]
+    ],
+    unreadCount: 2,
+    nextMeetingClient: "Alex",
+    nextMeetingTimeLabel: "2:00 PM"
   )
 }
 
@@ -227,6 +264,10 @@ struct EarningsWidgetData: Decodable {
   let outstandingLabel: String
   let meetingsDone: Int
   let hasGoal: Bool
+  /// Empty string when no meeting money earned today.
+  let earnedTodayLabel: String
+  /// Unread SMS + Telegram + unheard voicemails (same as the messages tab badge).
+  let unreadCount: Int
 
   init(
     earnedLabel: String,
@@ -234,7 +275,9 @@ struct EarningsWidgetData: Decodable {
     progress: Double,
     outstandingLabel: String,
     meetingsDone: Int,
-    hasGoal: Bool
+    hasGoal: Bool,
+    earnedTodayLabel: String,
+    unreadCount: Int
   ) {
     self.earnedLabel = earnedLabel
     self.goalLabel = goalLabel
@@ -242,10 +285,13 @@ struct EarningsWidgetData: Decodable {
     self.outstandingLabel = outstandingLabel
     self.meetingsDone = meetingsDone
     self.hasGoal = hasGoal
+    self.earnedTodayLabel = earnedTodayLabel
+    self.unreadCount = unreadCount
   }
 
   private enum CodingKeys: String, CodingKey {
     case earnedLabel, goalLabel, progress, outstandingLabel, meetingsDone, hasGoal
+    case earnedTodayLabel, unreadCount
   }
 
   init(from decoder: Decoder) throws {
@@ -256,6 +302,9 @@ struct EarningsWidgetData: Decodable {
     outstandingLabel = (try? container.decodeIfPresent(String.self, forKey: .outstandingLabel)) ?? ""
     meetingsDone = (try? container.decodeIfPresent(Int.self, forKey: .meetingsDone)) ?? 0
     hasGoal = (try? container.decodeIfPresent(Bool.self, forKey: .hasGoal)) ?? false
+    earnedTodayLabel =
+      (try? container.decodeIfPresent(String.self, forKey: .earnedTodayLabel)) ?? ""
+    unreadCount = (try? container.decodeIfPresent(Int.self, forKey: .unreadCount)) ?? 0
   }
 
   static let placeholder = EarningsWidgetData(
@@ -264,7 +313,9 @@ struct EarningsWidgetData: Decodable {
     progress: 0.3,
     outstandingLabel: "$150",
     meetingsDone: 3,
-    hasGoal: true
+    hasGoal: true,
+    earnedTodayLabel: "$150",
+    unreadCount: 2
   )
 }
 

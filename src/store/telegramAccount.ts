@@ -58,6 +58,8 @@ interface TelegramState {
   photoSending: boolean;
   lastError: string | null;
   connected: boolean;
+  /** chatId → epoch ms until which the counterpart shows as typing. */
+  typingUntil: Record<string, number>;
 
   refreshAuth: () => Promise<TdAuthState>;
   /** Start TDLib and, once authorized, sync imported chats + live updates. */
@@ -211,6 +213,15 @@ export const useTelegram = create<TelegramState>()(
             case 'authState':
               set({ authState: u.state, connected: u.state === 'ready' });
               return;
+            case 'typing':
+              // Typing shows for 6s unless renewed or explicitly cancelled.
+              set((s) => ({
+                typingUntil: {
+                  ...s.typingUntil,
+                  [u.chatId]: u.typing ? Date.now() + 6000 : 0,
+                },
+              }));
+              return;
             default:
               return;
           }
@@ -229,6 +240,7 @@ export const useTelegram = create<TelegramState>()(
         photoSending: false,
         lastError: null,
         connected: false,
+        typingUntil: {},
 
         refreshAuth: async () => {
           const state = await tdAuthState();

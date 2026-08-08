@@ -40,6 +40,25 @@ struct OutstandingChip: View {
   }
 }
 
+/// Flat "TODAY <amount>" row — small-caps label, emerald amount, no gradients.
+struct EarnedTodayRow: View {
+  let label: String
+
+  var body: some View {
+    HStack(spacing: 5) {
+      Text("Today")
+        .font(.system(size: 10, weight: .heavy, design: .rounded))
+        .textCase(.uppercase)
+        .tracking(1.0)
+        .foregroundStyle(.white.opacity(0.5))
+      Text(label)
+        .font(.system(size: 12, weight: .bold, design: .rounded))
+        .foregroundStyle(DayFlowStyle.emerald)
+        .lineLimit(1)
+    }
+  }
+}
+
 // MARK: - Family views
 
 struct EarningsSmallView: View {
@@ -56,6 +75,9 @@ struct EarningsSmallView: View {
         .font(.system(size: 11, weight: .medium, design: .rounded))
         .foregroundStyle(.white.opacity(0.55))
       Spacer(minLength: 4)
+      if !data.earnedTodayLabel.isEmpty {
+        EarnedTodayRow(label: data.earnedTodayLabel)
+      }
       if data.hasGoal {
         GradientProgressCapsule(
           progress: data.progress,
@@ -115,15 +137,26 @@ struct EarningsMediumView: View {
           }
         }
       }
-      if !data.outstandingLabel.isEmpty {
-        HStack(spacing: 5) {
-          Image(systemName: "hourglass")
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(DayFlowStyle.amber)
-          Text("\(data.outstandingLabel) outstanding")
-            .font(.system(size: 11, weight: .semibold, design: .rounded))
-            .foregroundStyle(DayFlowStyle.amber)
+      if !data.outstandingLabel.isEmpty || !data.earnedTodayLabel.isEmpty || data.unreadCount > 0 {
+        HStack(spacing: 10) {
+          if !data.earnedTodayLabel.isEmpty {
+            EarnedTodayRow(label: data.earnedTodayLabel)
+          }
+          if !data.outstandingLabel.isEmpty {
+            HStack(spacing: 5) {
+              Image(systemName: "hourglass")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(DayFlowStyle.amber)
+              Text("\(data.outstandingLabel) outstanding")
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundStyle(DayFlowStyle.amber)
+                .lineLimit(1)
+            }
+          }
           Spacer(minLength: 0)
+          if data.unreadCount > 0 {
+            UnreadPill(count: data.unreadCount)
+          }
         }
       }
       Spacer(minLength: 0)

@@ -136,6 +136,14 @@ export default function ThreadScreen() {
   const scheduleSend = useMessages((s) => s.scheduleSend);
   const tgMessages = useTelegram((s) => s.messages);
   const tgChats = useTelegram((s) => s.chats);
+  const typingUntil = useTelegram((s) => s.typingUntil);
+  /** Re-evaluated every 3s so a stale typing flag clears without an update. */
+  const [typingNow, setTypingNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!isTelegram) return;
+    const id = setInterval(() => setTypingNow(Date.now()), 3000);
+    return () => clearInterval(id);
+  }, [isTelegram]);
   const tgSendingTo = useTelegram((s) => s.sendingTo);
   const tgPhotoSending = useTelegram((s) => s.photoSending);
   const tgLastError = useTelegram((s) => s.lastError);
@@ -448,8 +456,12 @@ export default function ThreadScreen() {
     clientName ??
     (isTelegram ? telegramChatTitle({ chats: tgChats }, number) : formatPhoneDisplay(number));
 
-  const subtitle =
-    clientName && nextBooking
+  // Live "typing…" beats every other subtitle while it's fresh.
+  const typingActive =
+    isTelegram && (typingUntil[number.slice(4)] ?? 0) > typingNow;
+  const subtitle = typingActive
+    ? 'typing…'
+    : clientName && nextBooking
       ? `Next: ${formatDayRelative(nextBooking.dateKey)}${
           !nextBooking.task.allDay && nextBooking.task.startMinutes != null
             ? ` · ${formatMinutes(nextBooking.task.startMinutes)}`
@@ -585,6 +597,11 @@ export default function ThreadScreen() {
               <MessageBubble
                 msg={item.msg}
                 showStatus={item.showStatus}
+                pending={
+                  isTelegram && item.msg.direction === 'out' && !('sid' in item.msg)
+                    ? item.msg.id.includes(':local-')
+                    : undefined
+                }
                 onPressPhoto={openPhoto}
               />
             )

@@ -37,6 +37,9 @@ export interface TgMessage {
   sentAt: number;
   /** Largest photo size's TDLib file id, when the message is a photo. */
   photoFileId?: number;
+  /** Voice note's TDLib file id + duration, when the message is a voice note. */
+  voiceFileId?: number;
+  voiceDurationSec?: number;
   senderName?: string;
   /** True when TDLib reported the send failed (blocked peer, upload error…). */
   failed?: boolean;
@@ -60,7 +63,8 @@ export type TdUpdate =
   | { kind: 'chatLastMessage'; chatId: string; message: TgMessage | null }
   | { kind: 'authState'; state: TdAuthState }
   | { kind: 'file'; fileId: number; localPath: string | null; completed: boolean }
-  | { kind: 'user'; userId: string; name: string };
+  | { kind: 'user'; userId: string; name: string }
+  | { kind: 'typing'; chatId: string; typing: boolean };
 
 /** Typed success/failure for every TDLib operation. */
 export type TdOutcome<T = void> = { ok: true; value: T } | { ok: false; error: string };
@@ -199,6 +203,11 @@ function parseMessage(rawMsg: RawObject | null): TgMessage | null {
   const body = str(text?.text) ?? str(caption?.text) ?? '';
   const photoFileId =
     typeOf(content) === 'messagePhoto' ? largestPhotoFileId(asObject(content?.photo)) : undefined;
+  // Voice notes: content.voice_note.voice is the audio file, duration in sec.
+  const voiceNote =
+    typeOf(content) === 'messageVoiceNote' ? asObject(content?.voice_note) : null;
+  const voiceFileId = num(asObject(voiceNote?.voice)?.id) ?? undefined;
+  const voiceDurationSec = num(voiceNote?.duration) ?? undefined;
 
   const sender = asObject(rawMsg.sender_id);
   const senderUserId = num(sender?.user_id);
@@ -212,6 +221,10 @@ function parseMessage(rawMsg: RawObject | null): TgMessage | null {
     sentAt: (num(rawMsg.date) ?? 0) * 1000,
   };
   if (photoFileId != null) message.photoFileId = photoFileId;
+  if (voiceFileId != null) {
+    message.voiceFileId = voiceFileId;
+    message.voiceDurationSec = voiceDurationSec ?? 0;
+  }
   if (senderName) message.senderName = senderName;
   if (typeOf(asObject(rawMsg.sending_state)) === 'messageSendingStateFailed') {
     message.failed = true;
@@ -315,6 +328,14 @@ function handleRawUpdate(event: { type?: string; raw?: string } | null | undefin
           message,
         });
       }
+      return;
+    }
+    case 'updateChatAction': {
+      // Typing indicator: chatActionTyping starts it, anything else ends it.
+      const chatId = num(raw.chat_id);
+      if (chatId == null) return;
+      const action = typeOf(asObject(raw.action));
+      emit({ kind: 'typing', chatId: String(chatId), typing: action === 'chatActionTyping' });
       return;
     }
     case 'updateChatLastMessage': {

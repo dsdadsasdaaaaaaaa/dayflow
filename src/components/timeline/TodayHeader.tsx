@@ -117,6 +117,16 @@ export function TodayHeader({
           theme={theme}
           onPress={() => {
             tapHaptic();
+            router.push('/search');
+          }}
+          accessibilityLabel="Search everything"
+        >
+          <Ionicons name="search-outline" size={18} color={theme.textSecondary} />
+        </CircleButton>
+        <CircleButton
+          theme={theme}
+          onPress={() => {
+            tapHaptic();
             router.push('/week');
           }}
           accessibilityLabel="Week view"

@@ -64,12 +64,45 @@ struct TodayHeaderRow: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
         .background(Capsule().fill(Color.white.opacity(0.12)))
+      if data.unreadCount > 0 {
+        UnreadPill(count: data.unreadCount)
+      }
       Spacer(minLength: 4)
       if !data.earnedTodayLabel.isEmpty {
         Text(data.earnedTodayLabel)
           .font(.system(size: 13, weight: .bold, design: .rounded))
           .foregroundStyle(DayFlowStyle.emerald)
       }
+    }
+  }
+}
+
+/// "Next meeting · <client> · <time>" strip. HOME-SCREEN FAMILIES ONLY —
+/// the client name must never appear on lock-screen families.
+struct NextMeetingRow: View {
+  let data: TodayWidgetData
+
+  var body: some View {
+    HStack(spacing: 6) {
+      Image(systemName: "person.crop.circle.badge.clock")
+        .font(.system(size: 10, weight: .semibold))
+        .foregroundStyle(DayFlowStyle.violet)
+      Text("Next meeting")
+        .font(.system(size: 10, weight: .heavy, design: .rounded))
+        .textCase(.uppercase)
+        .tracking(1.0)
+        .foregroundStyle(.white.opacity(0.5))
+      Text(data.nextMeetingClient)
+        .font(.system(size: 11, weight: .bold, design: .rounded))
+        .foregroundStyle(.white.opacity(0.9))
+        .lineLimit(1)
+      if !data.nextMeetingTimeLabel.isEmpty {
+        Text(data.nextMeetingTimeLabel)
+          .font(.system(size: 11, weight: .semibold, design: .rounded))
+          .foregroundStyle(DayFlowStyle.cyan)
+          .lineLimit(1)
+      }
+      Spacer(minLength: 0)
     }
   }
 }
@@ -137,6 +170,10 @@ struct TodaySmallView: View {
           Text("left")
             .font(.system(size: 13, weight: .semibold, design: .rounded))
             .foregroundStyle(.white.opacity(0.55))
+          Spacer(minLength: 2)
+          if data.unreadCount > 0 {
+            UnreadPill(count: data.unreadCount)
+          }
         }
         Text("\(data.done) of \(data.total) done")
           .font(.system(size: 11, weight: .medium, design: .rounded))
@@ -168,10 +205,13 @@ struct TodayMediumView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
       TodayHeaderRow(data: data)
+      if !data.nextMeetingClient.isEmpty {
+        NextMeetingRow(data: data)
+      }
       if data.tasks.isEmpty {
         AllClearView()
       } else {
-        TodayTaskList(tasks: data.tasks, limit: 3)
+        TodayTaskList(tasks: data.tasks, limit: data.nextMeetingClient.isEmpty ? 3 : 2)
         Spacer(minLength: 0)
       }
     }
@@ -185,10 +225,13 @@ struct TodayLargeView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
       TodayHeaderRow(data: data)
+      if !data.nextMeetingClient.isEmpty {
+        NextMeetingRow(data: data)
+      }
       if data.tasks.isEmpty {
         AllClearView()
       } else {
-        TodayTaskList(tasks: data.tasks, limit: 7)
+        TodayTaskList(tasks: data.tasks, limit: data.nextMeetingClient.isEmpty ? 7 : 6)
         Spacer(minLength: 0)
       }
     }
@@ -196,15 +239,28 @@ struct TodayLargeView: View {
   }
 }
 
+/// LOCK SCREEN — privacy rule: counts and times only. Never message content,
+/// never the next-meeting client name (task titles follow existing precedent).
 struct TodayAccessoryRectangularView: View {
   let data: TodayWidgetData
 
   var body: some View {
     VStack(alignment: .leading, spacing: 2) {
-      if let next = data.nextTask {
-        Text("Up next")
+      HStack(spacing: 4) {
+        Text(data.nextTask != nil ? "Up next" : "Today")
           .font(.system(size: 11, weight: .semibold))
           .foregroundStyle(.secondary)
+        Spacer(minLength: 4)
+        if data.unreadCount > 0 {
+          HStack(spacing: 3) {
+            Image(systemName: "message.fill")
+              .font(.system(size: 9, weight: .semibold))
+            Text("\(data.unreadCount)")
+              .font(.system(size: 11, weight: .bold))
+          }
+        }
+      }
+      if let next = data.nextTask {
         Text(next.title)
           .font(.system(size: 14, weight: .bold))
           .lineLimit(1)
@@ -220,22 +276,36 @@ struct TodayAccessoryRectangularView: View {
           Text("All clear")
             .font(.system(size: 14, weight: .bold))
         }
+        // Time only — no client on the lock screen.
+        if !data.nextMeetingTimeLabel.isEmpty {
+          Text("Meeting \(data.nextMeetingTimeLabel)")
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
   }
 }
 
+/// LOCK SCREEN — counts and times only (see rectangular view note).
 struct TodayAccessoryInlineView: View {
   let data: TodayWidgetData
 
-  var body: some View {
+  private var base: String {
     if let next = data.nextTask, !next.timeLabel.isEmpty {
-      Text("\(data.remaining) left · next \(next.timeLabel)")
-    } else if data.remaining > 0 {
-      Text("\(data.remaining) left")
+      return "\(data.remaining) left · next \(next.timeLabel)"
+    }
+    if data.remaining > 0 { return "\(data.remaining) left" }
+    return "All clear"
+  }
+
+  var body: some View {
+    if data.unreadCount > 0 {
+      Text("\(base) · \(data.unreadCount) unread")
     } else {
-      Text("All clear")
+      Text(base)
     }
   }
 }

@@ -24,6 +24,9 @@ export interface BubbleMessage {
   mediaUrls?: string[];
   /** Telegram photo attachment — TDLib file id. */
   photoFileId?: number;
+  /** Telegram voice note — TDLib file id + duration. */
+  voiceFileId?: number;
+  voiceDurationSec?: number;
   /** Telegram: TDLib reported the send failed after queuing. */
   failed?: boolean;
 }
@@ -32,6 +35,12 @@ interface Props {
   msg: BubbleMessage;
   /** Show the delivery status line under the bubble (last outbound only). */
   showStatus?: boolean;
+  /**
+   * Telegram sent-state tick under outgoing bubbles: true = still sending
+   * (clock), false = confirmed (double check). Omit to render no tick (SMS
+   * uses the status line instead).
+   */
+  pending?: boolean;
   /** Open the full-screen viewer for a tapped photo (URL or local file uri). */
   onPressPhoto?: (url: string) => void;
 }
@@ -58,12 +67,13 @@ const COPIED_MS = 1500;
  *   the message has a caption, copies it too. One consistent rule: tap is the
  *   primary action, long-press the secondary.
  */
-export function MessageBubble({ msg, showStatus = false, onPressPhoto }: Props) {
+export function MessageBubble({ msg, showStatus = false, pending, onPressPhoto }: Props) {
   const theme = useTheme();
   const out = msg.direction === 'out';
   const mediaUrls = msg.mediaUrls ?? [];
   const hasBody = msg.body.trim().length > 0;
-  const hasAttachment = mediaUrls.length > 0 || msg.photoFileId != null;
+  const hasAttachment =
+    mediaUrls.length > 0 || msg.photoFileId != null || msg.voiceFileId != null;
 
   const [showTime, setShowTime] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -113,6 +123,9 @@ export function MessageBubble({ msg, showStatus = false, onPressPhoto }: Props) 
           onLongPress={photoLongPress}
         />
       ) : null}
+      {msg.voiceFileId != null ? (
+        <TelegramVoice fileId={msg.voiceFileId} durationSec={msg.voiceDurationSec ?? 0} out={out} />
+      ) : null}
       {hasBody || !hasAttachment ? (
         <Pressable
           onPress={toggleTime}
@@ -154,6 +167,14 @@ export function MessageBubble({ msg, showStatus = false, onPressPhoto }: Props) 
         // Telegram send that failed after queuing — same styling as the SMS
         // "Not delivered" line, shown on every failed bubble.
         <Text style={[styles.status, { color: theme.danger }]}>Not delivered</Text>
+      ) : out && pending != null ? (
+        <Ionicons
+          name={pending ? 'time-outline' : 'checkmark-done'}
+          size={12}
+          color={theme.textTertiary}
+          style={styles.tick}
+          accessibilityLabel={pending ? 'Sending' : 'Sent'}
+        />
       ) : null}
     </View>
   );
@@ -311,6 +332,107 @@ function TelegramPhoto({
   );
 }
 
+/** "0:42" for a voice note length. */
+function formatVoiceDuration(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+/**
+ * One Telegram voice note: play/pause + duration. Audio playback lazy-loads
+ * expo-audio (absent on old binaries — falls back to a friendly caption).
+ */
+function TelegramVoice({
+  fileId,
+  durationSec,
+  out,
+}: {
+  fileId: number;
+  durationSec: number;
+  out: boolean;
+}) {
+  const theme = useTheme();
+  const [state, setState] = useState<'idle' | 'loading' | 'playing'>('idle');
+  const playerRef = useRef<{ pause: () => void; remove: () => void } | null>(null);
+
+  useEffect(
+    () => () => {
+      try {
+        playerRef.current?.pause();
+        playerRef.current?.remove();
+      } catch {
+        // Already torn down.
+      }
+    },
+    []
+  );
+
+  const toggle = async () => {
+    if (state === 'playing') {
+      try {
+        playerRef.current?.pause();
+      } catch {
+        // Player already gone.
+      }
+      setState('idle');
+      return;
+    }
+    tapHaptic();
+    setState('loading');
+    try {
+      const path = await tdResolvePhoto(fileId); // generic TDLib file download
+      if (!path) throw new Error('download failed');
+      const audio = await import('expo-audio');
+      const player = audio.createAudioPlayer(
+        path.startsWith('file://') ? path : `file://${path}`
+      );
+      playerRef.current = player;
+      player.addListener('playbackStatusUpdate', (s: { didJustFinish?: boolean }) => {
+        if (s.didJustFinish) setState('idle');
+      });
+      player.play();
+      setState('playing');
+    } catch {
+      setState('idle');
+      // Old binary without expo-audio, or download failure.
+      successHaptic();
+    }
+  };
+
+  return (
+    <Pressable
+      onPress={toggle}
+      accessibilityRole="button"
+      accessibilityLabel={state === 'playing' ? 'Pause voice message' : 'Play voice message'}
+      style={[
+        styles.voiceBubble,
+        out
+          ? { backgroundColor: theme.accent, borderBottomRightRadius: 6 }
+          : { backgroundColor: theme.surface, borderBottomLeftRadius: 6 },
+      ]}
+    >
+      {state === 'loading' ? (
+        <ActivityIndicator size="small" color={out ? '#FFFFFF' : theme.accent} />
+      ) : (
+        <Ionicons
+          name={state === 'playing' ? 'pause' : 'play'}
+          size={16}
+          color={out ? '#FFFFFF' : theme.accent}
+        />
+      )}
+      <Ionicons
+        name="mic-outline"
+        size={14}
+        color={out ? 'rgba(255,255,255,0.8)' : theme.textSecondary}
+      />
+      <Text style={[styles.voiceDuration, { color: out ? '#FFFFFF' : theme.text }]}>
+        {formatVoiceDuration(durationSec)}
+      </Text>
+    </Pressable>
+  );
+}
+
 const styles = StyleSheet.create({
   wrap: { marginVertical: 2, maxWidth: '78%' },
   wrapOut: { alignSelf: 'flex-end', alignItems: 'flex-end' },
@@ -323,6 +445,17 @@ const styles = StyleSheet.create({
   body: { fontSize: 16, lineHeight: 21 },
   caption: { fontSize: 11, fontWeight: '500', marginTop: 3, marginHorizontal: 4 },
   status: { fontSize: 11, fontWeight: '500', marginTop: 3, marginHorizontal: 4 },
+  tick: { marginTop: 2, marginRight: 4 },
+  voiceBubble: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderRadius: RADIUS.lg,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    minWidth: 110,
+  },
+  voiceDuration: { fontSize: 13, fontWeight: '600', fontVariant: ['tabular-nums'] },
   photoFrame: {
     borderRadius: RADIUS.lg,
     overflow: 'hidden',
