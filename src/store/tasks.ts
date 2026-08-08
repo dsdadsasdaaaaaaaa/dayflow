@@ -59,30 +59,50 @@ interface TaskState {
   duplicateTask: (id: string) => Task | null;
   clearCompletedInbox: () => void;
   importTasks: (tasks: Task[]) => void;
+  /** Rewrite the meeting client name on every matching task (profile rename). */
+  renameMeetingClient: (oldName: string, newName: string) => void;
 }
 
 /**
- * When a ONE-OFF meeting moves to a different date, its per-day paid mark and
- * amount override must follow it (they're keyed by DayKey).
+ * When a ONE-OFF meeting moves to a different date, its per-day paid mark,
+ * amount override, and deposit must follow it (they're keyed by DayKey).
+ * Moving to the inbox (newDate null) parks all three under the old date;
+ * scheduling back out remaps the parked state onto the new date.
  */
 function remapMeetingDay(task: Task, oldDate: DayKey | null, newDate: DayKey | null): Task {
-  if (!task.meeting || task.recurrence || !oldDate || oldDate === newDate) return task;
+  if (!task.meeting || task.recurrence || oldDate === newDate) return task;
+  // Unscheduling: leave paid/extras/deposits keyed to the old date so nothing
+  // is lost while the task sits in the inbox.
+  if (!newDate) return task;
+  if (!oldDate) {
+    // Re-scheduling from the inbox: find the single day the money state was
+    // parked under. If keys span several days (ex-recurring history) the live
+    // occurrence is ambiguous — leave everything untouched.
+    const keys = new Set<DayKey>([
+      ...task.meeting.paidDates,
+      ...Object.keys(task.meeting.extras ?? {}),
+      ...Object.keys(task.meeting.deposits ?? {}),
+    ]);
+    keys.delete(newDate);
+    if (keys.size !== 1) return task;
+    oldDate = [...keys][0];
+  }
   const meeting = { ...task.meeting };
   let changed = false;
-  if (newDate && meeting.paidDates.includes(oldDate)) {
+  if (meeting.paidDates.includes(oldDate)) {
     meeting.paidDates = meeting.paidDates.map((d) => (d === oldDate ? newDate : d));
     changed = true;
   }
   if (meeting.extras && meeting.extras[oldDate] != null) {
     const extras = { ...meeting.extras };
-    if (newDate) extras[newDate] = extras[oldDate];
+    extras[newDate] = extras[oldDate];
     delete extras[oldDate];
     meeting.extras = extras;
     changed = true;
   }
   if (meeting.deposits && meeting.deposits[oldDate] != null) {
     const deposits = { ...meeting.deposits };
-    if (newDate) deposits[newDate] = deposits[oldDate];
+    deposits[newDate] = deposits[oldDate];
     delete deposits[oldDate];
     meeting.deposits = deposits;
     changed = true;
@@ -428,6 +448,26 @@ export const useTasks = create<TaskState>()(
             if (t) tasks[t.id] = t;
           }
           return { tasks };
+        }),
+
+      renameMeetingClient: (oldName, newName) =>
+        set((s) => {
+          const oldKey = oldName.trim().toLowerCase();
+          const next = newName.trim();
+          if (!oldKey || !next) return s;
+          const tasks = { ...s.tasks };
+          let changed = false;
+          for (const [id, t] of Object.entries(tasks)) {
+            if (t.meeting && t.meeting.client.trim().toLowerCase() === oldKey) {
+              tasks[id] = {
+                ...t,
+                meeting: { ...t.meeting, client: next },
+                updatedAt: Date.now(),
+              };
+              changed = true;
+            }
+          }
+          return changed ? { tasks } : s;
         }),
     }),
     {

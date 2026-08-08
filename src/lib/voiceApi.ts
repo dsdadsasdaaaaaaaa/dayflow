@@ -1,14 +1,21 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import { normalizePhone, type SmsCredentials } from './smsCredentials';
-import { collectLiveVersions, ensureAssetService, ensureEnvironment } from './twilioAssets';
+import {
+  clearAssetState,
+  collectLiveVersions,
+  ensureAssetService,
+  ensureEnvironment,
+} from './twilioAssets';
 
 /**
  * Calling & voicemail on the user's OWN Twilio account, zero external
  * servers. One serverless Function (deployed into the same 'dayflow-media'
  * Service that hosts MMS photos) handles everything via ?step=:
  *
- *   incoming (default) — Dial the personal cell (20s), no answer → voicemail
+ *   incoming (default) — Dial the personal cell (20s) with human screening
+ *   screen             — forwarded leg answered: Gather 'press 1 to take it'
+ *   bridge             — screening keypress received: connect the legs
  *   after              — Dial follow-up: unanswered/busy → Say + Record
  *   connect            — click-to-call second leg: bridge in the client
  *
@@ -127,6 +134,23 @@ const VOICE_FUNCTION_SOURCE = `exports.handler = function (context, event, callb
     } else {
       twiml.hangup();
     }
+  } else if (step === 'screen') {
+    // Runs on the forwarded leg the moment it answers, BEFORE bridging.
+    // A human presses a key; carrier voicemail never does, so the leg hangs
+    // up, Twilio treats the dial as unanswered, and step=after runs the
+    // work voicemail instead of the personal one.
+    var gather = twiml.gather({
+      input: 'dtmf',
+      numDigits: 1,
+      timeout: 5,
+      action: '/voice?step=bridge',
+      method: 'POST',
+    });
+    gather.say('Press 1 to take the call.');
+    twiml.hangup();
+  } else if (step === 'bridge') {
+    // Keypress received — no verbs, so the screen doc finishes and the legs
+    // bridge.
   } else if (step === 'after') {
     // Dial follow-up: anything but an answered call goes to voicemail.
     var s = event.DialCallStatus;
@@ -140,11 +164,21 @@ const VOICE_FUNCTION_SOURCE = `exports.handler = function (context, event, callb
       timeout: 20,
       callerId: showWork ? event.To : event.From,
     });
-    dial.number(forwardTo);
+    dial.number({ url: '/voice?step=screen', method: 'POST' }, forwardTo);
   }
   return callback(null, twiml);
 };
 `;
+
+/** Cheap stable hash (djb2) of the deployed source. */
+function hashSource(src: string): string {
+  let h = 5381;
+  for (let i = 0; i < src.length; i++) h = ((h * 33) ^ src.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+
+/** Persisted with the deploy state — a mismatch forces a redeploy. */
+const FUNCTION_SOURCE_HASH = hashSource(VOICE_FUNCTION_SOURCE);
 
 // ---------------------------------------------------------------------------
 // Persisted deploy state (function/number survive across sessions)
@@ -155,6 +189,8 @@ interface PersistedVoice {
   phoneNumberSid?: string;
   /** "https://{domain}/voice" once deployed. */
   voiceUrl?: string;
+  /** Hash of the source that was deployed — stale hash forces a redeploy. */
+  sourceHash?: string;
 }
 
 async function loadPersisted(): Promise<PersistedVoice> {
@@ -406,8 +442,14 @@ async function deployVoiceFunction(
   if (!envResult.ok) return envResult;
   const env = envResult.env;
 
+  // The skip is only valid while the deployed source is the current one —
+  // a source change must redeploy even with a persisted functionSid.
   const persisted = await loadPersisted();
-  if (persisted.functionSid && persisted.voiceUrl) {
+  if (
+    persisted.functionSid &&
+    persisted.voiceUrl &&
+    persisted.sourceHash === FUNCTION_SOURCE_HASH
+  ) {
     return { ok: true, domainName: env.domainName };
   }
 
@@ -419,8 +461,10 @@ async function deployVoiceFunction(
   if (!versionSid) return fail('Could not upload the voice setup. Check your connection.');
 
   // A Build replaces ALL live content — re-bundle the hosted photos (and any
-  // other live functions) alongside the new voice version.
+  // other live functions) alongside the new voice version. A failed listing
+  // aborts the build rather than un-deploying whatever it missed.
   const live = await collectLiveVersions(creds, serviceSid);
+  if (!live.ok) return live;
   const functionVersionSids = new Set<string>([versionSid, ...live.functionVersionSids]);
 
   console.log(
@@ -446,7 +490,7 @@ async function deployVoiceFunction(
   const deployed = await createDeployment(creds, serviceSid, env.sid, buildSid);
   if (!deployed) return fail('Could not publish the voice setup.');
 
-  await savePersisted({ functionSid });
+  await savePersisted({ functionSid, sourceHash: FUNCTION_SOURCE_HASH });
   return { ok: true, domainName: env.domainName };
 }
 
@@ -566,6 +610,11 @@ export async function updateCallingConfig(
   creds: SmsCredentials,
   cfg: CallingConfig
 ): Promise<VoiceOkResult> {
+  // Saving settings is also the upgrade path: redeploy first when the bundled
+  // function source changed (deployVoiceFunction self-skips on matching hash),
+  // so existing installs pick up TwiML fixes without re-running setup.
+  const deployed = await deployVoiceFunction(creds);
+  if (!deployed.ok) return deployed;
   return setEnvVariables(creds, varsFor(cfg));
 }
 
@@ -582,6 +631,20 @@ export async function disableCalling(creds: SmsCredentials): Promise<VoiceOkResu
   } catch (e) {
     return fail(e instanceof Error ? e.message : 'Could not disable calling.');
   }
+}
+
+/**
+ * Forget all persisted deploy state (voice function AND the shared asset
+ * pipeline). Call on account disconnect — the sids/urls belong to the old
+ * account and would make every deploy short-circuit against it.
+ */
+export async function clearVoiceState(): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(STORAGE_KEY);
+  } catch (e) {
+    console.warn('[voiceApi] clear persisted state failed', e);
+  }
+  await clearAssetState();
 }
 
 /**
@@ -674,8 +737,9 @@ function toCallEntry(rec: TwilioCallRecord, own: string, forwardTo: string): Cal
     startedAt: when ? Date.parse(when) : Date.now(),
     durationSec,
     status,
-    // Kept simple: an inbound call that never completed, or completed with
-    // zero talk time, was not picked up by the user.
+    // duration covers the WHOLE parent call (greeting + recording included),
+    // so a rang-out call still ends 'completed' with nonzero duration —
+    // buildCallRows upgrades voicemail rows to missed on top of this.
     missed: direction === 'in' && (status !== 'completed' || durationSec <= 0),
   };
 }

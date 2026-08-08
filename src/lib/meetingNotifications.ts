@@ -8,9 +8,13 @@ import { ensureNotificationPermission } from './notifications';
  * - a "time's up" alert at the planned end,
  * - an optional check-in reminder N minutes after the planned end.
  * Returns the scheduled notification ids (cancel them on end/extend).
+ *
+ * Content is deliberately generic — these land on the lock screen while the
+ * user is physically with the client, so no name, kind, or rate ever appears
+ * (same discretion rule as the message alerts).
  */
 export async function scheduleMeetingAlerts(
-  clientLabel: string,
+  _clientLabel: string,
   plannedEndAt: number,
   checkInAfterMin: number | null
 ): Promise<string[]> {
@@ -19,15 +23,14 @@ export async function scheduleMeetingAlerts(
     const granted = await ensureNotificationPermission();
     if (!granted) return [];
     const ids: string[] = [];
-    const who = clientLabel.trim() || 'your meeting';
 
     const warnAt = plannedEndAt - 10 * 60 * 1000;
     if (warnAt - Date.now() > 5 * 60 * 1000) {
       ids.push(
         await Notifications.scheduleNotificationAsync({
           content: {
-            title: '10 minutes left',
-            body: `${who} wraps up soon.`,
+            title: 'DayFlow',
+            body: 'Wrapping up in 10 minutes.',
             sound: true,
             data: { meetingAlert: 'warning' },
           },
@@ -44,7 +47,7 @@ export async function scheduleMeetingAlerts(
         await Notifications.scheduleNotificationAsync({
           content: {
             title: "Time's up",
-            body: `${who} has reached the planned end time.`,
+            body: 'Planned end time reached.',
             sound: true,
             data: { meetingAlert: 'end' },
           },

@@ -2,10 +2,8 @@ import * as BackgroundTask from 'expo-background-task';
 import * as Notifications from 'expo-notifications';
 import * as TaskManager from 'expo-task-manager';
 import { Platform } from 'react-native';
-import { useClientMeta, clientNameForPhone, isPhoneBlocked } from '../store/clientMeta';
-import { useMessages } from '../store/messages';
-import { useTasks } from '../store/tasks';
-import { knownClients } from './meetings';
+import { useClientMeta, isPhoneBlocked } from '../store/clientMeta';
+import { mergeMessage, useMessages } from '../store/messages';
 import { listRecentSms } from './smsApi';
 import { loadSmsCredentials } from './smsCredentials';
 
@@ -27,7 +25,13 @@ async function notifyNewInbound(): Promise<void> {
 
   const store = useMessages.getState();
   const known = new Set(Object.keys(store.messages));
-  const fetched = await listRecentSms(creds, 50);
+  // Don't re-fetch media lists for messages whose media we already have.
+  const knownMediaSids = new Set(
+    Object.values(store.messages)
+      .filter((m) => m.mediaUrls && m.mediaUrls.length > 0)
+      .map((m) => m.sid)
+  );
+  const fetched = await listRecentSms(creds, 50, knownMediaSids);
 
   const metaNow = useClientMeta.getState().meta;
   const fresh = fetched.filter(
@@ -42,7 +46,7 @@ async function notifyNewInbound(): Promise<void> {
     if (fetched.length > 0) {
       useMessages.setState((s) => {
         const messages = { ...s.messages };
-        for (const m of fetched) messages[m.sid] = m;
+        for (const m of fetched) mergeMessage(messages, m);
         return { messages, lastSyncAt: Date.now() };
       });
     }
@@ -52,24 +56,24 @@ async function notifyNewInbound(): Promise<void> {
   // Merge first so opening the app shows them immediately.
   useMessages.setState((s) => {
     const messages = { ...s.messages };
-    for (const m of fetched) messages[m.sid] = m;
+    for (const m of fetched) mergeMessage(messages, m);
     return { messages, lastSyncAt: Date.now() };
   });
 
-  const meta = useClientMeta.getState().meta;
-  const names = knownClients(useTasks.getState().tasks);
-  for (const m of fresh.slice(0, 5)) {
-    const who = clientNameForPhone(meta, m.counterparty, names) ?? m.counterparty;
-    await Notifications.scheduleNotificationAsync({
-      content: {
-        title: who,
-        body: m.body.length > 120 ? `${m.body.slice(0, 117)}…` : m.body || 'New message',
-        sound: true,
-        data: { messageThread: m.counterparty },
-      },
-      trigger: null, // immediately
-    }).catch(() => {});
-  }
+  // Deliberately discreet: no sender, no preview — the lock screen only ever
+  // says that messages exist. One combined notification, not one per text.
+  const threads = new Set(fresh.map((m) => m.counterparty));
+  const single = threads.size === 1 ? [...threads][0] : null;
+  await Notifications.scheduleNotificationAsync({
+    content: {
+      title: 'DayFlow',
+      body: fresh.length === 1 ? 'You have a new message.' : `You have ${fresh.length} new messages.`,
+      sound: true,
+      // Tapping still lands in the right thread when there's only one.
+      data: single ? { messageThread: single } : {},
+    },
+    trigger: null, // immediately
+  }).catch(() => {});
 }
 
 TaskManager.defineTask(TASK_NAME, async () => {

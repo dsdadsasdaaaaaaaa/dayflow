@@ -12,7 +12,10 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { sanitizeClientMeta, sanitizeHeardAt } from '../../lib/backup';
 import { successHaptic, tapHaptic } from '../../lib/haptics';
+import { useCalls } from '../../store/calls';
+import { useClientMeta } from '../../store/clientMeta';
 import { useHabits } from '../../store/habits';
 import { useTasks } from '../../store/tasks';
 import type { Habit, MeetingInfo, Task } from '../../types';
@@ -139,7 +142,7 @@ function isRecordLike(v: unknown): v is { id: unknown; title: unknown } {
   );
 }
 
-/** Paste-a-backup modal: validates the JSON and merges tasks + habits in. */
+/** Paste-a-backup modal: validates the JSON and merges tasks, habits and the client book in. */
 export function ImportBackupModal({ visible, onClose }: Props) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
@@ -169,18 +172,28 @@ export function ImportBackupModal({ visible, onClose }: Props) {
       );
       return;
     }
-    const obj = parsed as { tasks?: unknown; habits?: unknown };
+    const obj = parsed as {
+      tasks?: unknown;
+      habits?: unknown;
+      clientMeta?: unknown;
+      callsHeardAt?: unknown;
+    };
     const tasks = (Array.isArray(obj.tasks) ? obj.tasks : [])
       .filter(isRecordLike)
       .map(normalizeTask);
     const habits = (Array.isArray(obj.habits) ? obj.habits : [])
       .filter(isRecordLike)
       .map(normalizeHabit);
+    // Client book + voicemail read state (message bodies are never in
+    // backups — they re-sync from the provider).
+    const clientMeta = sanitizeClientMeta(obj.clientMeta);
+    const heardAt = sanitizeHeardAt(obj.callsHeardAt);
+    const clientCount = Object.keys(clientMeta).length;
 
-    if (tasks.length === 0 && habits.length === 0) {
+    if (tasks.length === 0 && habits.length === 0 && clientCount === 0) {
       Alert.alert(
         'Nothing to import',
-        'No tasks or habits were found in that backup.'
+        'No tasks, habits or clients were found in that backup.'
       );
       return;
     }
@@ -194,11 +207,36 @@ export function ImportBackupModal({ visible, onClose }: Props) {
         },
       }));
     }
+    if (clientCount > 0) {
+      // Merge per client, never blanking a field the pasted entry lacks.
+      useClientMeta.setState((s) => {
+        const meta = { ...s.meta };
+        for (const [key, entry] of Object.entries(clientMeta)) {
+          const prev = meta[key];
+          meta[key] = {
+            notes: entry.notes || prev?.notes || '',
+            phone: entry.phone ?? prev?.phone,
+            status: entry.status ?? prev?.status,
+            displayName: entry.displayName ?? prev?.displayName,
+          };
+        }
+        return { meta };
+      });
+    }
+    if (Object.keys(heardAt).length > 0) {
+      // Local "first listened" timestamps win over imported ones.
+      useCalls.setState((s) => ({ heardAt: { ...heardAt, ...s.heardAt } }));
+    }
     successHaptic();
     onClose();
-    const t = `${tasks.length} task${tasks.length === 1 ? '' : 's'}`;
-    const h = `${habits.length} habit${habits.length === 1 ? '' : 's'}`;
-    Alert.alert('Import complete', `Restored ${t} and ${h}.`);
+    const parts = [
+      `${tasks.length} task${tasks.length === 1 ? '' : 's'}`,
+      `${habits.length} habit${habits.length === 1 ? '' : 's'}`,
+    ];
+    if (clientCount > 0) {
+      parts.push(`${clientCount} client${clientCount === 1 ? '' : 's'}`);
+    }
+    Alert.alert('Import complete', `Restored ${parts.join(', ')}.`);
   };
 
   const canImport = text.trim().length > 0;
@@ -256,8 +294,8 @@ export function ImportBackupModal({ visible, onClose }: Props) {
         </View>
 
         <Text style={[styles.hint, { color: theme.textTertiary }]}>
-          Paste the JSON from a DayFlow export below. Tasks and habits are
-          merged into what is already on this device.
+          Paste the JSON from a DayFlow export below. Tasks, habits and the
+          client book are merged into what is already on this device.
         </Text>
 
         <View

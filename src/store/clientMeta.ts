@@ -30,6 +30,8 @@ interface ClientMetaState {
   setStatus: (client: string, status: ClientStatus) => void;
   /** Create (or update) a contact from the messenger in one call. */
   upsertContact: (client: string, phone: string, status: ClientStatus) => void;
+  /** Move a client's meta to a new name key (profile rename). */
+  renameClient: (oldName: string, newName: string) => void;
 }
 
 /** Canonical map key for a client name. */
@@ -101,6 +103,24 @@ export const useClientMeta = create<ClientMetaState>()(
               },
             },
           };
+        }),
+
+      renameClient: (oldName, newName) =>
+        set((s) => {
+          const oldKey = clientMetaKey(oldName);
+          const newKey = clientMetaKey(newName);
+          const display = newName.trim();
+          if (!oldKey || !newKey || !display) return s;
+          const existing = s.meta[oldKey];
+          const meta = { ...s.meta };
+          if (newKey === oldKey) {
+            // Case-only change — keep the entry, refresh how it's displayed.
+            meta[oldKey] = { ...existing, notes: existing?.notes ?? '', displayName: display };
+            return { meta };
+          }
+          delete meta[oldKey];
+          meta[newKey] = { ...existing, notes: existing?.notes ?? '', displayName: display };
+          return { meta };
         }),
     }),
     {

@@ -1,7 +1,15 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useMemo, useRef } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useMemo, useRef, useState } from 'react';
+import {
+  Alert,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { EmptyState } from '../src/components/EmptyState';
 import { BackButton } from '../src/components/clients/BackButton';
@@ -32,6 +40,7 @@ import {
   meetingKindMeta,
   meetingOccurrences,
 } from '../src/lib/meetings';
+import { renameClientEverywhere } from '../src/lib/renameClient';
 import { clientMetaKey, effectiveStatus, useClientMeta } from '../src/store/clientMeta';
 import { useMeetingSession } from '../src/store/meetingSession';
 import { useSettings } from '../src/store/settings';
@@ -57,6 +66,8 @@ export default function ClientDetailScreen() {
   const rawName = typeof params.name === 'string' ? params.name : '';
 
   const phoneRowRef = useRef<ClientPhoneRowHandle>(null);
+  /** Non-null while the name is being edited (holds the draft). */
+  const [draftName, setDraftName] = useState<string | null>(null);
 
   const tasks = useTasks((s) => s.tasks);
   const togglePaid = useTasks((s) => s.togglePaid);
@@ -135,6 +146,24 @@ export default function ClientDetailScreen() {
     router.push(`/task-editor?client=${encodeURIComponent(displayName)}`);
   };
 
+  const saveName = () => {
+    if (draftName == null) return;
+    const next = draftName.trim();
+    if (next === displayName) {
+      setDraftName(null);
+      return;
+    }
+    const result = renameClientEverywhere(displayName, next);
+    if (!result.ok) {
+      Alert.alert('Can’t rename', result.error);
+      return;
+    }
+    successHaptic();
+    setDraftName(null);
+    // Re-point the route at the new name so every lookup resolves again.
+    router.setParams({ name: next });
+  };
+
   return (
     <View style={[styles.root, { backgroundColor: theme.background }]}>
       <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
@@ -149,9 +178,67 @@ export default function ClientDetailScreen() {
         {/* Hero */}
         <View style={styles.hero}>
           <ClientAvatar name={displayName} size={84} />
-          <Text style={[styles.heroName, { color: theme.text }]} numberOfLines={1}>
-            {displayName}
-          </Text>
+          {draftName == null ? (
+            <View style={styles.nameRow}>
+              <Text style={[styles.heroName, { color: theme.text }]} numberOfLines={1}>
+                {displayName}
+              </Text>
+              <Pressable
+                onPress={() => {
+                  tapHaptic();
+                  setDraftName(displayName);
+                }}
+                hitSlop={10}
+                accessibilityRole="button"
+                accessibilityLabel="Edit name"
+                style={({ pressed }) => [styles.editNameBtn, pressed && { opacity: 0.6 }]}
+              >
+                <Ionicons name="pencil" size={15} color={theme.textTertiary} />
+              </Pressable>
+            </View>
+          ) : (
+            <View style={styles.nameEdit}>
+              <TextInput
+                value={draftName}
+                onChangeText={setDraftName}
+                autoFocus
+                selectTextOnFocus
+                returnKeyType="done"
+                onSubmitEditing={saveName}
+                placeholder="Client name"
+                placeholderTextColor={theme.textTertiary}
+                style={[
+                  styles.nameInput,
+                  { backgroundColor: theme.surface, color: theme.text },
+                ]}
+                accessibilityLabel="Client name"
+              />
+              <Pressable
+                onPress={() => setDraftName(null)}
+                accessibilityRole="button"
+                accessibilityLabel="Cancel rename"
+                style={({ pressed }) => [
+                  styles.nameAction,
+                  { backgroundColor: theme.surface },
+                  pressed && { opacity: 0.7 },
+                ]}
+              >
+                <Ionicons name="close" size={17} color={theme.textSecondary} />
+              </Pressable>
+              <Pressable
+                onPress={saveName}
+                accessibilityRole="button"
+                accessibilityLabel="Save name"
+                style={({ pressed }) => [
+                  styles.nameAction,
+                  { backgroundColor: theme.accent },
+                  pressed && { opacity: 0.85 },
+                ]}
+              >
+                <Ionicons name="checkmark" size={17} color="#FFFFFF" />
+              </Pressable>
+            </View>
+          )}
           {profile && kindMeta ? (
             <View style={styles.chipRow}>
               <ClientChip icon={kindMeta.icon} label={kindMeta.label} />
@@ -399,7 +486,35 @@ const styles = StyleSheet.create({
     fontSize: 30,
     fontWeight: '800',
     letterSpacing: -0.8,
-    maxWidth: '90%',
+    flexShrink: 1,
+  },
+  nameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+    maxWidth: '92%',
+  },
+  editNameBtn: { padding: 4 },
+  nameEdit: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+    width: '100%',
+  },
+  nameInput: {
+    flex: 1,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  nameAction: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   chipRow: {
     flexDirection: 'row',

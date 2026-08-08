@@ -1,5 +1,7 @@
 import { Directory, File, Paths } from 'expo-file-system';
 import { Platform } from 'react-native';
+import { useCalls } from '../store/calls';
+import { clientMetaKey, useClientMeta, type ClientMeta } from '../store/clientMeta';
 import { useFocus } from '../store/focus';
 import { useHabits } from '../store/habits';
 import { useMeetingSession } from '../store/meetingSession';
@@ -35,10 +37,21 @@ interface BackupPayload {
   habits: Habit[];
   focusSessions: FocusSession[];
   meetingLog: MeetingLogEntry[];
-  /** Reserved for future per-client metadata; not written today. */
-  clientMeta?: unknown;
+  /**
+   * Client book: notes/phones/statuses/display names keyed by lowercased
+   * client name. Optional so v1 files written before it existed still restore.
+   */
+  clientMeta?: Record<string, ClientMeta>;
+  /**
+   * When each voicemail was first listened to (recording SID → ms). Calls and
+   * voicemails themselves re-sync from the provider; only this local-only
+   * read state needs backing up.
+   */
+  callsHeardAt?: Record<string, number>;
   settings: Settings;
 }
+// Message bodies are deliberately NOT backed up: threads re-sync from Twilio,
+// and keeping client texts out of plaintext backup files is a privacy choice.
 
 export interface BackupEntry {
   /** File name, e.g. "dayflow-2026-07-19.json". */
@@ -80,6 +93,8 @@ export async function runAutoBackup(): Promise<void> {
         habits: Object.values(useHabits.getState().habits),
         focusSessions: useFocus.getState().sessions,
         meetingLog: useMeetingSession.getState().log,
+        clientMeta: useClientMeta.getState().meta,
+        callsHeardAt: useCalls.getState().heardAt,
         settings: useSettings.getState().settings,
       };
       file.create();
@@ -138,10 +153,40 @@ export function startAutoBackup(): void {
       whenHydrated(useHabits),
       whenHydrated(useFocus),
       whenHydrated(useMeetingSession),
+      whenHydrated(useClientMeta),
+      whenHydrated(useCalls),
       whenHydrated(useSettings),
     ]);
     await runAutoBackup();
   })();
+}
+
+/**
+ * Delete every on-device backup file and the backups directory itself
+ * (used by "Erase all data"). Best-effort: never throws.
+ */
+export function deleteAllBackups(): void {
+  if (Platform.OS === 'web') return;
+  try {
+    const dir = backupsDir();
+    if (!dir.exists) return;
+    // Directory.delete() removes contents recursively, but sweep files first
+    // so one stuck entry doesn't leave every other snapshot behind.
+    for (const entry of dir.list()) {
+      try {
+        entry.delete();
+      } catch {
+        // Leave it; the directory delete below gets another chance.
+      }
+    }
+    try {
+      dir.delete();
+    } catch {
+      // Directory itself is empty (or stuck) — nothing sensitive remains.
+    }
+  } catch {
+    // Erase must never throw over a backup file.
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -239,9 +284,52 @@ function sanitizeLogEntry(raw: unknown): MeetingLogEntry | null {
   };
 }
 
+/** Coerce an untrusted client-book map into valid ClientMeta entries. */
+export function sanitizeClientMeta(raw: unknown): Record<string, ClientMeta> {
+  const out: Record<string, ClientMeta> = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [name, v] of Object.entries(raw as Record<string, unknown>)) {
+    const key = clientMetaKey(name);
+    if (!key || !v || typeof v !== 'object') continue;
+    const m = v as Record<string, unknown>;
+    const entry: ClientMeta = { notes: typeof m.notes === 'string' ? m.notes : '' };
+    if (typeof m.phone === 'string' && m.phone.trim()) entry.phone = m.phone;
+    if (m.status === 'lead' || m.status === 'client' || m.status === 'blocked') {
+      entry.status = m.status;
+    }
+    if (typeof m.displayName === 'string' && m.displayName.trim()) {
+      entry.displayName = m.displayName.trim();
+    }
+    out[key] = entry;
+  }
+  return out;
+}
+
+/** Coerce an untrusted voicemail-heard map (recording SID → ms timestamp). */
+export function sanitizeHeardAt(raw: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [sid, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (sid && typeof v === 'number' && Number.isFinite(v) && v > 0) out[sid] = v;
+  }
+  return out;
+}
+
 /** Coerce untrusted backup settings into a valid Settings object. */
 function sanitizeSettings(raw: unknown): Settings {
-  const out: Settings = { ...DEFAULT_SETTINGS, onboardingDone: true };
+  // Backups may predate the messaging/calling settings — seed those from the
+  // device so a restore never silently disables calling or drops templates.
+  const current = useSettings.getState().settings;
+  const out: Settings = {
+    ...DEFAULT_SETTINGS,
+    messageTemplates: current.messageTemplates,
+    photoQuickReplies: current.photoQuickReplies,
+    callingEnabled: current.callingEnabled,
+    callForwardTo: current.callForwardTo,
+    callShowWorkNumber: current.callShowWorkNumber,
+    voicemailGreeting: current.voicemailGreeting,
+    onboardingDone: true,
+  };
   if (!raw || typeof raw !== 'object') return out;
   const s = raw as Record<string, unknown>;
 
@@ -286,6 +374,26 @@ function sanitizeSettings(raw: unknown): Settings {
   }
   if (typeof s.appLock === 'boolean') out.appLock = s.appLock;
   if (typeof s.onboardingDone === 'boolean') out.onboardingDone = s.onboardingDone;
+  if (Array.isArray(s.messageTemplates)) {
+    out.messageTemplates = s.messageTemplates.filter(
+      (x): x is string => typeof x === 'string'
+    );
+  }
+  if (Array.isArray(s.photoQuickReplies)) {
+    out.photoQuickReplies = s.photoQuickReplies.filter(
+      (x): x is { label: string; url: string } =>
+        !!x &&
+        typeof x === 'object' &&
+        typeof (x as { label?: unknown }).label === 'string' &&
+        typeof (x as { url?: unknown }).url === 'string'
+    );
+  }
+  if (typeof s.callingEnabled === 'boolean') out.callingEnabled = s.callingEnabled;
+  if (typeof s.callForwardTo === 'string') out.callForwardTo = s.callForwardTo;
+  if (typeof s.callShowWorkNumber === 'boolean') out.callShowWorkNumber = s.callShowWorkNumber;
+  if (typeof s.voicemailGreeting === 'string' && s.voicemailGreeting.trim()) {
+    out.voicemailGreeting = s.voicemailGreeting;
+  }
   return out;
 }
 
@@ -330,6 +438,14 @@ export async function restoreBackup(name: string): Promise<boolean> {
     useFocus.setState({ sessions });
     useMeetingSession.setState({ log });
     useSettings.setState({ settings });
+    // Only replace the client book / voicemail read state when the file
+    // carries them — a v1 backup without them must not wipe what's on device.
+    if (p.clientMeta !== undefined) {
+      useClientMeta.setState({ meta: sanitizeClientMeta(p.clientMeta) });
+    }
+    if (p.callsHeardAt !== undefined) {
+      useCalls.setState({ heardAt: sanitizeHeardAt(p.callsHeardAt) });
+    }
 
     void syncAllNotifications(useTasks.getState().tasks);
     return true;

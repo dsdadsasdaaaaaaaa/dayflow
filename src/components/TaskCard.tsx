@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { formatDuration, formatMinutes } from '../lib/dates';
-import { formatMoney, isPaidOn } from '../lib/meetings';
+import { formatMoney, isPaidOn, occurrenceAmount } from '../lib/meetings';
 import { useSettings } from '../store/settings';
 import { PRIORITY_META, taskColor, useTheme, RADIUS } from '../theme';
 import type { DayKey, Task } from '../types';
@@ -48,7 +48,8 @@ export function TaskCard({
   const timeline = height != null;
   const short = timeline && height < 52;
   const meeting = task.meeting;
-  const paid = meeting ? isPaidOn(task, dateKey ?? task.date ?? '') : false;
+  const occDay = dateKey ?? task.date ?? '';
+  const paid = meeting ? isPaidOn(task, occDay) : false;
 
   const timeCaption =
     task.startMinutes != null && !task.allDay
@@ -129,7 +130,7 @@ export function TaskCard({
                       color={theme.success}
                     />
                     <Text style={[styles.metaStrong, { color: theme.success }]} numberOfLines={1}>
-                      {formatMoney(meeting.rate, currency)}
+                      {formatMoney(occurrenceAmount(task, occDay), currency)}
                       {paid ? ' paid' : ''}
                       {meeting.client ? ` · ${meeting.client}` : ''}
                     </Text>
@@ -199,7 +200,7 @@ export function TaskCard({
                 color={theme.success}
               />
               <Text style={[styles.metaStrong, { color: theme.success }]} numberOfLines={1}>
-                {formatMoney(meeting.rate, currency)}
+                {formatMoney(occurrenceAmount(task, occDay), currency)}
                 {paid ? ' paid' : ''}
                 {meeting.client ? ` · ${meeting.client}` : ''}
               </Text>

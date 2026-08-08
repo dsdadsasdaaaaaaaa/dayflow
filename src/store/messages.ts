@@ -44,8 +44,9 @@ interface MessagesState {
 /**
  * Merge one fetched message into the map, preserving mediaUrls we already
  * resolved (syncs skip re-fetching known media, so fresh records may lack it).
+ * Exported for messageAlerts, which merges fetched windows the same way.
  */
-function mergeMessage(messages: Record<string, SmsMessage>, m: SmsMessage): void {
+export function mergeMessage(messages: Record<string, SmsMessage>, m: SmsMessage): void {
   const prev = messages[m.sid];
   if (!m.mediaUrls?.length && prev?.mediaUrls?.length) {
     messages[m.sid] = { ...m, mediaUrls: prev.mediaUrls };

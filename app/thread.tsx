@@ -59,9 +59,6 @@ type Row =
   | { type: 'day'; key: string; day: DayKey }
   | { type: 'message'; key: string; msg: SmsMessage; showStatus: boolean };
 
-/** Optional media send path — lands with the media agent's store update. */
-type MediaSend = (to: string, body: string, mediaUrls: string[]) => Promise<boolean>;
-
 /** "Today" / "Tomorrow" / "Friday" / "Wednesday, July 16" + optional time. */
 function confirmationDraft(occ: MeetingOccurrence): string {
   const diff = daysBetween(todayKey(), occ.dateKey);
@@ -92,9 +89,8 @@ export default function ThreadScreen() {
   const lastSyncAt = useMessages((s) => s.lastSyncAt);
   const send = useMessages((s) => s.send);
   const markRead = useMessages((s) => s.markRead);
-  const sendWithMedia = useMessages(
-    (s) => (s as unknown as { sendWithMedia?: MediaSend }).sendWithMedia
-  );
+  const sendPhoto = useMessages((s) => s.sendPhoto);
+  const photoSending = useMessages((s) => s.photoSending);
   const tasks = useTasks((s) => s.tasks);
   const meta = useClientMeta((s) => s.meta);
   const settings = useSettings((s) => s.settings);
@@ -202,9 +198,7 @@ export default function ThreadScreen() {
   );
 
   // ── Quick replies ──────────────────────────────────────────────────────────
-  /** Photo quick-replies — surfaced by the media layer when available. */
-  const photoReplies =
-    (settings as unknown as { photoTemplates?: PhotoReply[] }).photoTemplates ?? [];
+  const photoReplies = settings.photoQuickReplies;
 
   const insertTemplate = useCallback((text: string) => {
     setDraft((d) => (d.trim() ? `${d} ${text}` : text));
@@ -214,18 +208,16 @@ export default function ThreadScreen() {
   const sendPhotoReply = useCallback(
     async (photo: PhotoReply) => {
       setQuickOpen(false);
-      if (sendWithMedia) {
-        await sendWithMedia(number, '', [photo.url]);
-      } else {
-        Alert.alert('Almost there', 'Photo sending arrives with the next app update.');
-      }
+      // Library photos are already hosted — MMS the URL directly.
+      await send(number, '', [photo.url]);
     },
-    [sendWithMedia, number]
+    [send, number]
   );
 
   // ── Attach a photo (OTA-safe: expo-image-picker is NOT in the current
   // binary — import it only inside the handler, with a friendly fallback). ──
   const handleAttach = useCallback(async () => {
+    let uri: string | null = null;
     try {
       const picker = await import('expo-image-picker');
       const perm = await picker.requestMediaLibraryPermissionsAsync();
@@ -237,17 +229,16 @@ export default function ThreadScreen() {
         mediaTypes: ['images'],
         quality: 0.8,
       });
-      const uri = res.canceled ? null : res.assets?.[0]?.uri ?? null;
-      if (!uri) return;
-      if (sendWithMedia) {
-        await sendWithMedia(number, '', [uri]);
-      } else {
-        Alert.alert('Almost there', 'Photo sending arrives with the next app update.');
-      }
+      uri = res.canceled ? null : res.assets?.[0]?.uri ?? null;
     } catch {
       Alert.alert('Photos', 'Photo picking arrives with the next app update.');
+      return;
     }
-  }, [sendWithMedia, number]);
+    if (!uri) return;
+    // Hosts the photo on the user's Twilio account (~30-60s), then sends;
+    // failures surface via the store's lastError banner.
+    await sendPhoto(number, uri);
+  }, [sendPhoto, number]);
 
   const subtitle = clientName
     ? nextBooking
@@ -385,6 +376,11 @@ export default function ThreadScreen() {
         {showError ? (
           <ErrorBanner message={lastError} onDismiss={() => setDismissedError(lastError)} />
         ) : null}
+        {photoSending ? (
+          <Text style={[styles.photoProgress, { color: theme.textSecondary }]}>
+            {photoSending === 'uploading' ? 'Hosting photo… ~30-60s' : 'Sending photo…'}
+          </Text>
+        ) : null}
         {quickOpen ? (
           <QuickReplies
             templates={settings.messageTemplates}
@@ -395,7 +391,7 @@ export default function ThreadScreen() {
         ) : null}
         <Composer
           onSend={handleSend}
-          sending={sendingTo === number}
+          sending={sendingTo === number || photoSending != null}
           text={draft}
           onChangeText={setDraft}
           quickOpen={quickOpen}
@@ -450,6 +446,12 @@ const styles = StyleSheet.create({
   },
   emptyWrap: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   emptyText: { fontSize: 14 },
+  photoProgress: {
+    fontSize: 12,
+    fontWeight: '500',
+    paddingHorizontal: SPACING.lg,
+    paddingBottom: SPACING.sm,
+  },
   footer: {
     borderTopWidth: StyleSheet.hairlineWidth,
     paddingTop: SPACING.sm,

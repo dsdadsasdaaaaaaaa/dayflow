@@ -56,7 +56,13 @@ export default function MessagesScreen() {
   const tasks = useTasks((s) => s.tasks);
   const meta = useClientMeta((s) => s.meta);
   // Unheard voicemail count for the calls-button badge (blocked excluded).
-  const unheardVoicemails = useCalls((s) => unheardCount(s, meta));
+  // Subscribe to raw slices; derive in a memo so the selector stays cheap.
+  const voicemails = useCalls((s) => s.voicemails);
+  const heardAt = useCalls((s) => s.heardAt);
+  const unheardVoicemails = useMemo(
+    () => unheardCount({ voicemails, heardAt }, meta),
+    [voicemails, heardAt, meta]
+  );
 
   const [sheetOpen, setSheetOpen] = useState(false);
   const [dismissedError, setDismissedError] = useState<string | null>(null);

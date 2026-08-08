@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import { File, Paths } from 'expo-file-system';
 import * as LocalAuthentication from 'expo-local-authentication';
 import * as Notifications from 'expo-notifications';
 import { useRouter } from 'expo-router';
@@ -29,18 +30,24 @@ import { MessagingSection } from '../src/components/settings/MessagingSection';
 import { SettingsRow } from '../src/components/settings/SettingsRow';
 import { SettingsSection } from '../src/components/settings/SettingsSection';
 import { Stepper } from '../src/components/settings/Stepper';
-import { startAutoBackup } from '../src/lib/backup';
+import { deleteAllBackups, startAutoBackup } from '../src/lib/backup';
 import { ensureCalendarPermission } from '../src/lib/calendar';
 import { formatDuration } from '../src/lib/dates';
 import { selectionHaptic, successHaptic, tapHaptic, warningHaptic } from '../src/lib/haptics';
+import { clearMediaMemoryCache } from '../src/lib/mediaCache';
 import { meetingsCsv } from '../src/lib/meetings';
 import {
   ensureNotificationPermission,
   syncAllNotifications,
 } from '../src/lib/notifications';
+import { clearSmsCredentials } from '../src/lib/smsCredentials';
+import { useCalls } from '../src/store/calls';
+import { useClientMeta } from '../src/store/clientMeta';
+import { useDrafts } from '../src/store/drafts';
 import { useFocus } from '../src/store/focus';
 import { useHabits } from '../src/store/habits';
 import { useMeetingSession } from '../src/store/meetingSession';
+import { useMessages } from '../src/store/messages';
 import { useSettings } from '../src/store/settings';
 import { useTasks } from '../src/store/tasks';
 import { taskColor, useTheme } from '../src/theme';
@@ -53,6 +60,31 @@ function formatHour(h: number): string {
   if (h === 0 || h === 24) return 'Midnight';
   if (h === 12) return 'Noon';
   return h < 12 ? `${h} AM` : `${h - 12} PM`;
+}
+
+/**
+ * Cached client media on disk: decoded MMS photos (dayflow-mms-*.b64, written
+ * by lib/mediaCache) and downloaded voicemail audio (voicemail-*.mp3, written
+ * by lib/voiceApi).
+ */
+const CACHED_MEDIA_RE = /^(dayflow-mms-.+\.b64|voicemail-.+\.mp3)$/;
+
+/** Sweep cached photos/voicemails out of the cache dir. Best-effort. */
+function deleteCachedMediaFiles(): void {
+  if (Platform.OS === 'web') return;
+  try {
+    for (const entry of Paths.cache.list()) {
+      if (entry instanceof File && CACHED_MEDIA_RE.test(entry.name)) {
+        try {
+          entry.delete();
+        } catch {
+          // A stuck file must never block the erase.
+        }
+      }
+    }
+  } catch {
+    // Cache dir unavailable — nothing to remove.
+  }
 }
 
 export default function SettingsScreen() {
@@ -200,6 +232,11 @@ export default function SettingsScreen() {
       habits: Object.values(useHabits.getState().habits),
       focusSessions: useFocus.getState().sessions,
       meetingLog: useMeetingSession.getState().log,
+      // Client book + voicemail read state. Message bodies are deliberately
+      // excluded: threads re-sync from Twilio, and keeping client texts out
+      // of plaintext export files is a privacy choice.
+      clientMeta: useClientMeta.getState().meta,
+      callsHeardAt: useCalls.getState().heardAt,
       settings: useSettings.getState().settings,
     };
     try {
@@ -235,6 +272,8 @@ export default function SettingsScreen() {
 
   const eraseAll = async () => {
     warningHaptic();
+    // Every step below is best-effort: one failure must never keep the rest
+    // of the wipe from running.
     try {
       await useMeetingSession.getState().cancel();
     } catch {
@@ -244,6 +283,19 @@ export default function SettingsScreen() {
     useTasks.setState({ tasks: {} });
     useHabits.setState({ habits: {} });
     useFocus.getState().clearHistory();
+    useDrafts.setState({ drafts: {} });
+    // The sensitive layer: messages, client book, call log, credentials.
+    useMessages.getState().clearAll();
+    useCalls.getState().clearAll();
+    useClientMeta.setState({ meta: {} });
+    try {
+      await clearSmsCredentials();
+    } catch {
+      // Keychain entry already gone (or unavailable) — nothing left to clear.
+    }
+    clearMediaMemoryCache();
+    deleteCachedMediaFiles();
+    deleteAllBackups();
     useSettings.getState().reset();
     syncAllNotifications({});
     Alert.alert('All data erased', 'DayFlow is back to a fresh start.');
@@ -252,7 +304,7 @@ export default function SettingsScreen() {
   const confirmErase = () => {
     Alert.alert(
       'Erase all data?',
-      'Tasks, habits, focus history, meeting history and settings will be deleted from this device.',
+      'Tasks, habits, focus and meeting history, the client book, message and call history, cached photos and voicemails, saved backups, messaging credentials and settings will all be deleted from this device.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -634,7 +686,7 @@ export default function SettingsScreen() {
             icon="share-outline"
             tint={taskColor('sky').solid}
             label="Export backup"
-            sublabel="Tasks, habits, focus and meeting history"
+            sublabel="Tasks, habits, meetings and the client book"
             onPress={exportBackup}
           />
           <SettingsRow

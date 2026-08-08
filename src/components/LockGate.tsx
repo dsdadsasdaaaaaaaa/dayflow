@@ -21,6 +21,10 @@ export function LockGate({ children }: { children: React.ReactNode }) {
   const theme = useTheme();
   const appLock = useSettings((s) => s.settings.appLock);
   const [locked, setLocked] = useState(appLock && Platform.OS !== 'web');
+  // Opaque privacy cover shown whenever the app is not 'active' — it is what
+  // the iOS app-switcher snapshot captures, so it must engage on 'inactive'
+  // (before the snapshot), independent of the slower auth lock.
+  const [covered, setCovered] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
   const [hint, setHint] = useState<string | null>(null);
   const backgroundedAt = useRef<number | null>(null);
@@ -118,19 +122,28 @@ export function LockGate({ children }: { children: React.ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appLock]);
 
-  // Re-lock after a long background stay.
+  // Cover the moment the app leaves 'active' (hides the switcher snapshot);
+  // re-lock after a long background stay.
   useEffect(() => {
-    if (!appLock || Platform.OS === 'web') return;
+    if (!appLock || Platform.OS === 'web') {
+      setCovered(false);
+      return;
+    }
     const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'background') {
-        backgroundedAt.current = Date.now();
-      } else if (state === 'active') {
+      if (state !== 'active') {
+        // 'inactive' fires on the way to the switcher — cover synchronously.
+        // (It also fires during the Face ID sheet; harmless, the system UI
+        // is on top and the cover clears when we return to 'active'.)
+        setCovered(true);
+        if (state === 'background') backgroundedAt.current = Date.now();
+      } else {
         const away = backgroundedAt.current ? Date.now() - backgroundedAt.current : 0;
         backgroundedAt.current = null;
         if (away > RELOCK_AFTER_MS) {
           setLocked(true);
           setTimeout(() => void unlock(), 350);
         }
+        setCovered(false);
       }
     });
     return () => sub.remove();
@@ -167,6 +180,15 @@ export function LockGate({ children }: { children: React.ReactNode }) {
           </View>
         </View>
       ) : null}
+      {covered ? (
+        // Plain opaque cover (no blur — snapshots keep blurred content legible
+        // enough to read). Sits above the lock screen too so nothing leaks.
+        <View style={[StyleSheet.absoluteFill, styles.cover, { backgroundColor: theme.background }]}>
+          <View style={[styles.iconCircle, { backgroundColor: theme.accent }]}>
+            <Ionicons name="lock-closed" size={34} color="#fff" />
+          </View>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -174,6 +196,12 @@ export function LockGate({ children }: { children: React.ReactNode }) {
 const styles = StyleSheet.create({
   host: { flex: 1 },
   root: { zIndex: 10000, elevation: 10000 },
+  cover: {
+    zIndex: 10001,
+    elevation: 10001,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10, padding: 32 },
   iconCircle: {
     width: 84,

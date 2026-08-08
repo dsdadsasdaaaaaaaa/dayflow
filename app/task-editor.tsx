@@ -356,6 +356,7 @@ export default function TaskEditorScreen() {
           location: meeting.location.trim(),
           paidDates: live?.meeting?.paidDates ?? [],
           extras: live?.meeting?.extras,
+          deposits: live?.meeting?.deposits,
         }
       : null;
     const fields = {
@@ -393,12 +394,13 @@ export default function TaskEditorScreen() {
     const hadMoneyHistory =
       !!live?.meeting &&
       (live.meeting.paidDates.length > 0 ||
-        Object.keys(live.meeting.extras ?? {}).length > 0);
+        Object.keys(live.meeting.extras ?? {}).length > 0 ||
+        Object.keys(live.meeting.deposits ?? {}).length > 0);
 
     if (isEditing && !meeting.enabled && hadMoneyHistory) {
       Alert.alert(
         'Remove meeting details?',
-        'This also clears its payment history — paid marks and settled amounts.',
+        'This also clears its payment history — paid marks, deposits, and settled amounts.',
         [
           { text: 'Cancel', style: 'cancel' },
           { text: 'Remove', style: 'destructive', onPress: commit },

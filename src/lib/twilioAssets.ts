@@ -23,8 +23,10 @@ const ENVIRONMENT_UNIQUE_NAME = 'prod';
 const STORAGE_KEY = 'dayflow-twilio-assets-v1';
 const BUILD_POLL_INTERVAL_MS = 3000;
 const BUILD_POLL_MAX_MS = 90_000;
-/** Safety cap when re-bundling existing assets into a build. */
-const MAX_BUNDLED_ASSETS = 40;
+/** Twilio list page size; listAllPages follows meta.next_page_url past it. */
+const LIST_PAGE_SIZE = 50;
+/** Hard stop against runaway pagination — exceeding it FAILS the listing. */
+const MAX_LIST_PAGES = 20;
 
 // ---------------------------------------------------------------------------
 // Result types (single error shape for the whole module)
@@ -128,6 +130,33 @@ async function restPostForm(
 /** Twilio error payloads carry a "message" field; fall back to the status. */
 function restError(what: string, res: RestResponse): string {
   return str(res.json, 'message') ?? `${what} failed (${res.status})`;
+}
+
+/**
+ * Fetch EVERY page of a Twilio list (meta.next_page_url), or null on any
+ * failure — including a list still unfinished at MAX_LIST_PAGES. Callers use
+ * these lists to decide what stays live in a build, so a partial list must
+ * read as failure, never as "nothing else exists".
+ */
+async function listAllPages(
+  creds: SmsCredentials,
+  firstUrl: string,
+  listKey: string
+): Promise<Record<string, unknown>[] | null> {
+  const out: Record<string, unknown>[] = [];
+  let url: string | null = firstUrl;
+  for (let page = 0; url && page < MAX_LIST_PAGES; page++) {
+    const res = await restGet(creds, url);
+    if (!res.ok) return null;
+    const list = res.json?.[listKey];
+    if (!Array.isArray(list)) return null;
+    for (const item of list) {
+      const rec = asRecord(item);
+      if (rec) out.push(rec);
+    }
+    url = str(asRecord(res.json?.meta), 'next_page_url');
+  }
+  return url ? null : out;
 }
 
 // ---------------------------------------------------------------------------
@@ -298,16 +327,15 @@ interface AssetEntry {
 }
 
 async function listAssets(creds: SmsCredentials, serviceSid: string): Promise<AssetEntry[] | null> {
-  const res = await restGet(
+  const records = await listAllPages(
     creds,
-    `${SERVERLESS}/Services/${serviceSid}/Assets?PageSize=${MAX_BUNDLED_ASSETS}`
+    `${SERVERLESS}/Services/${serviceSid}/Assets?PageSize=${LIST_PAGE_SIZE}`,
+    'assets'
   );
-  if (!res.ok) return null;
-  const list = res.json?.assets;
-  if (!Array.isArray(list)) return null;
+  if (!records) return null;
   const out: AssetEntry[] = [];
-  for (const item of list) {
-    const sid = str(asRecord(item), 'sid');
+  for (const rec of records) {
+    const sid = str(rec, 'sid');
     if (sid) out.push({ sid });
   }
   return out;
@@ -319,24 +347,29 @@ interface AssetVersionEntry {
   visibility: string;
 }
 
-/** Latest version of one asset (Twilio lists newest first), or null. */
+/**
+ * Latest version of one asset (Twilio lists newest first). Failure is
+ * distinct from "asset has no versions" — a failed lookup must abort any
+ * build that would otherwise drop the asset.
+ */
 async function latestAssetVersion(
   creds: SmsCredentials,
   serviceSid: string,
   assetSid: string
-): Promise<AssetVersionEntry | null> {
+): Promise<{ ok: true; latest: AssetVersionEntry | null } | { ok: false }> {
   const res = await restGet(
     creds,
     `${SERVERLESS}/Services/${serviceSid}/Assets/${assetSid}/Versions?PageSize=1`
   );
-  if (!res.ok) return null;
+  if (!res.ok) return { ok: false };
   const list = res.json?.asset_versions;
-  if (!Array.isArray(list) || list.length === 0) return null;
+  if (!Array.isArray(list)) return { ok: false };
+  if (list.length === 0) return { ok: true, latest: null };
   const rec = asRecord(list[0]);
   const versionSid = str(rec, 'sid');
   const path = str(rec, 'path');
-  if (!versionSid || !path) return null;
-  return { versionSid, path, visibility: str(rec, 'visibility') ?? 'public' };
+  if (!versionSid || !path) return { ok: false };
+  return { ok: true, latest: { versionSid, path, visibility: str(rec, 'visibility') ?? 'public' } };
 }
 
 interface FunctionEntry {
@@ -347,35 +380,39 @@ async function listFunctions(
   creds: SmsCredentials,
   serviceSid: string
 ): Promise<FunctionEntry[] | null> {
-  const res = await restGet(
+  const records = await listAllPages(
     creds,
-    `${SERVERLESS}/Services/${serviceSid}/Functions?PageSize=${MAX_BUNDLED_ASSETS}`
+    `${SERVERLESS}/Services/${serviceSid}/Functions?PageSize=${LIST_PAGE_SIZE}`,
+    'functions'
   );
-  if (!res.ok) return null;
-  const list = res.json?.functions;
-  if (!Array.isArray(list)) return null;
+  if (!records) return null;
   const out: FunctionEntry[] = [];
-  for (const item of list) {
-    const sid = str(asRecord(item), 'sid');
+  for (const rec of records) {
+    const sid = str(rec, 'sid');
     if (sid) out.push({ sid });
   }
   return out;
 }
 
-/** Latest version sid of one Function (any visibility — Functions must stay live). */
+/**
+ * Latest version sid of one Function (any visibility — Functions must stay
+ * live). Failure is distinct from "function has no versions yet".
+ */
 async function latestFunctionVersionSid(
   creds: SmsCredentials,
   serviceSid: string,
   functionSid: string
-): Promise<string | null> {
+): Promise<{ ok: true; sid: string | null } | { ok: false }> {
   const res = await restGet(
     creds,
     `${SERVERLESS}/Services/${serviceSid}/Functions/${functionSid}/Versions?PageSize=1`
   );
-  if (!res.ok) return null;
+  if (!res.ok) return { ok: false };
   const list = res.json?.function_versions;
-  if (!Array.isArray(list) || list.length === 0) return null;
-  return str(asRecord(list[0]), 'sid');
+  if (!Array.isArray(list)) return { ok: false };
+  if (list.length === 0) return { ok: true, sid: null };
+  const sid = str(asRecord(list[0]), 'sid');
+  return sid ? { ok: true, sid } : { ok: false };
 }
 
 async function createBuild(
@@ -437,6 +474,19 @@ async function createDeployment(
 // ---------------------------------------------------------------------------
 
 /**
+ * Forget the persisted service/environment state. Call on account
+ * disconnect — the sids/domain belong to the old account and would
+ * short-circuit every pipeline step against the wrong account.
+ */
+export async function clearAssetState(): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(STORAGE_KEY);
+  } catch (e) {
+    console.warn('[twilioAssets] clear persisted state failed', e);
+  }
+}
+
+/**
  * Find-or-create the DayFlow media Service on the user's account. The SID is
  * persisted; later calls short-circuit to it.
  */
@@ -483,49 +533,59 @@ export interface LiveVersions {
   functionVersionSids: string[];
 }
 
+export type LiveVersionsResult = ({ ok: true } & LiveVersions) | TwilioAssetsFailure;
+
 /**
  * Everything currently live in the service that a new Build must re-bundle:
  * the latest public version of each Asset PLUS the latest version of each
- * Function. A Build replaces ALL live content on deploy, so omitting the
- * voice Function here would kill its webhook on the next photo upload (and
- * vice versa for photos on a voice deploy).
+ * Function. A Build replaces ALL live content on deploy, so a build made
+ * from a partial listing would silently un-deploy whatever the listing
+ * missed (the voice webhook, or every hosted photo) — any listing failure
+ * here is a typed failure the caller MUST abort the build on.
  */
 export async function collectLiveVersions(
   creds: SmsCredentials,
   serviceSid: string
-): Promise<LiveVersions> {
-  const assetVersionSids: string[] = [];
+): Promise<LiveVersionsResult> {
+  const photosError =
+    'Could not confirm the photos already hosted, so nothing was deployed. ' +
+    'Check your connection and try again.';
   const assets = await listAssets(creds, serviceSid);
-  if (assets) {
-    const latest = await Promise.all(
-      assets.slice(0, MAX_BUNDLED_ASSETS).map((a) => latestAssetVersion(creds, serviceSid, a.sid))
-    );
-    for (const v of latest) {
-      if (v && v.visibility === 'public') assetVersionSids.push(v.versionSid);
-    }
+  if (!assets) return fail(photosError);
+  const assetVersionSids: string[] = [];
+  const latestAssets = await Promise.all(
+    assets.map((a) => latestAssetVersion(creds, serviceSid, a.sid))
+  );
+  for (const v of latestAssets) {
+    if (!v.ok) return fail(photosError);
+    if (v.latest && v.latest.visibility === 'public') assetVersionSids.push(v.latest.versionSid);
   }
 
-  const functionVersionSids: string[] = [];
+  const functionsError =
+    'Could not confirm the calling setup already deployed, so nothing was ' +
+    'deployed. Check your connection and try again.';
   const fns = await listFunctions(creds, serviceSid);
-  if (fns) {
-    const latest = await Promise.all(
-      fns.map((f) => latestFunctionVersionSid(creds, serviceSid, f.sid))
-    );
-    for (const sid of latest) {
-      if (sid) functionVersionSids.push(sid);
-    }
+  if (!fns) return fail(functionsError);
+  const functionVersionSids: string[] = [];
+  const latestFns = await Promise.all(
+    fns.map((f) => latestFunctionVersionSid(creds, serviceSid, f.sid))
+  );
+  for (const v of latestFns) {
+    if (!v.ok) return fail(functionsError);
+    if (v.sid) functionVersionSids.push(v.sid);
   }
 
-  return { assetVersionSids, functionVersionSids };
+  return { ok: true, assetVersionSids, functionVersionSids };
 }
 
 /** Flat list of every live version sid (assets + functions). */
 export async function collectLiveVersionSids(
   creds: SmsCredentials,
   serviceSid: string
-): Promise<string[]> {
+): Promise<{ ok: true; sids: string[] } | TwilioAssetsFailure> {
   const live = await collectLiveVersions(creds, serviceSid);
-  return [...live.assetVersionSids, ...live.functionVersionSids];
+  if (!live.ok) return live;
+  return { ok: true, sids: [...live.assetVersionSids, ...live.functionVersionSids] };
 }
 
 /** "/photo-....jpg" — URL-safe path for a new asset. */
@@ -565,8 +625,9 @@ export async function uploadPhotoAsset(
 
     // A build must include EVERY version that should stay live — existing
     // public assets AND every Function (e.g. the voice webhook), or they go
-    // offline when this build deploys.
+    // offline when this build deploys. A failed listing aborts the build.
     const live = await collectLiveVersions(creds, serviceSid);
+    if (!live.ok) return live;
     const versionSids = new Set<string>([version.versionSid, ...live.assetVersionSids]);
 
     console.log(
@@ -612,14 +673,13 @@ export async function listPhotoAssets(creds: SmsCredentials): Promise<ListPhotoA
     if (!assets) return fail('Could not list hosted photos.');
 
     const versions = await Promise.all(
-      assets
-        .slice(0, MAX_BUNDLED_ASSETS)
-        .map((a) => latestAssetVersion(creds, service.serviceSid, a.sid))
+      assets.map((a) => latestAssetVersion(creds, service.serviceSid, a.sid))
     );
     const out: { path: string; url: string }[] = [];
     for (const v of versions) {
-      if (v && v.visibility === 'public') {
-        out.push({ path: v.path, url: `https://${domain}${v.path}` });
+      if (!v.ok) return fail('Could not list hosted photos.');
+      if (v.latest && v.latest.visibility === 'public') {
+        out.push({ path: v.latest.path, url: `https://${domain}${v.latest.path}` });
       }
     }
     return { ok: true, assets: out };

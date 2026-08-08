@@ -18,7 +18,10 @@ import {
   saveSmsCredentials,
   type SmsCredentials,
 } from '../../lib/smsCredentials';
+import { clearVoiceState, disableCalling } from '../../lib/voiceApi';
+import { useCalls } from '../../store/calls';
 import { useMessages } from '../../store/messages';
+import { useSettings } from '../../store/settings';
 import { taskColor, useTheme } from '../../theme';
 import { PhotoQuickReplies } from './PhotoQuickReplies';
 import { QuickRepliesEditor } from './QuickRepliesEditor';
@@ -45,6 +48,9 @@ export function MessagingSection() {
   const configured = useMessages((s) => s.configured);
   const refreshConfigured = useMessages((s) => s.refreshConfigured);
   const clearAll = useMessages((s) => s.clearAll);
+  const clearCalls = useCalls((s) => s.clearAll);
+  const callingEnabled = useSettings((s) => s.settings.callingEnabled);
+  const updateSettings = useSettings((s) => s.update);
 
   const [sid, setSid] = useState('');
   const [token, setToken] = useState('');
@@ -127,7 +133,7 @@ export function MessagingSection() {
   const confirmDisconnect = () => {
     Alert.alert(
       'Disconnect messaging?',
-      'Your Twilio credentials are removed from this phone and the local message history is cleared. Nothing changes in your Twilio account.',
+      'Your Twilio credentials are removed from this phone, the local message and call history is cleared, and call forwarding is turned off. Nothing else changes in your Twilio account.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -135,8 +141,17 @@ export function MessagingSection() {
           style: 'destructive',
           onPress: async () => {
             warningHaptic();
+            // Detach the voice webhook while we still have credentials
+            // (best-effort — the local teardown happens regardless).
+            if (callingEnabled) {
+              const creds = await loadSmsCredentials();
+              if (creds) await disableCalling(creds);
+            }
             await clearSmsCredentials();
+            await clearVoiceState();
             clearAll();
+            clearCalls();
+            updateSettings({ callingEnabled: false });
             await refreshConfigured();
           },
         },

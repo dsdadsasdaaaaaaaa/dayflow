@@ -27,9 +27,12 @@ interface Props {
 export function ClientThreadRow({ thread, clientName, status, dimmed, onPress }: Props) {
   const theme = useTheme();
   const { lastMessage, unread } = thread;
-  const preview =
-    (lastMessage.direction === 'out' ? 'You: ' : '') +
-    lastMessage.body.replace(/\s+/g, ' ').trim();
+  const body = lastMessage.body.replace(/\s+/g, ' ').trim();
+  // Photo-only MMS previews as a photo, not '(no text)' / a bare 'You: '.
+  const content = body || (lastMessage.mediaUrls?.length ? '📷 Photo' : '');
+  const preview = content
+    ? (lastMessage.direction === 'out' ? 'You: ' : '') + content
+    : '';
 
   const showBadge = status === 'lead' || status === 'blocked';
   const badgeColor = status ? statusColor(status, theme) : theme.textTertiary;

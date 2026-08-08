@@ -52,6 +52,8 @@ interface MeetingSessionState {
   /** Abandon the active session without logging it. */
   cancel: () => Promise<void>;
   clearLog: () => void;
+  /** Rewrite the client name on past log entries (profile rename). */
+  renameLogClient: (oldName: string, newName: string) => void;
 }
 
 export const useMeetingSession = create<MeetingSessionState>()(
@@ -134,8 +136,15 @@ export const useMeetingSession = create<MeetingSessionState>()(
         // Claim the session synchronously so a double-tap can't log it twice.
         set({ active: null });
         void endMeetingActivity();
-        await cancelMeetingAlerts(active.notificationIds);
         const endedAt = Date.now();
+        await cancelMeetingAlerts(active.notificationIds);
+        // The check-in reminder must survive a normal end — re-anchor it to
+        // the actual end time. endedAt is already in the past here, so
+        // scheduleMeetingAlerts skips the warning/time's-up alerts and only
+        // schedules the check-in at endedAt + checkInAfterMin.
+        if (active.checkInAfterMin != null && active.checkInAfterMin > 0) {
+          await scheduleMeetingAlerts('', endedAt, active.checkInAfterMin);
+        }
         const actualMinutes = Math.max(
           1,
           Math.round((endedAt - active.startedAt) / 60000)
@@ -169,6 +178,20 @@ export const useMeetingSession = create<MeetingSessionState>()(
       },
 
       clearLog: () => set({ log: [] }),
+
+      renameLogClient: (oldName, newName) =>
+        set((s) => {
+          const oldKey = oldName.trim().toLowerCase();
+          const next = newName.trim();
+          if (!oldKey || !next) return s;
+          let changed = false;
+          const log = s.log.map((e) => {
+            if (e.client.trim().toLowerCase() !== oldKey) return e;
+            changed = true;
+            return { ...e, client: next };
+          });
+          return changed ? { log } : s;
+        }),
     }),
     {
       name: 'dayflow-meeting-session',

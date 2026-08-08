@@ -141,7 +141,11 @@ export function buildCallRows(state: Pick<CallsState, 'calls' | 'voicemails'>): 
   return Object.values(state.calls)
     .map((c): CallRow => {
       const voicemail = byCallSid.get(c.sid);
-      return voicemail ? { ...c, voicemail } : { ...c };
+      if (!voicemail) return { ...c };
+      // A voicemail is proof the user never picked up — the parent call
+      // itself always ends 'completed' with nonzero duration, so the
+      // status/duration heuristic alone can't catch rang-out calls.
+      return { ...c, voicemail, missed: c.missed || c.direction === 'in' };
     })
     .sort((a, b) => b.startedAt - a.startedAt);
 }

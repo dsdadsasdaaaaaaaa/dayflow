@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import { useMemo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { selectionHaptic } from '../../lib/haptics';
@@ -37,15 +38,21 @@ export function GlassTabBar({ state, descriptors, navigation }: TabBarProps) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const meta = useClientMeta((s) => s.meta);
-  // Blocked contacts never count toward the tab badge.
-  const unread = useMessages((s) =>
-    buildThreads(s.messages, s.lastReadAt)
+  const messages = useMessages((s) => s.messages);
+  const lastReadAt = useMessages((s) => s.lastReadAt);
+  const voicemails = useCalls((s) => s.voicemails);
+  const heardAt = useCalls((s) => s.heardAt);
+  // The badge math walks every message, so memo on the raw slices — it only
+  // recomputes when one of the underlying maps actually changes, not on every
+  // store setState (syncing/sendingTo flips and the like).
+  const badgeCount = useMemo(() => {
+    // Blocked contacts never count toward the tab badge.
+    const unread = buildThreads(messages, lastReadAt)
       .filter((t) => !isPhoneBlocked(meta, t.counterparty))
-      .reduce((sum, t) => sum + t.unread, 0)
-  );
-  // Unheard voicemails join unread texts on the messages badge.
-  const unheardVoicemails = useCalls((s) => unheardCount(s, meta));
-  const badgeCount = unread + unheardVoicemails;
+      .reduce((sum, t) => sum + t.unread, 0);
+    // Unheard voicemails join unread texts on the messages badge.
+    return unread + unheardCount({ voicemails, heardAt }, meta);
+  }, [messages, lastReadAt, voicemails, heardAt, meta]);
 
   return (
     <View
