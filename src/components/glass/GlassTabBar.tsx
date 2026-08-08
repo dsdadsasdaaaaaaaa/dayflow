@@ -4,8 +4,9 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { selectionHaptic } from '../../lib/haptics';
 import { unheardCount, useCalls } from '../../store/calls';
-import { isPhoneBlocked, useClientMeta } from '../../store/clientMeta';
+import { isPhoneBlocked, isTelegramBlocked, useClientMeta } from '../../store/clientMeta';
 import { buildThreads, useMessages } from '../../store/messages';
+import { buildTelegramThreads, useTelegram } from '../../store/telegramAccount';
 import { useTheme } from '../../theme';
 
 const ICONS: Record<string, [string, string]> = {
@@ -42,6 +43,9 @@ export function GlassTabBar({ state, descriptors, navigation }: TabBarProps) {
   const lastReadAt = useMessages((s) => s.lastReadAt);
   const voicemails = useCalls((s) => s.voicemails);
   const heardAt = useCalls((s) => s.heardAt);
+  const tgMessages = useTelegram((s) => s.messages);
+  const tgLastReadAt = useTelegram((s) => s.lastReadAt);
+  const tgImportedChatIds = useTelegram((s) => s.importedChatIds);
   // The badge math walks every message, so memo on the raw slices — it only
   // recomputes when one of the underlying maps actually changes, not on every
   // store setState (syncing/sendingTo flips and the like).
@@ -50,9 +54,17 @@ export function GlassTabBar({ state, descriptors, navigation }: TabBarProps) {
     const unread = buildThreads(messages, lastReadAt)
       .filter((t) => !isPhoneBlocked(meta, t.counterparty))
       .reduce((sum, t) => sum + t.unread, 0);
+    // Unread imported-Telegram messages join the same badge (blocked excluded).
+    const tgUnread = buildTelegramThreads({
+      messages: tgMessages,
+      lastReadAt: tgLastReadAt,
+      importedChatIds: tgImportedChatIds,
+    })
+      .filter((t) => !isTelegramBlocked(meta, t.counterparty))
+      .reduce((sum, t) => sum + t.unread, 0);
     // Unheard voicemails join unread texts on the messages badge.
-    return unread + unheardCount({ voicemails, heardAt }, meta);
-  }, [messages, lastReadAt, voicemails, heardAt, meta]);
+    return unread + tgUnread + unheardCount({ voicemails, heardAt }, meta);
+  }, [messages, lastReadAt, tgMessages, tgLastReadAt, tgImportedChatIds, voicemails, heardAt, meta]);
 
   return (
     <View

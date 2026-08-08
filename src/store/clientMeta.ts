@@ -17,6 +17,8 @@ export interface ClientMeta {
   notes: string;
   /** Client's phone number (E.164) — links messenger threads to profiles. */
   phone?: string;
+  /** Client's Telegram chat id (bare id, no 'tgc:' prefix) — links Telegram threads. */
+  telegram?: string;
   status?: ClientStatus;
   /** Name as the user typed it (map keys are lowercased). */
   displayName?: string;
@@ -27,11 +29,20 @@ interface ClientMetaState {
   meta: Record<string, ClientMeta>;
   setNotes: (client: string, notes: string) => void;
   setPhone: (client: string, phone: string) => void;
+  /** Link (or unlink with null) a Telegram chat id to a client. */
+  setTelegram: (client: string, chatId: string | null) => void;
   setStatus: (client: string, status: ClientStatus) => void;
   /** Create (or update) a contact from the messenger in one call. */
   upsertContact: (client: string, phone: string, status: ClientStatus) => void;
+  /** Create (or update) a contact from a Telegram thread in one call. */
+  upsertTelegramContact: (client: string, chatId: string, status: ClientStatus) => void;
   /** Move a client's meta to a new name key (profile rename). */
   renameClient: (oldName: string, newName: string) => void;
+}
+
+/** 'tgc:<chatId>' → '<chatId>' (accepts bare chat ids too). */
+function stripTgc(counterparty: string): string {
+  return counterparty.startsWith('tgc:') ? counterparty.slice(4) : counterparty;
 }
 
 /** Canonical map key for a client name. */
@@ -74,6 +85,23 @@ export const useClientMeta = create<ClientMetaState>()(
           };
         }),
 
+      setTelegram: (client, chatId) =>
+        set((s) => {
+          const key = clientMetaKey(client);
+          if (!key) return s;
+          const normalized = chatId ? stripTgc(chatId.trim()) : '';
+          return {
+            meta: {
+              ...s.meta,
+              [key]: {
+                ...s.meta[key],
+                notes: s.meta[key]?.notes ?? '',
+                telegram: normalized || undefined,
+              },
+            },
+          };
+        }),
+
       setStatus: (client, status) =>
         set((s) => {
           const key = clientMetaKey(client);
@@ -98,6 +126,25 @@ export const useClientMeta = create<ClientMetaState>()(
                 ...s.meta[key],
                 notes: s.meta[key]?.notes ?? '',
                 phone: normalized,
+                status,
+                displayName: client.trim(),
+              },
+            },
+          };
+        }),
+
+      upsertTelegramContact: (client, chatId, status) =>
+        set((s) => {
+          const key = clientMetaKey(client);
+          if (!key) return s;
+          const normalized = stripTgc(chatId.trim());
+          return {
+            meta: {
+              ...s.meta,
+              [key]: {
+                ...s.meta[key],
+                notes: s.meta[key]?.notes ?? '',
+                telegram: normalized || undefined,
                 status,
                 displayName: client.trim(),
               },
@@ -152,6 +199,37 @@ export function isPhoneBlocked(meta: Record<string, ClientMeta>, phone: string):
     if (m.phone && normalizePhone(m.phone) === target) return m.status === 'blocked';
   }
   return false;
+}
+
+/** Is this Telegram thread's linked contact blocked? (Unknown chats: no.) */
+export function isTelegramBlocked(
+  meta: Record<string, ClientMeta>,
+  counterparty: string
+): boolean {
+  const target = stripTgc(counterparty.trim());
+  if (!target) return false;
+  for (const m of Object.values(meta)) {
+    if (m.telegram && m.telegram === target) return m.status === 'blocked';
+  }
+  return false;
+}
+
+/** Find the client name whose linked Telegram chat matches, or null. */
+export function clientNameForTelegram(
+  meta: Record<string, ClientMeta>,
+  counterparty: string,
+  displayNames: string[]
+): string | null {
+  const target = stripTgc(counterparty.trim());
+  if (!target) return null;
+  for (const [key, m] of Object.entries(meta)) {
+    if (m.telegram && m.telegram === target) {
+      // Prefer the original-cased display name when the caller knows it.
+      const display = displayNames.find((n) => clientMetaKey(n) === key);
+      return display ?? m.displayName ?? key;
+    }
+  }
+  return null;
 }
 
 /** Find the client name whose saved phone matches, or null. */

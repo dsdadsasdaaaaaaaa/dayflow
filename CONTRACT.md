@@ -191,3 +191,87 @@ NEVER reintroduce blur, aurora blobs, glow shadows, or decorative gradients):
 - `/task-editor` params (all strings): `id` (edit existing), `date` (DayKey prefill),
   `startMinutes` (prefill), `inbox` ("1" → create unscheduled), `title` (prefill).
   Everyone else pushes these routes; the editor agent owns the screen.
+
+## TELEGRAM (personal account)
+
+The user's own Telegram account, via `react-native-tdlib@2.3.0` (native, autolinked,
+prebuilt TDLib xcframework). Counterparty ids are `tgc:<chatId>` beside SMS E.164 ids.
+Private chats only (`chat.type['@type'] === 'chatTypePrivate'`).
+
+- **OTA-SAFETY (absolute rule):** the shipped binary may NOT contain the native
+  module, and the package's index.js THROWS on require when it's missing. NEVER
+  top-level import `react-native-tdlib` anywhere. `src/lib/tdlib.ts` is the ONLY
+  file allowed to touch it (lazy cached `require` in try/catch, web-gated). All its
+  functions degrade to typed failures; UI must show a friendly "arrives with the
+  next app build" state when `tdAvailable()` is false.
+- **PRIVACY:** api_id/api_hash in SecureStore only. Only explicitly imported chats
+  are cached/synced/shown — the user's other DMs never enter the app. Lock-screen/
+  notification content stays generic; never log message bodies or tokens; blocked
+  contacts (clientMeta) never surface or notify.
+
+### src/lib/telegramCredentials.ts
+
+SecureStore key `dayflow-telegram-api`, web memory fallback (mirrors smsCredentials):
+`interface TelegramCredentials { apiId: number; apiHash: string }`;
+`loadTelegramCredentials(): Promise<TelegramCredentials | null>`;
+`saveTelegramCredentials(creds): Promise<void>`; `clearTelegramCredentials(): Promise<void>`.
+
+### src/lib/tdlib.ts — the only TDLib touchpoint
+
+Types: `TdAuthState = 'unconfigured'|'waitPhone'|'waitCode'|'waitPassword'|'ready'|'unavailable'`;
+`TgMessage { id: '<chatId>:<messageId>', counterparty: 'tgc:<chatId>', direction: 'in'|'out',
+body, sentAt (epoch ms), photoFileId?, senderName? }` (body = text ?? caption ?? '');
+`TgChat { chatId, title, isPrivate, unreadCount, lastMessage?, smallPhotoFileId? }`;
+`TdOutcome<T = void> = { ok: true; value: T } | { ok: false; error: string }`;
+`TdUpdate` (discriminant `kind`):
+`{ kind: 'newMessage', chatId, message } | { kind: 'chatLastMessage', chatId, message: TgMessage|null }
+| { kind: 'authState', state } | { kind: 'file', fileId, localPath: string|null, completed }
+| { kind: 'user', userId, name }`.
+
+Exports:
+- `tdAvailable(): boolean` — cached lazy-require probe.
+- `tdStart(): Promise<TdOutcome>` — stored creds + expo-device metadata, wires the
+  `'tdlib-update'` NativeEventEmitter once into the internal dispatcher; idempotent.
+- `tdAuthState(): Promise<TdAuthState>` — polls when running, else derives; also kept
+  live by `updateAuthorizationState` events.
+- `tdLogin(countryCode: string, phone: string): Promise<TdOutcome>` /
+  `tdVerifyCode(code: string): Promise<TdOutcome>` /
+  `tdVerifyPassword(password: string): Promise<TdOutcome>` / `tdLogout(): Promise<TdOutcome>`.
+- `tdLoadChats(): Promise<TdOutcome<TgChat[]>>` — loadChats(200) → getChats, private only.
+- `tdHistory(chatId: string, limit = 40): Promise<TdOutcome<TgMessage[]>>` — pages
+  getChatHistory (TDLib returns partial batches), oldest first.
+- `tdSendText(chatId: string, text: string): Promise<TdOutcome<TgMessage>>`.
+- `tdSendPhoto(chatId: string, localPath: string): Promise<TdOutcome<TgMessage>>` — raw
+  `td_json_client_send` inputMessagePhoto/inputFileLocal (strips `file://`); returns an
+  OPTIMISTIC message (`id: '<chatId>:local-<ts>'`); the confirmed one arrives via updates.
+- `tdMarkRead(chatId: string, messageIds: number[]): Promise<TdOutcome>` (viewMessages, forced).
+- `tdResolvePhoto(fileId: number): Promise<string | null>` — downloadFile, then waits on
+  updateFile events + getFile polling, 15s cap.
+- `onTdUpdate(cb: (u: TdUpdate) => void): () => void`.
+
+### src/store/telegramAccount.ts
+
+`useTelegram` — zustand persist `'dayflow-telegram'`, partialized to
+`{ importedChatIds: string[], chats: Record<chatId, {title}>, messages: Record<id, TgMessage>,
+lastReadAt: Record<counterparty, number> }`; messages pruned to the newest 200 per imported
+chat (non-imported chats are dropped on every write). Runtime (not persisted): `authState`,
+`syncing`, `sendingTo: string | null`, `photoSending: boolean`, `lastError`, `connected`.
+Actions: `refreshAuth(): Promise<TdAuthState>`; `connectAndSync()` (tdStart → when ready:
+tdLoadChats titles + history for imported chats + subscribes updates ONCE, routing new
+messages only for imported chats); `importChat(chatId): Promise<void>` /
+`removeChat(chatId)`; `send(counterparty, text): Promise<boolean>`;
+`sendPhoto(counterparty, localUri): Promise<boolean>`; `markRead(counterparty)` (local
+lastReadAt + best-effort tdMarkRead); `disconnect()` (tdLogout + wipe); `clearAll()`.
+Selectors: `buildTelegramThreads(state)` → `TelegramThread { counterparty, lastMessage,
+unread }[]` (same shape as messages.ts buildThreads); `telegramChatTitle(state,
+counterparty): string`; `totalTelegramUnread(state): number`; helper
+`telegramChatId(counterparty)` strips `tgc:`. Login screens call the lib auth functions
+directly (the store only tracks authState).
+
+### clientMeta additions
+
+`ClientMeta.telegram?: string` (bare chatId, no prefix). `setTelegram(client,
+chatId | null)`, `upsertTelegramContact(client, chatId, status)`,
+`isTelegramBlocked(meta, counterparty): boolean`, `clientNameForTelegram(meta,
+counterparty, displayNames): string | null` (both accept `tgc:` or bare ids).
+`renameClient` carries `telegram` (spreads existing meta).

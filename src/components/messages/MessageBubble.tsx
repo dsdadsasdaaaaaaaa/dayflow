@@ -1,14 +1,30 @@
 import { Ionicons } from '@expo/vector-icons';
+import { useEffect, useState } from 'react';
 import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useMediaDataUri } from '../../lib/mediaCache';
-import type { SmsMessage } from '../../lib/smsApi';
+import { tdResolvePhoto } from '../../lib/tdlib';
 import { RADIUS, useTheme } from '../../theme';
 
+/**
+ * Structural message shape — SmsMessage (lib/smsApi) and TgMessage (lib/tdlib)
+ * both satisfy it, so the same bubble renders SMS/MMS and Telegram traffic.
+ */
+export interface BubbleMessage {
+  direction: 'in' | 'out';
+  body: string;
+  /** Delivery status (SMS channel only). */
+  status?: string;
+  /** MMS attachments — Twilio media URLs (SMS channel). */
+  mediaUrls?: string[];
+  /** Telegram photo attachment — TDLib file id. */
+  photoFileId?: number;
+}
+
 interface Props {
-  msg: SmsMessage;
+  msg: BubbleMessage;
   /** Show the delivery status line under the bubble (last outbound only). */
   showStatus?: boolean;
-  /** Open the full-screen viewer for a tapped photo. */
+  /** Open the full-screen viewer for a tapped photo (URL or local file uri). */
   onPressPhoto?: (url: string) => void;
 }
 
@@ -26,13 +42,17 @@ export function MessageBubble({ msg, showStatus = false, onPressPhoto }: Props) 
   const out = msg.direction === 'out';
   const mediaUrls = msg.mediaUrls ?? [];
   const hasBody = msg.body.trim().length > 0;
+  const hasAttachment = mediaUrls.length > 0 || msg.photoFileId != null;
 
   return (
     <View style={[styles.wrap, out ? styles.wrapOut : styles.wrapIn]}>
       {mediaUrls.map((url) => (
         <MediaPhoto key={url} url={url} onPress={onPressPhoto} />
       ))}
-      {hasBody || mediaUrls.length === 0 ? (
+      {msg.photoFileId != null ? (
+        <TelegramPhoto fileId={msg.photoFileId} onPress={onPressPhoto} />
+      ) : null}
+      {hasBody || !hasAttachment ? (
         <View
           style={[
             styles.bubble,
@@ -44,7 +64,7 @@ export function MessageBubble({ msg, showStatus = false, onPressPhoto }: Props) 
           <Text style={[styles.body, { color: out ? '#FFFFFF' : theme.text }]}>{msg.body}</Text>
         </View>
       ) : null}
-      {showStatus ? (
+      {showStatus && msg.status ? (
         <Text
           style={[
             styles.status,
@@ -82,6 +102,77 @@ function MediaPhoto({ url, onPress }: { url: string; onPress?: (url: string) => 
             <ActivityIndicator size="small" color={theme.textTertiary} />
           ) : (
             <Ionicons name="image-outline" size={22} color={theme.textTertiary} />
+          )}
+        </View>
+      )}
+    </Pressable>
+  );
+}
+
+/** Resolved Telegram photo uris by TDLib file id — instant on re-render. */
+const tgPhotoUriCache = new Map<number, string>();
+
+/**
+ * One Telegram photo attachment: downloads via TDLib (loading placeholder
+ * while it resolves), then renders the local file. Tap to view full screen.
+ */
+function TelegramPhoto({
+  fileId,
+  onPress,
+}: {
+  fileId: number;
+  onPress?: (uri: string) => void;
+}) {
+  const theme = useTheme();
+  const [uri, setUri] = useState<string | null>(tgPhotoUriCache.get(fileId) ?? null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    const cached = tgPhotoUriCache.get(fileId);
+    if (cached) {
+      setUri(cached);
+      setFailed(false);
+      return;
+    }
+    let alive = true;
+    setUri(null);
+    setFailed(false);
+    void tdResolvePhoto(fileId).then((path) => {
+      if (!alive) return;
+      if (path) {
+        const local = path.startsWith('file://') ? path : `file://${path}`;
+        tgPhotoUriCache.set(fileId, local);
+        setUri(local);
+      } else {
+        setFailed(true);
+      }
+    });
+    return () => {
+      alive = false;
+    };
+  }, [fileId]);
+
+  return (
+    <Pressable
+      onPress={() => {
+        if (uri) onPress?.(uri);
+      }}
+      disabled={!onPress || !uri}
+      accessibilityRole="button"
+      accessibilityLabel="Photo attachment"
+      style={({ pressed }) => [
+        styles.photoFrame,
+        { backgroundColor: theme.surface, opacity: pressed ? 0.85 : 1 },
+      ]}
+    >
+      {uri ? (
+        <Image source={{ uri }} style={styles.photo} resizeMode="cover" />
+      ) : (
+        <View style={styles.photoPlaceholder}>
+          {failed ? (
+            <Ionicons name="image-outline" size={22} color={theme.textTertiary} />
+          ) : (
+            <ActivityIndicator size="small" color={theme.textTertiary} />
           )}
         </View>
       )}

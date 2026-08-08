@@ -31,6 +31,7 @@ import { SafetySection } from '../src/components/settings/SafetySection';
 import { SettingsRow } from '../src/components/settings/SettingsRow';
 import { SettingsSection } from '../src/components/settings/SettingsSection';
 import { Stepper } from '../src/components/settings/Stepper';
+import { TelegramSection } from '../src/components/settings/TelegramSection';
 import { deleteAllBackups, startAutoBackup } from '../src/lib/backup';
 import { ensureCalendarPermission } from '../src/lib/calendar';
 import { formatDuration } from '../src/lib/dates';
@@ -42,6 +43,7 @@ import {
   syncAllNotifications,
 } from '../src/lib/notifications';
 import { clearSmsCredentials } from '../src/lib/smsCredentials';
+import { clearTelegramCredentials } from '../src/lib/telegramCredentials';
 import { useCalls } from '../src/store/calls';
 import { useClientMeta } from '../src/store/clientMeta';
 import { useDrafts } from '../src/store/drafts';
@@ -51,6 +53,7 @@ import { useMeetingSession } from '../src/store/meetingSession';
 import { useMessages } from '../src/store/messages';
 import { useSettings } from '../src/store/settings';
 import { useTasks } from '../src/store/tasks';
+import { useTelegram } from '../src/store/telegramAccount';
 import { taskColor, useTheme } from '../src/theme';
 import type { ThemeMode } from '../src/types';
 
@@ -294,6 +297,19 @@ export default function SettingsScreen() {
     } catch {
       // Keychain entry already gone (or unavailable) — nothing left to clear.
     }
+    // Telegram: sign the DayFlow session out (best-effort on old binaries),
+    // drop imported chats, and remove the API keys from the keychain.
+    try {
+      await useTelegram.getState().disconnect();
+    } catch {
+      // TDLib unavailable — the local wipe below still runs.
+    }
+    useTelegram.getState().clearAll();
+    try {
+      await clearTelegramCredentials();
+    } catch {
+      // Keychain entry already gone — nothing left to clear.
+    }
     clearMediaMemoryCache();
     deleteCachedMediaFiles();
     deleteAllBackups();
@@ -305,7 +321,7 @@ export default function SettingsScreen() {
   const confirmErase = () => {
     Alert.alert(
       'Erase all data?',
-      'Tasks, habits, focus and meeting history, the client book, message and call history, cached photos and voicemails, saved backups, messaging credentials and settings will all be deleted from this device.',
+      'Tasks, habits, focus and meeting history, the client book, message and call history, imported Telegram chats, cached photos and voicemails, saved backups, messaging and Telegram credentials and settings will all be deleted from this device.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -527,6 +543,8 @@ export default function SettingsScreen() {
         </SettingsSection>
 
         <MessagingSection />
+
+        <TelegramSection />
 
         <CallingSection />
 

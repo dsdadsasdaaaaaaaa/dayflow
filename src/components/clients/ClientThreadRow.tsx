@@ -1,19 +1,40 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import type { ClientStatus } from '../../store/clientMeta';
-import type { Thread } from '../../store/messages';
 import { SPACING, useTheme } from '../../theme';
 import { formatPhoneDisplay, formatWhenShort } from '../messages/format';
 import { ClientAvatar } from './ClientAvatar';
 import { STATUS_LABELS, statusColor } from './status';
 import { StatusDot } from './StatusDot';
 
+/**
+ * Structural thread shape — both SMS Threads (store/messages) and Telegram
+ * threads (store/telegramAccount) satisfy it, so one row serves both channels.
+ */
+export interface ThreadRowData {
+  counterparty: string;
+  unread: number;
+  lastMessage: {
+    body: string;
+    direction: 'in' | 'out';
+    sentAt: number;
+    /** MMS attachments (SMS channel). */
+    mediaUrls?: string[];
+    /** Telegram photo attachment (TDLib file id). */
+    photoFileId?: number;
+  };
+}
+
 interface Props {
-  thread: Thread;
-  /** Linked client display name, when the number matched one. */
+  thread: ThreadRowData;
+  /** Linked client display name, when the counterparty matched one. */
   clientName: string | null;
-  /** CRM stage for the linked contact; null = unknown number (plain row). */
+  /** CRM stage for the linked contact; null = unknown counterparty (plain row). */
   status: ClientStatus | null;
+  /** Which messenger the thread lives on (default 'sms'). */
+  channel?: 'sms' | 'telegram';
+  /** Display title for unlinked non-phone threads (e.g. Telegram chat title). */
+  fallbackName?: string;
   /** Blocked-section styling: dimmed, no unread pill. */
   dimmed?: boolean;
   onPress: () => void;
@@ -24,15 +45,26 @@ interface Props {
  * badge (small dot + label for leads and blocked; plain for clients and
  * unknown numbers), last-message preview, time, unread pill.
  */
-export function ClientThreadRow({ thread, clientName, status, dimmed, onPress }: Props) {
+export function ClientThreadRow({
+  thread,
+  clientName,
+  status,
+  channel = 'sms',
+  fallbackName,
+  dimmed,
+  onPress,
+}: Props) {
   const theme = useTheme();
   const { lastMessage, unread } = thread;
   const body = lastMessage.body.replace(/\s+/g, ' ').trim();
-  // Photo-only MMS previews as a photo, not '(no text)' / a bare 'You: '.
-  const content = body || (lastMessage.mediaUrls?.length ? '📷 Photo' : '');
+  // Photo-only messages preview as a photo, not '(no text)' / a bare 'You: '.
+  const hasPhoto = (lastMessage.mediaUrls?.length ?? 0) > 0 || lastMessage.photoFileId != null;
+  const content = body || (hasPhoto ? '📷 Photo' : '');
   const preview = content
     ? (lastMessage.direction === 'out' ? 'You: ' : '') + content
     : '';
+  const displayName =
+    clientName ?? fallbackName ?? formatPhoneDisplay(thread.counterparty);
 
   const showBadge = status === 'lead' || status === 'blocked';
   const badgeColor = status ? statusColor(status, theme) : theme.textTertiary;
@@ -42,9 +74,9 @@ export function ClientThreadRow({ thread, clientName, status, dimmed, onPress }:
     <Pressable
       onPress={onPress}
       accessibilityRole="button"
-      accessibilityLabel={`Conversation with ${clientName ?? formatPhoneDisplay(thread.counterparty)}${
+      accessibilityLabel={`Conversation with ${displayName}${
         showBadge && status ? `, ${STATUS_LABELS[status].toLowerCase()}` : ''
-      }`}
+      }${channel === 'telegram' ? ', on Telegram' : ''}`}
       style={({ pressed }) => [
         styles.row,
         pressed && { backgroundColor: theme.surface },
@@ -67,7 +99,7 @@ export function ClientThreadRow({ thread, clientName, status, dimmed, onPress }:
             ]}
             numberOfLines={1}
           >
-            {clientName ?? formatPhoneDisplay(thread.counterparty)}
+            {displayName}
           </Text>
           {showBadge && status ? (
             <View style={styles.badge}>
@@ -89,9 +121,14 @@ export function ClientThreadRow({ thread, clientName, status, dimmed, onPress }:
         </Text>
       </View>
       <View style={styles.metaCol}>
-        <Text style={[styles.time, { color: theme.textTertiary }]}>
-          {formatWhenShort(lastMessage.sentAt)}
-        </Text>
+        <View style={styles.timeRow}>
+          {channel === 'telegram' ? (
+            <Ionicons name="paper-plane-outline" size={12} color={theme.textTertiary} />
+          ) : null}
+          <Text style={[styles.time, { color: theme.textTertiary }]}>
+            {formatWhenShort(lastMessage.sentAt)}
+          </Text>
+        </View>
         {showUnread ? (
           <View style={[styles.unreadPill, { backgroundColor: theme.accent }]}>
             <Text style={styles.unreadLabel}>{unread > 99 ? '99+' : unread}</Text>
@@ -136,6 +173,7 @@ const styles = StyleSheet.create({
   },
   preview: { fontSize: 14 },
   metaCol: { alignItems: 'flex-end', gap: 5 },
+  timeRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   time: { fontSize: 12, fontWeight: '500' },
   unreadPill: {
     minWidth: 20,

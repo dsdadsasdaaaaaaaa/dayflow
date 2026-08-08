@@ -21,26 +21,46 @@ import { NewMessageSheet } from '../../src/components/messages/NewMessageSheet';
 import { SetupCard } from '../../src/components/messages/SetupCard';
 import { tapHaptic } from '../../src/lib/haptics';
 import { knownClients } from '../../src/lib/meetings';
+import type { SmsMessage } from '../../src/lib/smsApi';
+import type { TgMessage } from '../../src/lib/tdlib';
 import { unheardCount, useCalls } from '../../src/store/calls';
 import {
   clientMetaKey,
   clientNameForPhone,
+  clientNameForTelegram,
   effectiveStatus,
+  isTelegramBlocked,
   useClientMeta,
   type ClientStatus,
 } from '../../src/store/clientMeta';
-import { buildThreads, useMessages, type Thread } from '../../src/store/messages';
+import { buildThreads, useMessages } from '../../src/store/messages';
 import { useTasks } from '../../src/store/tasks';
+import {
+  buildTelegramThreads,
+  telegramChatTitle,
+  useTelegram,
+} from '../../src/store/telegramAccount';
 import { SPACING, useTheme } from '../../src/theme';
 
 type ThreadFilter = 'all' | 'lead' | 'client';
+
+/** One row in the unified list — an SMS thread or an imported Telegram chat. */
+interface UnifiedThread {
+  channel: 'sms' | 'telegram';
+  counterparty: string;
+  unread: number;
+  lastMessage: SmsMessage | TgMessage;
+}
 
 interface ThreadInfo {
   name: string | null;
   status: ClientStatus | null;
 }
 
-/** Messages tab: CRM-aware conversation list backed by the local message cache. */
+/**
+ * Messages tab: CRM-aware conversation list uniting the SMS cache and the
+ * user's imported Telegram chats (personal account, explicit imports only).
+ */
 export default function MessagesScreen() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
@@ -53,6 +73,13 @@ export default function MessagesScreen() {
   const configured = useMessages((s) => s.configured);
   const refreshConfigured = useMessages((s) => s.refreshConfigured);
   const sync = useMessages((s) => s.sync);
+  const tgMessages = useTelegram((s) => s.messages);
+  const tgLastReadAt = useTelegram((s) => s.lastReadAt);
+  const tgImportedChatIds = useTelegram((s) => s.importedChatIds);
+  const tgChats = useTelegram((s) => s.chats);
+  const tgSyncing = useTelegram((s) => s.syncing);
+  const tgLastError = useTelegram((s) => s.lastError);
+  const connectAndSync = useTelegram((s) => s.connectAndSync);
   const tasks = useTasks((s) => s.tasks);
   const meta = useClientMeta((s) => s.meta);
   // Unheard voicemail count for the calls-button badge (blocked excluded).
@@ -69,23 +96,46 @@ export default function MessagesScreen() {
   const [filter, setFilter] = useState<ThreadFilter>('all');
   const [blockedOpen, setBlockedOpen] = useState(false);
 
+  /** Telegram counts as set up once the user has imported at least one chat. */
+  const tgConfigured = tgImportedChatIds.length > 0;
+  const anyConfigured = configured || tgConfigured;
+
   // Refresh the credential gate and pull new traffic on mount + every focus.
   useFocusEffect(
     useCallback(() => {
       void refreshConfigured().then(() => sync());
-    }, [refreshConfigured, sync])
+      if (tgConfigured) void connectAndSync();
+    }, [refreshConfigured, sync, tgConfigured, connectAndSync])
   );
 
-  const threads = useMemo(() => buildThreads(messages, lastReadAt), [messages, lastReadAt]);
+  /** Both channels merged, newest conversation first. */
+  const threads = useMemo<UnifiedThread[]>(() => {
+    const sms = buildThreads(messages, lastReadAt).map<UnifiedThread>((t) => ({
+      channel: 'sms',
+      ...t,
+    }));
+    const tg = buildTelegramThreads({
+      messages: tgMessages,
+      lastReadAt: tgLastReadAt,
+      importedChatIds: tgImportedChatIds,
+    }).map<UnifiedThread>((t) => ({ channel: 'telegram', ...t }));
+    return [...sms, ...tg].sort((a, b) => b.lastMessage.sentAt - a.lastMessage.sentAt);
+  }, [messages, lastReadAt, tgMessages, tgLastReadAt, tgImportedChatIds]);
   const clientNames = useMemo(() => knownClients(tasks), [tasks]);
 
-  /** counterparty → linked name + CRM status (null status = unknown number). */
+  /** counterparty → linked name + CRM status (null status = unknown contact). */
   const infoByNumber = useMemo(() => {
     const map = new Map<string, ThreadInfo>();
     for (const t of threads) {
-      const name = clientNameForPhone(meta, t.counterparty, clientNames);
+      const name =
+        t.channel === 'telegram'
+          ? clientNameForTelegram(meta, t.counterparty, clientNames)
+          : clientNameForPhone(meta, t.counterparty, clientNames);
       if (!name) {
-        map.set(t.counterparty, { name: null, status: null });
+        // Unlinked threads carry no CRM stage — except a blocked Telegram
+        // link without a display name, which must still collapse.
+        const blocked = t.channel === 'telegram' && isTelegramBlocked(meta, t.counterparty);
+        map.set(t.counterparty, { name: null, status: blocked ? 'blocked' : null });
         continue;
       }
       const hasMeetings = clientNames.some((n) => clientMetaKey(n) === clientMetaKey(name));
@@ -95,7 +145,7 @@ export default function MessagesScreen() {
   }, [threads, meta, clientNames]);
 
   const statusOf = useCallback(
-    (t: Thread): ClientStatus | null => infoByNumber.get(t.counterparty)?.status ?? null,
+    (t: UnifiedThread): ClientStatus | null => infoByNumber.get(t.counterparty)?.status ?? null,
     [infoByNumber]
   );
 
@@ -123,7 +173,14 @@ export default function MessagesScreen() {
   );
 
   const bottomPad = 96 + insets.bottom;
-  const showError = lastError != null && lastError !== dismissedError;
+  const errorMessage = lastError ?? tgLastError;
+  const showError = errorMessage != null && errorMessage !== dismissedError;
+  const refreshing = syncing || tgSyncing;
+
+  const refreshAll = useCallback(() => {
+    void sync();
+    if (tgConfigured) void connectAndSync();
+  }, [sync, tgConfigured, connectAndSync]);
 
   const openThread = (counterparty: string) => {
     tapHaptic();
@@ -135,12 +192,18 @@ export default function MessagesScreen() {
     router.push(`/thread?number=${encodeURIComponent(number)}`);
   };
 
-  const renderThread = (item: Thread, dimmed?: boolean) => {
+  const renderThread = (item: UnifiedThread, dimmed?: boolean) => {
     const info = infoByNumber.get(item.counterparty);
     return (
       <ClientThreadRow
         thread={item}
+        channel={item.channel}
         clientName={info?.name ?? null}
+        fallbackName={
+          item.channel === 'telegram'
+            ? telegramChatTitle({ chats: tgChats }, item.counterparty)
+            : undefined
+        }
         status={info?.status ?? null}
         dimmed={dimmed}
         onPress={() => openThread(item.counterparty)}
@@ -187,7 +250,7 @@ export default function MessagesScreen() {
 
   const headerRight = (
     <View style={styles.headerRight}>
-      {syncing ? <ActivityIndicator size="small" color={theme.textTertiary} /> : null}
+      {refreshing ? <ActivityIndicator size="small" color={theme.textTertiary} /> : null}
       <Pressable
         onPress={() => {
           tapHaptic();
@@ -233,16 +296,19 @@ export default function MessagesScreen() {
       <ScreenHeader
         title="Messages"
         subtitle={
-          configured ? (unread > 0 ? `${unread} unread` : 'All caught up') : undefined
+          anyConfigured ? (unread > 0 ? `${unread} unread` : 'All caught up') : undefined
         }
         right={headerRight}
       />
 
-      {showError ? (
-        <ErrorBanner message={lastError} onDismiss={() => setDismissedError(lastError)} />
+      {showError && errorMessage ? (
+        <ErrorBanner
+          message={errorMessage}
+          onDismiss={() => setDismissedError(errorMessage)}
+        />
       ) : null}
 
-      {!configured ? (
+      {!anyConfigured ? (
         <ScrollView
           contentContainerStyle={[styles.setupContent, { paddingBottom: bottomPad }]}
           showsVerticalScrollIndicator={false}
@@ -255,8 +321,8 @@ export default function MessagesScreen() {
           showsVerticalScrollIndicator={false}
           refreshControl={
             <RefreshControl
-              refreshing={syncing}
-              onRefresh={() => void sync()}
+              refreshing={refreshing}
+              onRefresh={refreshAll}
               tintColor={theme.textTertiary}
             />
           }
@@ -264,23 +330,29 @@ export default function MessagesScreen() {
           <EmptyState
             icon="chatbubbles-outline"
             title="No conversations yet"
-            subtitle="Texts to and from your number show up here."
+            subtitle={
+              tgConfigured
+                ? 'Texts and imported Telegram chats show up here.'
+                : 'Texts to and from your number show up here.'
+            }
           />
-          <Pressable
-            onPress={() => {
-              tapHaptic();
-              setSheetOpen(true);
-            }}
-            accessibilityRole="button"
-            style={({ pressed }) => [
-              styles.newBtn,
-              { backgroundColor: theme.accent },
-              pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
-            ]}
-          >
-            <Ionicons name="create-outline" size={17} color="#FFFFFF" />
-            <Text style={styles.newBtnLabel}>New message</Text>
-          </Pressable>
+          {configured ? (
+            <Pressable
+              onPress={() => {
+                tapHaptic();
+                setSheetOpen(true);
+              }}
+              accessibilityRole="button"
+              style={({ pressed }) => [
+                styles.newBtn,
+                { backgroundColor: theme.accent },
+                pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
+              ]}
+            >
+              <Ionicons name="create-outline" size={17} color="#FFFFFF" />
+              <Text style={styles.newBtnLabel}>New message</Text>
+            </Pressable>
+          ) : null}
         </ScrollView>
       ) : (
         <>
@@ -295,7 +367,7 @@ export default function MessagesScreen() {
           />
           <FlatList
             data={visibleThreads}
-            keyExtractor={(t: Thread) => t.counterparty}
+            keyExtractor={(t: UnifiedThread) => t.counterparty}
             renderItem={({ item }) => renderThread(item)}
             ItemSeparatorComponent={() => (
               <View style={[styles.separator, { backgroundColor: theme.separator }]} />
@@ -317,8 +389,8 @@ export default function MessagesScreen() {
             contentContainerStyle={{ paddingBottom: bottomPad }}
             refreshControl={
               <RefreshControl
-                refreshing={syncing}
-                onRefresh={() => void sync()}
+                refreshing={refreshing}
+                onRefresh={refreshAll}
                 tintColor={theme.textTertiary}
               />
             }

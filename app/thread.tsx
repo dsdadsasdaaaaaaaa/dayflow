@@ -4,7 +4,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   FlatList,
+  Image,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   StyleSheet,
@@ -50,21 +52,32 @@ import {
 } from '../src/lib/meetings';
 import type { SmsMessage } from '../src/lib/smsApi';
 import { normalizePhone } from '../src/lib/smsCredentials';
+import type { TgMessage } from '../src/lib/tdlib';
 import {
   clientMetaKey,
   clientNameForPhone,
+  clientNameForTelegram,
   effectiveStatus,
   useClientMeta,
 } from '../src/store/clientMeta';
 import { threadMessages, useMessages } from '../src/store/messages';
 import { useSettings } from '../src/store/settings';
 import { useTasks } from '../src/store/tasks';
+import { telegramChatTitle, useTelegram } from '../src/store/telegramAccount';
 import { SPACING, useTheme } from '../src/theme';
 import type { DayKey } from '../src/types';
 
+/** A message from either channel — SMS/MMS (Twilio) or Telegram (TDLib). */
+type ThreadMsg = SmsMessage | TgMessage;
+
+/** Stable row key: Twilio SID or TgMessage id. */
+function msgKey(m: ThreadMsg): string {
+  return 'sid' in m ? m.sid : m.id;
+}
+
 type Row =
   | { type: 'day'; key: string; day: DayKey }
-  | { type: 'message'; key: string; msg: SmsMessage; showStatus: boolean };
+  | { type: 'message'; key: string; msg: ThreadMsg; showStatus: boolean };
 
 /** "Today" / "Tomorrow" / "Friday" / "Wednesday, July 16" + optional time. */
 function confirmationDraft(occ: MeetingOccurrence): string {
@@ -88,19 +101,32 @@ export default function ThreadScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const params = useLocalSearchParams<{ number?: string; draft?: string }>();
-  const number = normalizePhone(typeof params.number === 'string' ? params.number : '');
+  const rawNumber = typeof params.number === 'string' ? params.number : '';
+  /** Telegram threads use 'tgc:<chatId>' counterparties beside SMS E.164 ids. */
+  const isTelegram = rawNumber.startsWith('tgc:');
+  const number = isTelegram ? rawNumber : normalizePhone(rawNumber);
 
   const messages = useMessages((s) => s.messages);
   const sendingTo = useMessages((s) => s.sendingTo);
-  const lastError = useMessages((s) => s.lastError);
+  const smsLastError = useMessages((s) => s.lastError);
   const lastSyncAt = useMessages((s) => s.lastSyncAt);
   const send = useMessages((s) => s.send);
   const markRead = useMessages((s) => s.markRead);
   const sendPhoto = useMessages((s) => s.sendPhoto);
   const photoSending = useMessages((s) => s.photoSending);
+  const tgMessages = useTelegram((s) => s.messages);
+  const tgChats = useTelegram((s) => s.chats);
+  const tgSendingTo = useTelegram((s) => s.sendingTo);
+  const tgPhotoSending = useTelegram((s) => s.photoSending);
+  const tgLastError = useTelegram((s) => s.lastError);
+  const tgSend = useTelegram((s) => s.send);
+  const tgSendPhoto = useTelegram((s) => s.sendPhoto);
+  const tgMarkRead = useTelegram((s) => s.markRead);
   const tasks = useTasks((s) => s.tasks);
   const meta = useClientMeta((s) => s.meta);
   const settings = useSettings((s) => s.settings);
+
+  const lastError = isTelegram ? tgLastError : smsLastError;
 
   const [dismissedError, setDismissedError] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
@@ -108,6 +134,8 @@ export default function ThreadScreen() {
   const [quickOpen, setQuickOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
+  /** Full-screen viewer for Telegram photos (local files, no auth fetch). */
+  const [localViewerUri, setLocalViewerUri] = useState<string | null>(null);
 
   // Seed the composer from ?draft= (e.g. client-detail's "Request deposit").
   // Once only — never clobber what the user has typed since.
@@ -122,17 +150,22 @@ export default function ThreadScreen() {
   // Read state: clear the unread count on focus and again after each sync.
   useFocusEffect(
     useCallback(() => {
-      if (number) markRead(number);
-    }, [number, markRead])
+      if (!number) return;
+      if (isTelegram) tgMarkRead(number);
+      else markRead(number);
+    }, [number, isTelegram, markRead, tgMarkRead])
   );
   useEffect(() => {
-    if (number && lastSyncAt != null) markRead(number);
-  }, [number, lastSyncAt, markRead]);
+    if (!isTelegram && number && lastSyncAt != null) markRead(number);
+  }, [isTelegram, number, lastSyncAt, markRead]);
 
   const known = useMemo(() => knownClients(tasks), [tasks]);
   const clientName = useMemo(
-    () => clientNameForPhone(meta, number, known),
-    [meta, number, known]
+    () =>
+      isTelegram
+        ? clientNameForTelegram(meta, number, known)
+        : clientNameForPhone(meta, number, known),
+    [isTelegram, meta, number, known]
   );
   const hasMeetings =
     clientName != null && known.some((n) => clientMetaKey(n) === clientMetaKey(clientName));
@@ -179,12 +212,19 @@ export default function ThreadScreen() {
     }, [bookingId, nextBooking])
   );
 
-  const msgs = useMemo(() => threadMessages(messages, number), [messages, number]);
+  const msgs = useMemo<ThreadMsg[]>(() => {
+    if (isTelegram) {
+      return Object.values(tgMessages)
+        .filter((m) => m.counterparty === number)
+        .sort((a, b) => a.sentAt - b.sentAt);
+    }
+    return threadMessages(messages, number);
+  }, [isTelegram, tgMessages, messages, number]);
 
   /** Chronological rows with day separators, reversed for the inverted list. */
   const rows = useMemo<Row[]>(() => {
-    let lastOutSid: string | null = null;
-    for (const m of msgs) if (m.direction === 'out') lastOutSid = m.sid;
+    let lastOutKey: string | null = null;
+    for (const m of msgs) if (m.direction === 'out') lastOutKey = msgKey(m);
     const out: Row[] = [];
     let prevDay: DayKey | null = null;
     for (const m of msgs) {
@@ -193,14 +233,17 @@ export default function ThreadScreen() {
         out.push({ type: 'day', key: `day-${day}`, day });
         prevDay = day;
       }
+      const key = msgKey(m);
+      const status = 'status' in m ? m.status : null;
       out.push({
         type: 'message',
-        key: m.sid,
+        key,
         msg: m,
         // Only surface real problems — queued/sending settle on their own
-        // (the store re-checks the status after a send).
+        // (the SMS store re-checks the status after a send; Telegram has no
+        // delivery-status line at all).
         showStatus:
-          m.sid === lastOutSid && (m.status === 'failed' || m.status === 'undelivered'),
+          key === lastOutKey && (status === 'failed' || status === 'undelivered'),
       });
     }
     return out.reverse();
@@ -208,11 +251,12 @@ export default function ThreadScreen() {
 
   const handleSend = useCallback(
     async (body: string) => {
-      // The store merges the sent message optimistically and settles its
+      // Each store merges the sent message optimistically and settles its
       // status itself — no full history re-sync needed here.
+      if (isTelegram) return tgSend(number, body);
       return send(number, body);
     },
-    [send, number]
+    [isTelegram, tgSend, send, number]
   );
 
   // ── Quick replies ──────────────────────────────────────────────────────────
@@ -282,20 +326,53 @@ export default function ThreadScreen() {
       return;
     }
     if (!uri) return;
+    if (isTelegram) {
+      // Telegram sends the local file directly — no hosting delay.
+      await tgSendPhoto(number, uri);
+      return;
+    }
     // Hosts the photo on the user's Twilio account (~30-60s), then sends;
     // failures surface via the store's lastError banner.
     await sendPhoto(number, uri);
-  }, [sendPhoto, number]);
+  }, [isTelegram, tgSendPhoto, sendPhoto, number]);
 
-  const subtitle = clientName
-    ? nextBooking
+  /** Header title: linked client, else chat title (Telegram) / number (SMS). */
+  const displayTitle =
+    clientName ??
+    (isTelegram ? telegramChatTitle({ chats: tgChats }, number) : formatPhoneDisplay(number));
+
+  const subtitle =
+    clientName && nextBooking
       ? `Next: ${formatDayRelative(nextBooking.dateKey)}${
           !nextBooking.task.allDay && nextBooking.task.startMinutes != null
             ? ` · ${formatMinutes(nextBooking.task.startMinutes)}`
             : ''
         }`
-      : formatPhoneDisplay(number)
-    : null;
+      : isTelegram
+        ? 'Telegram'
+        : clientName
+          ? formatPhoneDisplay(number)
+          : null;
+
+  const composerSending = isTelegram
+    ? tgSendingTo === number || tgPhotoSending
+    : sendingTo === number || photoSending != null;
+
+  const photoProgress = isTelegram
+    ? tgPhotoSending
+      ? 'Sending photo…'
+      : null
+    : photoSending
+      ? photoSending === 'uploading'
+        ? 'Hosting photo… ~30-60s'
+        : 'Sending photo…'
+      : null;
+
+  /** Route tapped photos: hosted MMS URLs → PhotoViewer, local files → inline viewer. */
+  const openPhoto = useCallback((uri: string) => {
+    if (uri.startsWith('http')) setViewerUrl(uri);
+    else setLocalViewerUri(uri);
+  }, []);
 
   const showError = lastError != null && lastError !== dismissedError;
 
@@ -318,7 +395,7 @@ export default function ThreadScreen() {
             setPanelOpen(true);
           }}
           accessibilityRole="button"
-          accessibilityLabel={`Contact details for ${clientName ?? formatPhoneDisplay(number)}`}
+          accessibilityLabel={`Contact details for ${displayTitle}`}
           style={styles.titleCol}
         >
           <View style={styles.titleRow}>
@@ -334,7 +411,7 @@ export default function ThreadScreen() {
               />
             ) : null}
             <Text style={[styles.title, { color: theme.text }]} numberOfLines={1}>
-              {clientName ?? formatPhoneDisplay(number)}
+              {displayTitle}
             </Text>
             {/* Small chevron so the contact panel is discoverable. */}
             <Ionicons name="chevron-down" size={12} color={theme.textTertiary} />
@@ -345,23 +422,25 @@ export default function ThreadScreen() {
             </Text>
           ) : null}
         </Pressable>
-        <Pressable
-          onPress={() => {
-            tapHaptic();
-            startClientCall(
-              settings.callingEnabled,
-              settings.callForwardTo,
-              number,
-              clientName
-            );
-          }}
-          hitSlop={8}
-          accessibilityRole="button"
-          accessibilityLabel={`Call ${clientName ?? formatPhoneDisplay(number)}`}
-          style={[styles.calendarBtn, { backgroundColor: theme.surface }]}
-        >
-          <Ionicons name="call-outline" size={18} color={theme.accent} />
-        </Pressable>
+        {!isTelegram ? (
+          <Pressable
+            onPress={() => {
+              tapHaptic();
+              startClientCall(
+                settings.callingEnabled,
+                settings.callForwardTo,
+                number,
+                clientName
+              );
+            }}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel={`Call ${displayTitle}`}
+            style={[styles.calendarBtn, { backgroundColor: theme.surface }]}
+          >
+            <Ionicons name="call-outline" size={18} color={theme.accent} />
+          </Pressable>
+        ) : null}
         {clientName ? (
           <Pressable
             onPress={() => {
@@ -393,7 +472,7 @@ export default function ThreadScreen() {
               <MessageBubble
                 msg={item.msg}
                 showStatus={item.showStatus}
-                onPressPhoto={setViewerUrl}
+                onPressPhoto={openPhoto}
               />
             )
           }
@@ -419,19 +498,20 @@ export default function ThreadScreen() {
           },
         ]}
       >
-        {!clientName ? <LinkClientRow number={number} /> : null}
+        {!clientName && !isTelegram ? <LinkClientRow number={number} /> : null}
         {showError ? (
           <ErrorBanner message={lastError} onDismiss={() => setDismissedError(lastError)} />
         ) : null}
-        {photoSending ? (
+        {photoProgress ? (
           <Text style={[styles.photoProgress, { color: theme.textSecondary }]}>
-            {photoSending === 'uploading' ? 'Hosting photo… ~30-60s' : 'Sending photo…'}
+            {photoProgress}
           </Text>
         ) : null}
         {quickOpen ? (
           <QuickReplies
             templates={settings.messageTemplates}
-            photos={photoReplies}
+            // Photo quick-replies are Twilio-hosted URLs — SMS/MMS only.
+            photos={isTelegram ? [] : photoReplies}
             actions={quickActions}
             onPickText={insertTemplate}
             onPickPhoto={sendPhotoReply}
@@ -439,7 +519,7 @@ export default function ThreadScreen() {
         ) : null}
         <Composer
           onSend={handleSend}
-          sending={sendingTo === number || photoSending != null}
+          sending={composerSending}
           text={draft}
           onChangeText={setDraft}
           quickOpen={quickOpen}
@@ -461,7 +541,35 @@ export default function ThreadScreen() {
         onInsert={insertTemplate}
       />
       <PhotoViewer url={viewerUrl} onClose={() => setViewerUrl(null)} />
+      <LocalPhotoViewer uri={localViewerUri} onClose={() => setLocalViewerUri(null)} />
     </KeyboardAvoidingView>
+  );
+}
+
+/**
+ * Full-screen viewer for local photo files (Telegram downloads). PhotoViewer
+ * only handles hosted media URLs (authenticated fetch), so local uris render
+ * directly here with the same plain dark-backdrop look.
+ */
+function LocalPhotoViewer({ uri, onClose }: { uri: string | null; onClose: () => void }) {
+  const insets = useSafeAreaInsets();
+  return (
+    <Modal visible={uri != null} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.viewerRoot}>
+        {uri ? (
+          <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="contain" />
+        ) : null}
+        <Pressable
+          onPress={onClose}
+          hitSlop={10}
+          accessibilityRole="button"
+          accessibilityLabel="Close photo"
+          style={[styles.viewerClose, { top: insets.top + 10 }]}
+        >
+          <Ionicons name="close" size={22} color="#FFFFFF" />
+        </Pressable>
+      </View>
+    </Modal>
   );
 }
 
@@ -508,5 +616,21 @@ const styles = StyleSheet.create({
   footer: {
     borderTopWidth: StyleSheet.hairlineWidth,
     paddingTop: SPACING.sm,
+  },
+  viewerRoot: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.95)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  viewerClose: {
+    position: 'absolute',
+    right: 16,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });

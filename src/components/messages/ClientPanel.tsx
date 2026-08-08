@@ -29,6 +29,11 @@ import {
 import { useMeetingSession } from '../../store/meetingSession';
 import { useSettings } from '../../store/settings';
 import { useTasks } from '../../store/tasks';
+import {
+  telegramChatId,
+  telegramChatTitle,
+  useTelegram,
+} from '../../store/telegramAccount';
 import { RADIUS, SPACING, useTheme } from '../../theme';
 import { formatPhoneDisplay } from './format';
 
@@ -76,7 +81,7 @@ export function startClientCall(
 interface Props {
   visible: boolean;
   onClose: () => void;
-  /** The thread's counterparty (E.164). */
+  /** The thread's counterparty — E.164, or 'tgc:<chatId>' for Telegram. */
   number: string;
   /** Linked client display name, or null for unknown numbers. */
   clientName: string | null;
@@ -99,9 +104,17 @@ export function ClientPanel({ visible, onClose, number, clientName, onBook }: Pr
   const setStatus = useClientMeta((s) => s.setStatus);
   const setNotes = useClientMeta((s) => s.setNotes);
   const upsertContact = useClientMeta((s) => s.upsertContact);
+  const upsertTelegramContact = useClientMeta((s) => s.upsertTelegramContact);
+  const tgChats = useTelegram((s) => s.chats);
   const symbol = useSettings((s) => s.settings.currencySymbol);
   const callingEnabled = useSettings((s) => s.settings.callingEnabled);
   const callForwardTo = useSettings((s) => s.settings.callForwardTo);
+
+  // Telegram threads: no phone number, no calling — the chat title stands in.
+  const isTelegram = number.startsWith('tgc:');
+  const fallbackTitle = isTelegram
+    ? telegramChatTitle({ chats: tgChats }, number)
+    : formatPhoneDisplay(number);
 
   const hasMeetings = useMemo(
     () =>
@@ -126,7 +139,8 @@ export function ClientPanel({ visible, onClose, number, clientName, onBook }: Pr
     const name = nameDraft.trim();
     if (!name) return;
     successHaptic();
-    upsertContact(name, number, as);
+    if (isTelegram) upsertTelegramContact(name, telegramChatId(number), as);
+    else upsertContact(name, number, as);
     setNameDraft('');
   };
 
@@ -227,12 +241,16 @@ export function ClientPanel({ visible, onClose, number, clientName, onBook }: Pr
                 />
               ) : null}
               <Text style={[styles.name, { color: theme.text }]} numberOfLines={1}>
-                {clientName ?? formatPhoneDisplay(number)}
+                {clientName ?? fallbackTitle}
               </Text>
             </View>
             {clientName ? (
               <Text style={[styles.numberLine, { color: theme.textSecondary }]}>
-                {formatPhoneDisplay(number)}
+                {isTelegram ? 'Telegram' : formatPhoneDisplay(number)}
+              </Text>
+            ) : isTelegram ? (
+              <Text style={[styles.numberLine, { color: theme.textSecondary }]}>
+                Telegram
               </Text>
             ) : null}
 
@@ -276,10 +294,10 @@ export function ClientPanel({ visible, onClose, number, clientName, onBook }: Pr
                 </View>
               </View>
             ) : (
-              /* Save this number */
+              /* Save this number / contact */
               <View style={styles.section}>
                 <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>
-                  Save this number
+                  {isTelegram ? 'Save this contact' : 'Save this number'}
                 </Text>
                 <TextInput
                   value={nameDraft}
@@ -393,7 +411,7 @@ export function ClientPanel({ visible, onClose, number, clientName, onBook }: Pr
 
             {/* Actions */}
             <View style={[styles.actions, { borderTopColor: theme.separator }]}>
-              {clientName ? (
+              {clientName && !isTelegram ? (
                 <ActionRow
                   icon="call-outline"
                   label="Call"
@@ -428,12 +446,14 @@ export function ClientPanel({ visible, onClose, number, clientName, onBook }: Pr
                   }}
                 />
               ) : null}
-              <ActionRow
-                icon={copied ? 'checkmark' : 'copy-outline'}
-                label={copied ? 'Copied' : 'Copy number'}
-                color={copied ? theme.success : theme.text}
-                onPress={copyNumber}
-              />
+              {!isTelegram ? (
+                <ActionRow
+                  icon={copied ? 'checkmark' : 'copy-outline'}
+                  label={copied ? 'Copied' : 'Copy number'}
+                  color={copied ? theme.success : theme.text}
+                  onPress={copyNumber}
+                />
+              ) : null}
               {clientName && status === 'blocked' ? (
                 <ActionRow
                   icon="lock-open-outline"

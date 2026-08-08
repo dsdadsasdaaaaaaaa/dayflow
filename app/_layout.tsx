@@ -227,6 +227,8 @@ export default function RootLayout() {
           <Stack.Screen name="client-detail" options={{ animation: 'slide_from_right' }} />
           <Stack.Screen name="thread" options={{ animation: 'slide_from_right' }} />
           <Stack.Screen name="calls" options={{ animation: 'slide_from_right' }} />
+          <Stack.Screen name="telegram-login" options={{ animation: 'slide_from_right' }} />
+          <Stack.Screen name="telegram-chats" options={{ animation: 'slide_from_right' }} />
           <Stack.Screen name="week" options={{ animation: 'slide_from_right' }} />
           <Stack.Screen
             name="welcome"
