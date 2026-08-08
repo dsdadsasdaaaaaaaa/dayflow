@@ -22,18 +22,14 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AlertChips } from '../src/components/settings/AlertChips';
 import { BackupsModal } from '../src/components/settings/BackupsModal';
-import { CallingSection } from '../src/components/settings/CallingSection';
 import { GlassSegmented } from '../src/components/settings/GlassSegmented';
 import { CalendarToggles } from '../src/components/settings/CalendarToggles';
 import { CurrencyPicker } from '../src/components/settings/CurrencyPicker';
 import { GoalStepper } from '../src/components/settings/GoalStepper';
 import { ImportBackupModal } from '../src/components/settings/ImportBackupModal';
-import { MessagingSection } from '../src/components/settings/MessagingSection';
-import { SafetySection } from '../src/components/settings/SafetySection';
 import { SettingsRow } from '../src/components/settings/SettingsRow';
 import { SettingsSection } from '../src/components/settings/SettingsSection';
 import { Stepper } from '../src/components/settings/Stepper';
-import { TelegramSection } from '../src/components/settings/TelegramSection';
 import {
   deleteAllBackups,
   exportBackupPayload,
@@ -112,6 +108,18 @@ export default function SettingsScreen() {
   const update = useSettings((s) => s.update);
   const meetingLog = useMeetingSession((s) => s.log);
   const clearMeetingLog = useMeetingSession((s) => s.clearLog);
+
+  // One-line status for the "Messaging & calls" entry row.
+  const smsConfigured = useMessages((s) => s.configured);
+  const tgImported = useTelegram((s) => s.importedChatIds.length);
+  const commsOn = [
+    smsConfigured ? 'Texting' : null,
+    tgImported > 0 ? 'Telegram' : null,
+    settings.callingEnabled ? 'Calling' : null,
+    settings.safetyAlertEnabled ? 'Safety' : null,
+  ].filter(Boolean);
+  const commsSublabel =
+    commsOn.length > 0 ? `${commsOn.join(' · ')} on` : 'Texting, Telegram, calling, safety';
 
   const [importVisible, setImportVisible] = useState(false);
   const [backupsVisible, setBackupsVisible] = useState(false);
@@ -645,9 +653,19 @@ export default function SettingsScreen() {
 
         <SettingsSection
           delay={90}
-          title="Meetings"
+          title="Business"
           caption="The symbol used for rates and earnings across the app. The weekly goal is shown as a progress bar in Stats."
         >
+          <SettingsRow
+            icon="chatbubbles"
+            tint={taskColor('indigo').solid}
+            label="Messaging & calls"
+            sublabel={commsSublabel}
+            onPress={() => {
+              tapHaptic();
+              router.push('/settings-messaging');
+            }}
+          />
           <View style={styles.block}>
             <Text style={[styles.blockLabel, { color: theme.textTertiary }]}>
               Currency symbol
@@ -681,14 +699,6 @@ export default function SettingsScreen() {
             onPress={confirmClearMeetings}
           />
         </SettingsSection>
-
-        <MessagingSection />
-
-        <TelegramSection />
-
-        <CallingSection />
-
-        <SafetySection />
 
         <SettingsSection title="Focus" delay={135}>
           <SettingsRow
