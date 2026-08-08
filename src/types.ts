@@ -202,6 +202,13 @@ export interface Settings {
   currencySymbol: string;
   /** Weekly earnings target for the Stats goal bar, or null = no goal. */
   weeklyEarningsGoal: number | null;
+  /** Quick-reply templates for the messenger composer. */
+  messageTemplates: string[];
+  /**
+   * Photo quick replies: already-hosted public image URLs (Twilio Serverless
+   * Assets) the user can attach to an MMS instantly, with a short label.
+   */
+  photoQuickReplies: { label: string; url: string }[];
   /** Require Face ID / passcode to open the app. */
   appLock: boolean;
   onboardingDone: boolean;

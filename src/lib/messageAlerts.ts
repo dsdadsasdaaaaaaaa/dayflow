@@ -2,7 +2,7 @@ import * as BackgroundTask from 'expo-background-task';
 import * as Notifications from 'expo-notifications';
 import * as TaskManager from 'expo-task-manager';
 import { Platform } from 'react-native';
-import { useClientMeta, clientNameForPhone } from '../store/clientMeta';
+import { useClientMeta, clientNameForPhone, isPhoneBlocked } from '../store/clientMeta';
 import { useMessages } from '../store/messages';
 import { useTasks } from '../store/tasks';
 import { knownClients } from './meetings';
@@ -29,8 +29,13 @@ async function notifyNewInbound(): Promise<void> {
   const known = new Set(Object.keys(store.messages));
   const fetched = await listRecentSms(creds, 50);
 
+  const metaNow = useClientMeta.getState().meta;
   const fresh = fetched.filter(
-    (m) => m.direction === 'in' && !known.has(m.sid) && Date.now() - m.sentAt < 24 * 3600_000
+    (m) =>
+      m.direction === 'in' &&
+      !known.has(m.sid) &&
+      Date.now() - m.sentAt < 24 * 3600_000 &&
+      !isPhoneBlocked(metaNow, m.counterparty)
   );
   if (fresh.length === 0) {
     // Still merge outbound/status updates quietly.

@@ -20,6 +20,8 @@ import {
 } from '../../lib/smsCredentials';
 import { useMessages } from '../../store/messages';
 import { taskColor, useTheme } from '../../theme';
+import { PhotoQuickReplies } from './PhotoQuickReplies';
+import { QuickRepliesEditor } from './QuickRepliesEditor';
 import { SettingsRow } from './SettingsRow';
 import { SettingsSection } from './SettingsSection';
 
@@ -171,6 +173,8 @@ export function MessagingSection() {
             ) : undefined
           }
         />
+        <QuickRepliesEditor />
+        <PhotoQuickReplies />
         <SettingsRow
           icon="unlink"
           tint={theme.danger}
@@ -252,6 +256,8 @@ export function MessagingSection() {
           )}
         </Pressable>
       </View>
+      <QuickRepliesEditor />
+      <PhotoQuickReplies />
     </SettingsSection>
   );
 }

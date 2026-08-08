@@ -83,6 +83,16 @@ timeline + inbox + recurring tasks + habits + focus timer + stats, with everythi
   handoff — copy the client's number (expo-clipboard) and attempt
   Linking.openURL('textnow://') with a graceful copied-only fallback. Never suggest
   scraping/linking the user's TextNow account directly (no API; ToS/ban risk).
+- CRM LAYER: ClientMeta has `status?: 'lead' | 'client' | 'blocked'` with store actions
+  setStatus / upsertContact(client, phone, status) and helpers effectiveStatus(meta,
+  client, hasMeetings) + isPhoneBlocked(meta, phone). Blocked numbers are muted in
+  messageAlerts. Settings has `messageTemplates: string[]` (quick replies, editable).
+  Status colors: lead = amber #D97706, client = theme.accent, blocked = textTertiary.
+- MEDIA (MMS): inbound Twilio messages can carry photos (num_media > 0 → Media
+  subresource). Display via authenticated fetch cached as data URIs. Outbound photos
+  need a public MediaUrl — hosted through the user's own Twilio Serverless Assets
+  (uploaded once for the photo quick-reply library; ad-hoc sends deploy on demand,
+  ~30-60s). expo-image-picker is installed (native — activates on next build).
 
 ## Live meeting sessions (src/store/meetingSession.ts — read it)
 

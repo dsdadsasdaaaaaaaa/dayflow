@@ -8,21 +8,39 @@ interface Props {
   /** Sends the trimmed body; resolve true on success (input clears). */
   onSend: (body: string) => Promise<boolean>;
   sending: boolean;
+  /** Controlled draft (optional — uncontrolled with internal state otherwise). */
+  text?: string;
+  onChangeText?: (text: string) => void;
+  /** Renders the ⚡ quick-replies toggle when provided. */
+  onToggleQuick?: () => void;
+  quickOpen?: boolean;
+  /** Renders the paperclip attach button when provided. */
+  onAttach?: () => void;
 }
 
 /** Pinned message composer: grow-able input + solid accent send circle. */
-export function Composer({ onSend, sending }: Props) {
+export function Composer({
+  onSend,
+  sending,
+  text,
+  onChangeText,
+  onToggleQuick,
+  quickOpen = false,
+  onAttach,
+}: Props) {
   const theme = useTheme();
-  const [text, setText] = useState('');
-  const canSend = text.trim().length > 0 && !sending;
+  const [inner, setInner] = useState('');
+  const value = text ?? inner;
+  const setValue = onChangeText ?? setInner;
+  const canSend = value.trim().length > 0 && !sending;
 
   const handleSend = async () => {
-    const body = text.trim();
+    const body = value.trim();
     if (!body || sending) return;
     tapHaptic();
     const ok = await onSend(body);
     if (ok) {
-      setText('');
+      setValue('');
       successHaptic();
     } else {
       // Keep the draft so nothing is lost; the screen shows the error inline.
@@ -32,9 +50,45 @@ export function Composer({ onSend, sending }: Props) {
 
   return (
     <View style={styles.row}>
+      {onToggleQuick ? (
+        <Pressable
+          onPress={() => {
+            tapHaptic();
+            onToggleQuick();
+          }}
+          hitSlop={6}
+          accessibilityRole="button"
+          accessibilityLabel="Quick replies"
+          accessibilityState={{ expanded: quickOpen }}
+          style={[
+            styles.sideBtn,
+            { backgroundColor: quickOpen ? theme.accentSoft : theme.surface },
+          ]}
+        >
+          <Ionicons
+            name={quickOpen ? 'flash' : 'flash-outline'}
+            size={17}
+            color={quickOpen ? theme.accent : theme.textSecondary}
+          />
+        </Pressable>
+      ) : null}
+      {onAttach ? (
+        <Pressable
+          onPress={() => {
+            tapHaptic();
+            onAttach();
+          }}
+          hitSlop={6}
+          accessibilityRole="button"
+          accessibilityLabel="Attach a photo"
+          style={[styles.sideBtn, { backgroundColor: theme.surface }]}
+        >
+          <Ionicons name="attach-outline" size={19} color={theme.textSecondary} />
+        </Pressable>
+      ) : null}
       <TextInput
-        value={text}
-        onChangeText={setText}
+        value={value}
+        onChangeText={setValue}
         placeholder="Text message"
         placeholderTextColor={theme.textTertiary}
         multiline
@@ -84,6 +138,14 @@ const styles = StyleSheet.create({
     fontSize: 16,
     lineHeight: 20,
     maxHeight: 110,
+  },
+  sideBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 1,
   },
   sendBtn: {
     width: 36,

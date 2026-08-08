@@ -16,6 +16,7 @@ import { DepositRow } from '../src/components/clients/DepositRow';
 import { MessageButton } from '../src/components/clients/MessageButton';
 import { RebookSuggestion } from '../src/components/clients/RebookSuggestion';
 import { StatTile } from '../src/components/clients/StatTile';
+import { StatusChips } from '../src/components/clients/StatusChips';
 import { GlassCard } from '../src/components/glass/GlassCard';
 import {
   formatDayShort,
@@ -30,6 +31,7 @@ import {
   meetingKindMeta,
   meetingOccurrences,
 } from '../src/lib/meetings';
+import { clientMetaKey, effectiveStatus, useClientMeta } from '../src/store/clientMeta';
 import { useMeetingSession } from '../src/store/meetingSession';
 import { useSettings } from '../src/store/settings';
 import { showUndo } from '../src/store/undo';
@@ -42,7 +44,10 @@ function SectionLabel({ children }: { children: string }) {
   return <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>{children}</Text>;
 }
 
-/** Everything about one client: money, settle-up, rebooking, history. */
+/**
+ * Everything about one client: status, money, settle-up, rebooking, history.
+ * Also renders contact-only entries (messenger leads with no meetings yet).
+ */
 export default function ClientDetailScreen() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
@@ -56,6 +61,8 @@ export default function ClientDetailScreen() {
   const togglePaid = useTasks((s) => s.togglePaid);
   const log = useMeetingSession((s) => s.log);
   const symbol = useSettings((s) => s.settings.currencySymbol);
+  const metaMap = useClientMeta((s) => s.meta);
+  const setStatus = useClientMeta((s) => s.setStatus);
 
   const profiles = useMemo(() => clientProfiles(tasks, log), [tasks, log]);
   const profile = useMemo(() => {
@@ -63,6 +70,14 @@ export default function ClientDetailScreen() {
     if (!q) return null;
     return profiles.find((p) => p.name.trim().toLowerCase() === q) ?? null;
   }, [profiles, rawName]);
+
+  /** Contact-only fallback: a meta entry (lead pipeline) without meetings. */
+  const metaEntry = metaMap[clientMetaKey(rawName)];
+  const displayName = profile?.name ?? rawName.trim();
+  const status = displayName
+    ? effectiveStatus(metaMap, displayName, (profile?.meetingsDone ?? 0) > 0)
+    : 'lead';
+  const blocked = status === 'blocked';
 
   /** Recent completed occurrences for this client, newest first, capped at 20. */
   const history = useMemo(() => {
@@ -92,7 +107,7 @@ export default function ClientDetailScreen() {
   const amberFg = theme.dark ? amber.fgDark : amber.fgLight;
   const money = theme.success;
 
-  if (!profile) {
+  if (!profile && !metaEntry) {
     return (
       <View style={[styles.root, { backgroundColor: theme.background }]}>
         <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
@@ -108,11 +123,11 @@ export default function ClientDetailScreen() {
     );
   }
 
-  const kindMeta = meetingKindMeta(profile.kind);
+  const kindMeta = profile ? meetingKindMeta(profile.kind) : null;
 
   const bookAgain = () => {
     tapHaptic();
-    router.push(`/task-editor?client=${encodeURIComponent(profile.name)}`);
+    router.push(`/task-editor?client=${encodeURIComponent(displayName)}`);
   };
 
   return (
@@ -128,67 +143,92 @@ export default function ClientDetailScreen() {
       >
         {/* Hero */}
         <View style={styles.hero}>
-          <ClientAvatar name={profile.name} size={84} />
+          <ClientAvatar name={displayName} size={84} />
           <Text style={[styles.heroName, { color: theme.text }]} numberOfLines={1}>
-            {profile.name}
+            {displayName}
           </Text>
-          <View style={styles.chipRow}>
-            <ClientChip icon={kindMeta.icon} label={kindMeta.label} />
-            {profile.rate > 0 ? (
-              <ClientChip
-                icon="cash-outline"
-                label={formatMoney(profile.rate, symbol)}
-                solid={theme.success}
-              />
-            ) : null}
-            {avgPerMeeting > 0 ? (
-              <ClientChip
-                icon="stats-chart-outline"
-                label={`avg ${formatMoney(avgPerMeeting, symbol)}/meeting`}
-              />
-            ) : null}
-            {profile.location ? (
-              <ClientChip icon="location-outline" label={profile.location} />
-            ) : null}
-          </View>
+          {profile && kindMeta ? (
+            <View style={styles.chipRow}>
+              <ClientChip icon={kindMeta.icon} label={kindMeta.label} />
+              {profile.rate > 0 ? (
+                <ClientChip
+                  icon="cash-outline"
+                  label={formatMoney(profile.rate, symbol)}
+                  solid={theme.success}
+                />
+              ) : null}
+              {avgPerMeeting > 0 ? (
+                <ClientChip
+                  icon="stats-chart-outline"
+                  label={`avg ${formatMoney(avgPerMeeting, symbol)}/meeting`}
+                />
+              ) : null}
+              {profile.location ? (
+                <ClientChip icon="location-outline" label={profile.location} />
+              ) : null}
+            </View>
+          ) : null}
           <MessageButton
-            client={profile.name}
+            client={displayName}
             onNeedPhone={() => phoneRowRef.current?.focus()}
           />
         </View>
 
-        {/* Stat tiles */}
-        <View style={styles.tileGrid}>
-          <StatTile
-            label="Earned"
-            value={formatMoney(profile.earned, symbol)}
-            tint={money}
-            delay={40}
-          />
-          <StatTile label="Collected" value={formatMoney(profile.collected, symbol)} delay={70} />
-          <StatTile
-            label="Outstanding"
-            value={formatMoney(profile.outstanding, symbol)}
-            tint={profile.outstanding > 0 ? amberFg : undefined}
-            delay={100}
-          />
-          <StatTile label="Hours" value={formatDuration(profile.loggedMinutes)} delay={130} />
+        {/* Status */}
+        <View style={styles.statusBlock}>
+          <StatusChips value={status} onChange={(s) => setStatus(displayName, s)} />
+          {blocked ? (
+            <View style={[styles.blockedBanner, { backgroundColor: theme.surface }]}>
+              <Ionicons
+                name="notifications-off-outline"
+                size={15}
+                color={theme.textSecondary}
+              />
+              <Text style={[styles.blockedBannerText, { color: theme.textSecondary }]}>
+                Blocked — messages won't notify you
+              </Text>
+            </View>
+          ) : null}
         </View>
+
+        {/* Stat tiles */}
+        {profile ? (
+          <View style={styles.tileGrid}>
+            <StatTile
+              label="Earned"
+              value={formatMoney(profile.earned, symbol)}
+              tint={money}
+              delay={40}
+            />
+            <StatTile
+              label="Collected"
+              value={formatMoney(profile.collected, symbol)}
+              delay={70}
+            />
+            <StatTile
+              label="Outstanding"
+              value={formatMoney(profile.outstanding, symbol)}
+              tint={profile.outstanding > 0 ? amberFg : undefined}
+              delay={100}
+            />
+            <StatTile label="Hours" value={formatDuration(profile.loggedMinutes)} delay={130} />
+          </View>
+        ) : null}
 
         {/* Phone */}
         <View>
           <SectionLabel>Phone</SectionLabel>
-          <ClientPhoneRow ref={phoneRowRef} client={profile.name} />
+          <ClientPhoneRow ref={phoneRowRef} client={displayName} />
         </View>
 
         {/* Notes */}
         <View>
           <SectionLabel>Notes</SectionLabel>
-          <ClientNotesCard client={profile.name} />
+          <ClientNotesCard client={displayName} />
         </View>
 
         {/* Settle up */}
-        {profile.unpaid.length > 0 ? (
+        {profile && profile.unpaid.length > 0 ? (
           <View>
             <SectionLabel>Settle up</SectionLabel>
             <GlassCard padding={6}>
@@ -243,23 +283,25 @@ export default function ClientDetailScreen() {
           </View>
         ) : null}
 
-        {/* Book again */}
-        <View>
-          <SectionLabel>Book again</SectionLabel>
-          <RebookSuggestion client={profile.name} />
-          <Pressable
-            onPress={bookAgain}
-            accessibilityRole="button"
-            style={({ pressed }) => [
-              styles.cta,
-              { backgroundColor: theme.accent },
-              pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
-            ]}
-          >
-            <Ionicons name="calendar-outline" size={18} color="#FFFFFF" />
-            <Text style={styles.ctaLabel}>Book a meeting</Text>
-          </Pressable>
-        </View>
+        {/* Book again — hidden for blocked contacts */}
+        {!blocked ? (
+          <View>
+            <SectionLabel>Book again</SectionLabel>
+            <RebookSuggestion client={displayName} />
+            <Pressable
+              onPress={bookAgain}
+              accessibilityRole="button"
+              style={({ pressed }) => [
+                styles.cta,
+                { backgroundColor: theme.accent },
+                pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
+              ]}
+            >
+              <Ionicons name="calendar-outline" size={18} color="#FFFFFF" />
+              <Text style={styles.ctaLabel}>Book a meeting</Text>
+            </Pressable>
+          </View>
+        ) : null}
 
         {/* History */}
         {history.length > 0 ? (
@@ -328,7 +370,7 @@ const styles = StyleSheet.create({
   hero: {
     alignItems: 'center',
     gap: SPACING.md,
-    marginBottom: SPACING.xl,
+    marginBottom: SPACING.lg,
   },
   heroName: {
     fontSize: 30,
@@ -341,6 +383,23 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     justifyContent: 'center',
     gap: SPACING.sm,
+  },
+  statusBlock: {
+    gap: SPACING.sm + 2,
+    marginBottom: SPACING.xl,
+  },
+  blockedBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    borderRadius: 12,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm + 2,
+  },
+  blockedBannerText: {
+    fontSize: 13,
+    fontWeight: '600',
   },
   tileGrid: {
     flexDirection: 'row',

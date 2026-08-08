@@ -2,7 +2,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { selectionHaptic } from '../../lib/haptics';
-import { totalUnread, useMessages } from '../../store/messages';
+import { isPhoneBlocked, useClientMeta } from '../../store/clientMeta';
+import { buildThreads, useMessages } from '../../store/messages';
 import { useTheme } from '../../theme';
 
 const ICONS: Record<string, [string, string]> = {
@@ -34,7 +35,13 @@ interface TabBarProps {
 export function GlassTabBar({ state, descriptors, navigation }: TabBarProps) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
-  const unread = useMessages((s) => totalUnread(s.messages, s.lastReadAt));
+  const meta = useClientMeta((s) => s.meta);
+  // Blocked contacts never count toward the tab badge.
+  const unread = useMessages((s) =>
+    buildThreads(s.messages, s.lastReadAt)
+      .filter((t) => !isPhoneBlocked(meta, t.counterparty))
+      .reduce((sum, t) => sum + t.unread, 0)
+  );
 
   return (
     <View

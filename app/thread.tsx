@@ -1,7 +1,8 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -12,24 +13,40 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BackButton } from '../src/components/clients/BackButton';
+import { ClientPanel, LEAD_AMBER } from '../src/components/messages/ClientPanel';
 import { Composer } from '../src/components/messages/Composer';
 import { ErrorBanner } from '../src/components/messages/ErrorBanner';
 import { LinkClientRow } from '../src/components/messages/LinkClientRow';
 import { MessageBubble } from '../src/components/messages/MessageBubble';
+import { PhotoViewer } from '../src/components/messages/PhotoViewer';
+import { QuickReplies, type PhotoReply } from '../src/components/messages/QuickReplies';
 import { formatPhoneDisplay } from '../src/components/messages/format';
 import {
   addDays,
+  daysBetween,
+  formatDayLong,
   formatDayRelative,
   formatMinutes,
+  fromDayKey,
   toDayKey,
   todayKey,
 } from '../src/lib/dates';
 import { tapHaptic } from '../src/lib/haptics';
-import { knownClients, meetingOccurrences } from '../src/lib/meetings';
+import {
+  knownClients,
+  meetingOccurrences,
+  type MeetingOccurrence,
+} from '../src/lib/meetings';
 import type { SmsMessage } from '../src/lib/smsApi';
 import { normalizePhone } from '../src/lib/smsCredentials';
-import { clientNameForPhone, useClientMeta } from '../src/store/clientMeta';
+import {
+  clientMetaKey,
+  clientNameForPhone,
+  effectiveStatus,
+  useClientMeta,
+} from '../src/store/clientMeta';
 import { threadMessages, useMessages } from '../src/store/messages';
+import { useSettings } from '../src/store/settings';
 import { useTasks } from '../src/store/tasks';
 import { SPACING, useTheme } from '../src/theme';
 import type { DayKey } from '../src/types';
@@ -38,7 +55,26 @@ type Row =
   | { type: 'day'; key: string; day: DayKey }
   | { type: 'message'; key: string; msg: SmsMessage; showStatus: boolean };
 
-/** One conversation: bubbles, day separators, client link, pinned composer. */
+/** Optional media send path — lands with the media agent's store update. */
+type MediaSend = (to: string, body: string, mediaUrls: string[]) => Promise<boolean>;
+
+/** "Today" / "Tomorrow" / "Friday" / "Wednesday, July 16" + optional time. */
+function confirmationDraft(occ: MeetingOccurrence): string {
+  const diff = daysBetween(todayKey(), occ.dateKey);
+  const dayLabel =
+    diff <= 1
+      ? formatDayRelative(occ.dateKey)
+      : diff < 7
+        ? fromDayKey(occ.dateKey).toLocaleDateString('en-US', { weekday: 'long' })
+        : formatDayLong(occ.dateKey);
+  const time =
+    !occ.task.allDay && occ.task.startMinutes != null
+      ? ` at ${formatMinutes(occ.task.startMinutes)}`
+      : '';
+  return `Confirmed — ${dayLabel}${time}. See you then!`;
+}
+
+/** One conversation: bubbles, day separators, CRM panel, pinned composer. */
 export default function ThreadScreen() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
@@ -51,12 +87,19 @@ export default function ThreadScreen() {
   const lastError = useMessages((s) => s.lastError);
   const lastSyncAt = useMessages((s) => s.lastSyncAt);
   const send = useMessages((s) => s.send);
-  const sync = useMessages((s) => s.sync);
   const markRead = useMessages((s) => s.markRead);
+  const sendWithMedia = useMessages(
+    (s) => (s as unknown as { sendWithMedia?: MediaSend }).sendWithMedia
+  );
   const tasks = useTasks((s) => s.tasks);
   const meta = useClientMeta((s) => s.meta);
+  const settings = useSettings((s) => s.settings);
 
   const [dismissedError, setDismissedError] = useState<string | null>(null);
+  const [draft, setDraft] = useState('');
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [viewerUrl, setViewerUrl] = useState<string | null>(null);
 
   // Read state: clear the unread count on focus and again after each sync.
   useFocusEffect(
@@ -68,10 +111,14 @@ export default function ThreadScreen() {
     if (number && lastSyncAt != null) markRead(number);
   }, [number, lastSyncAt, markRead]);
 
+  const known = useMemo(() => knownClients(tasks), [tasks]);
   const clientName = useMemo(
-    () => clientNameForPhone(meta, number, knownClients(tasks)),
-    [meta, number, tasks]
+    () => clientNameForPhone(meta, number, known),
+    [meta, number, known]
   );
+  const hasMeetings =
+    clientName != null && known.some((n) => clientMetaKey(n) === clientMetaKey(clientName));
+  const status = clientName ? effectiveStatus(meta, clientName, hasMeetings) : 'lead';
 
   /** Earliest uncompleted booking for the linked client in the next 30 days. */
   const nextBooking = useMemo(() => {
@@ -90,6 +137,29 @@ export default function ThreadScreen() {
       );
     return upcoming[0] ?? null;
   }, [clientName, tasks]);
+
+  const bookingId = nextBooking ? `${nextBooking.task.id}|${nextBooking.dateKey}` : null;
+
+  // ── Book-then-confirm: snapshot the next booking before opening the editor;
+  // on return, a NEW booking pre-fills a confirmation draft (never auto-sent).
+  const bookingSnapshot = useRef<{ prev: string | null } | null>(null);
+
+  const openBooking = useCallback(() => {
+    if (!clientName) return;
+    bookingSnapshot.current = { prev: bookingId };
+    router.push(`/task-editor?client=${encodeURIComponent(clientName)}`);
+  }, [clientName, bookingId, router]);
+
+  useFocusEffect(
+    useCallback(() => {
+      const snap = bookingSnapshot.current;
+      if (!snap) return;
+      bookingSnapshot.current = null;
+      if (!nextBooking || bookingId === snap.prev) return;
+      const confirmation = confirmationDraft(nextBooking);
+      setDraft((d) => (d.trim() ? d : confirmation));
+    }, [bookingId, nextBooking])
+  );
 
   const msgs = useMemo(() => threadMessages(messages, number), [messages, number]);
 
@@ -121,12 +191,59 @@ export default function ThreadScreen() {
   const handleSend = useCallback(
     async (body: string) => {
       // The store merges the sent message optimistically and settles its
-      // status itself — no full history re-sync needed here (it was the
-      // cause of multi-second sends).
+      // status itself — no full history re-sync needed here.
       return send(number, body);
     },
     [send, number]
   );
+
+  // ── Quick replies ──────────────────────────────────────────────────────────
+  /** Photo quick-replies — surfaced by the media layer when available. */
+  const photoReplies =
+    (settings as unknown as { photoTemplates?: PhotoReply[] }).photoTemplates ?? [];
+
+  const insertTemplate = useCallback((text: string) => {
+    setDraft((d) => (d.trim() ? `${d} ${text}` : text));
+    setQuickOpen(false);
+  }, []);
+
+  const sendPhotoReply = useCallback(
+    async (photo: PhotoReply) => {
+      setQuickOpen(false);
+      if (sendWithMedia) {
+        await sendWithMedia(number, '', [photo.url]);
+      } else {
+        Alert.alert('Almost there', 'Photo sending arrives with the next app update.');
+      }
+    },
+    [sendWithMedia, number]
+  );
+
+  // ── Attach a photo (OTA-safe: expo-image-picker is NOT in the current
+  // binary — import it only inside the handler, with a friendly fallback). ──
+  const handleAttach = useCallback(async () => {
+    try {
+      const picker = await import('expo-image-picker');
+      const perm = await picker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Photos', 'Allow photo access in Settings to attach pictures.');
+        return;
+      }
+      const res = await picker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        quality: 0.8,
+      });
+      const uri = res.canceled ? null : res.assets?.[0]?.uri ?? null;
+      if (!uri) return;
+      if (sendWithMedia) {
+        await sendWithMedia(number, '', [uri]);
+      } else {
+        Alert.alert('Almost there', 'Photo sending arrives with the next app update.');
+      }
+    } catch {
+      Alert.alert('Photos', 'Photo picking arrives with the next app update.');
+    }
+  }, [sendWithMedia, number]);
 
   const subtitle = clientName
     ? nextBooking
@@ -145,7 +262,7 @@ export default function ThreadScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       style={[styles.root, { backgroundColor: theme.background }]}
     >
-      {/* Header */}
+      {/* Header — tap anywhere on the title to open the CRM panel */}
       <View
         style={[
           styles.header,
@@ -155,18 +272,29 @@ export default function ThreadScreen() {
         <BackButton />
         <Pressable
           onPress={() => {
-            if (!clientName) return;
             tapHaptic();
-            router.push(`/client-detail?name=${encodeURIComponent(clientName)}`);
+            setPanelOpen(true);
           }}
-          disabled={!clientName}
-          accessibilityRole={clientName ? 'button' : undefined}
-          accessibilityLabel={clientName ? `Open ${clientName}` : undefined}
+          accessibilityRole="button"
+          accessibilityLabel={`Contact details for ${clientName ?? formatPhoneDisplay(number)}`}
           style={styles.titleCol}
         >
-          <Text style={[styles.title, { color: theme.text }]} numberOfLines={1}>
-            {clientName ?? formatPhoneDisplay(number)}
-          </Text>
+          <View style={styles.titleRow}>
+            {status !== 'client' ? (
+              <View
+                style={[
+                  styles.statusDot,
+                  {
+                    backgroundColor:
+                      status === 'blocked' ? theme.textTertiary : LEAD_AMBER,
+                  },
+                ]}
+              />
+            ) : null}
+            <Text style={[styles.title, { color: theme.text }]} numberOfLines={1}>
+              {clientName ?? formatPhoneDisplay(number)}
+            </Text>
+          </View>
           {subtitle ? (
             <Text style={[styles.subtitle, { color: theme.textSecondary }]} numberOfLines={1}>
               {subtitle}
@@ -177,7 +305,7 @@ export default function ThreadScreen() {
           <Pressable
             onPress={() => {
               tapHaptic();
-              router.push(`/task-editor?client=${encodeURIComponent(clientName)}`);
+              openBooking();
             }}
             hitSlop={8}
             accessibilityRole="button"
@@ -201,7 +329,11 @@ export default function ThreadScreen() {
                 {formatDayRelative(item.day)}
               </Text>
             ) : (
-              <MessageBubble msg={item.msg} showStatus={item.showStatus} />
+              <MessageBubble
+                msg={item.msg}
+                showStatus={item.showStatus}
+                onPressPhoto={setViewerUrl}
+              />
             )
           }
           contentContainerStyle={styles.listContent}
@@ -216,7 +348,7 @@ export default function ThreadScreen() {
         </View>
       )}
 
-      {/* Footer: link row, inline error, composer */}
+      {/* Footer: link row, inline error, quick replies, composer */}
       <View
         style={[
           styles.footer,
@@ -230,8 +362,33 @@ export default function ThreadScreen() {
         {showError ? (
           <ErrorBanner message={lastError} onDismiss={() => setDismissedError(lastError)} />
         ) : null}
-        <Composer onSend={handleSend} sending={sendingTo === number} />
+        {quickOpen ? (
+          <QuickReplies
+            templates={settings.messageTemplates}
+            photos={photoReplies}
+            onPickText={insertTemplate}
+            onPickPhoto={sendPhotoReply}
+          />
+        ) : null}
+        <Composer
+          onSend={handleSend}
+          sending={sendingTo === number}
+          text={draft}
+          onChangeText={setDraft}
+          quickOpen={quickOpen}
+          onToggleQuick={() => setQuickOpen((v) => !v)}
+          onAttach={handleAttach}
+        />
       </View>
+
+      <ClientPanel
+        visible={panelOpen}
+        onClose={() => setPanelOpen(false)}
+        number={number}
+        clientName={clientName}
+        onBook={openBooking}
+      />
+      <PhotoViewer url={viewerUrl} onClose={() => setViewerUrl(null)} />
     </KeyboardAvoidingView>
   );
 }
@@ -247,7 +404,9 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   titleCol: { flex: 1 },
-  title: { fontSize: 18, fontWeight: '700', letterSpacing: -0.3 },
+  titleRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  statusDot: { width: 8, height: 8, borderRadius: 4 },
+  title: { fontSize: 18, fontWeight: '700', letterSpacing: -0.3, flexShrink: 1 },
   subtitle: { fontSize: 12, fontWeight: '500', marginTop: 1 },
   calendarBtn: {
     width: 36,
@@ -256,14 +415,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  listContent: {
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.md,
-  },
   daySep: {
     fontSize: 12,
     fontWeight: '600',
     textAlign: 'center',
+    paddingVertical: SPACING.md,
+  },
+  listContent: {
+    paddingHorizontal: SPACING.lg,
     paddingVertical: SPACING.md,
   },
   emptyWrap: { flex: 1, alignItems: 'center', justifyContent: 'center' },
