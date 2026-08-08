@@ -254,6 +254,18 @@ export default function MessagesScreen() {
       <Pressable
         onPress={() => {
           tapHaptic();
+          router.push('/search');
+        }}
+        hitSlop={8}
+        accessibilityRole="button"
+        accessibilityLabel="Search everything"
+        style={[styles.iconBtn, { backgroundColor: theme.surface }]}
+      >
+        <Ionicons name="search-outline" size={19} color={theme.accent} />
+      </Pressable>
+      <Pressable
+        onPress={() => {
+          tapHaptic();
           router.push('/calls');
         }}
         hitSlop={8}

@@ -56,7 +56,16 @@ export async function handleNotificationResponse(
 
     switch (response.actionIdentifier) {
       case 'complete': {
-        useTasks.getState().toggleComplete(taskId, dateKey);
+        // Complete-only, never toggle: a stale notification's button must not
+        // UN-complete a task the user already finished in the app.
+        const store = useTasks.getState();
+        const current = store.tasks[taskId];
+        const alreadyDone = current
+          ? current.recurrence
+            ? current.completions[dateKey] === true
+            : current.completed
+          : true;
+        if (!alreadyDone) store.toggleComplete(taskId, dateKey);
         const task = useTasks.getState().tasks[taskId] ?? null;
         await syncTaskNotifications(task, taskId);
         break;

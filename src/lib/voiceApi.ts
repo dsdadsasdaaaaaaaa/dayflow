@@ -17,7 +17,8 @@ import {
  *   screen             — forwarded leg answered: Gather 'press 1 to take it'
  *   bridge             — screening keypress received: connect the legs
  *   after              — Dial follow-up: unanswered/busy → Say + Record
- *   connect            — click-to-call second leg: bridge in the client
+ *   connect            — click-to-call: screen the user-leg (press 1)
+ *   connectgo          — screening passed: bridge in the client
  *
  * Config lives in Environment Variables (FORWARD_TO, SHOW_WORK_NUMBER,
  * VM_GREETING) — updates are live at the next invocation, no rebuild.
@@ -142,8 +143,26 @@ const VOICE_FUNCTION_SOURCE = `exports.handler = function (context, event, callb
     // Record finished and called back here — end the call, don't re-record.
     twiml.hangup();
   } else if (step === 'connect') {
-    // Click-to-call: the user answered their cell; bridge in the client.
-    // Caller ID = event.From = the work (Twilio) number.
+    // Click-to-call: something answered the user-leg — but carrier voicemail
+    // "answers" too. Without screening, the client would be dialed from the
+    // work number and bridged straight into the user's PERSONAL voicemail
+    // greeting (their real name — the identity this feature exists to hide).
+    // A human presses 1; voicemail can't.
+    if (event.to) {
+      var cg = twiml.gather({
+        input: 'dtmf',
+        numDigits: 1,
+        timeout: 8,
+        action: '/voice?step=connectgo&to=' + encodeURIComponent(event.to),
+        method: 'POST',
+      });
+      cg.say('Press 1 to place your call.');
+      twiml.hangup();
+    } else {
+      twiml.hangup();
+    }
+  } else if (step === 'connectgo') {
+    // Screening keypress received — dial the client from the work number.
     if (event.to) {
       twiml.dial({ callerId: event.From }, event.to);
     } else {

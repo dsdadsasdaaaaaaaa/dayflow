@@ -19,12 +19,29 @@ import { loadSmsCredentials } from './smsCredentials';
 
 const TASK_NAME = 'dayflow-message-check';
 
+/** Wait for the messages store to rehydrate (bounded — background tasks). */
+async function awaitMessagesHydration(): Promise<void> {
+  if (useMessages.persist.hasHydrated()) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, 4000);
+    const unsub = useMessages.persist.onFinishHydration(() => {
+      clearTimeout(timer);
+      unsub();
+      resolve();
+    });
+  });
+}
+
 /** Fire local notifications for inbound messages newer than the last check. */
 async function notifyNewInbound(): Promise<void> {
   const creds = await loadSmsCredentials();
   if (!creds) return;
 
+  // A cold-started background task can run before persist rehydrates — an
+  // empty `known` set would re-notify (and re-merge) old messages.
+  await awaitMessagesHydration();
   const store = useMessages.getState();
+  const gen = store.generation;
   const known = new Set(Object.keys(store.messages));
   // Don't re-fetch media lists for messages whose media we already have.
   const knownMediaSids = new Set(
@@ -42,24 +59,22 @@ async function notifyNewInbound(): Promise<void> {
       Date.now() - m.sentAt < 24 * 3600_000 &&
       !isPhoneBlocked(metaNow, m.counterparty)
   );
+  // Erase/disconnect fence: never repopulate a store cleared mid-fetch.
+  const merge = () =>
+    useMessages.setState((s) => {
+      if (s.generation !== gen) return s;
+      const messages = { ...s.messages };
+      for (const m of fetched) mergeMessage(messages, m);
+      return { messages, lastSyncAt: Date.now() };
+    });
   if (fresh.length === 0) {
     // Still merge outbound/status updates quietly.
-    if (fetched.length > 0) {
-      useMessages.setState((s) => {
-        const messages = { ...s.messages };
-        for (const m of fetched) mergeMessage(messages, m);
-        return { messages, lastSyncAt: Date.now() };
-      });
-    }
+    if (fetched.length > 0) merge();
     return;
   }
 
   // Merge first so opening the app shows them immediately.
-  useMessages.setState((s) => {
-    const messages = { ...s.messages };
-    for (const m of fetched) mergeMessage(messages, m);
-    return { messages, lastSyncAt: Date.now() };
-  });
+  merge();
 
   // Deliberately discreet: no sender, no preview — the lock screen only ever
   // says that messages exist. One combined notification, not one per text.

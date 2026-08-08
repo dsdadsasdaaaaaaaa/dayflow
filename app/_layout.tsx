@@ -77,9 +77,17 @@ export default function RootLayout() {
   useEffect(() => {
     if (Platform.OS === 'web') return;
     const refresh = () => syncAllNotifications(useTasks.getState().tasks);
-    refresh();
+    // Cold start races persist rehydration: syncing from an EMPTY tasks map
+    // would cancel every scheduled alert. Wait for hydration first.
+    if (useTasks.persist.hasHydrated()) refresh();
+    else {
+      const unsub = useTasks.persist.onFinishHydration(() => {
+        unsub();
+        refresh();
+      });
+    }
     const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'active') refresh();
+      if (state === 'active' && useTasks.persist.hasHydrated()) refresh();
     });
     return () => sub.remove();
   }, []);

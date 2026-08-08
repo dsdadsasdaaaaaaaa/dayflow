@@ -340,7 +340,7 @@ export const useTelegram = create<TelegramState>()(
               set({ lastError: result.error });
               return false;
             }
-            mergeMessages([result.value]);
+            mergeMessages([{ ...result.value, pending: true }]);
             return true;
           } finally {
             set({ sendingTo: null });
@@ -356,7 +356,7 @@ export const useTelegram = create<TelegramState>()(
               set({ lastError: result.error });
               return false;
             }
-            mergeMessages([result.value]);
+            mergeMessages([{ ...result.value, pending: true }]);
             return true;
           } finally {
             set({ photoSending: false });
@@ -443,12 +443,17 @@ export const useTelegram = create<TelegramState>()(
       version: PERSIST_VERSION,
       migrate: migrateStore,
       storage: createJSONStorage(() => AsyncStorage),
-      // Never persist transient flags or auth state.
+      // Never persist transient flags or auth state. Pending (in-flight)
+      // messages stay out too: after an app kill their settled copies arrive
+      // via history/updates under permanent ids — the persisted temp copy
+      // would live on as a duplicate bubble forever.
       partialize: (s) =>
         ({
           importedChatIds: s.importedChatIds,
           chats: s.chats,
-          messages: s.messages,
+          messages: Object.fromEntries(
+            Object.entries(s.messages).filter(([, m]) => !m.pending)
+          ),
           lastReadAt: s.lastReadAt,
         }) as Partial<TelegramState>,
     }

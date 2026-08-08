@@ -173,6 +173,9 @@ struct EarningsWidgetEntryView: View {
 
   var body: some View {
     content
+      // StandBy / locked contexts redact money amounts entirely — earnings
+      // are as private as message content in this app.
+      .privacySensitive()
       .containerBackground(for: .widget) { DayFlowWidgetBackground() }
       .widgetURL(URL(string: "dayflow://stats"))
   }

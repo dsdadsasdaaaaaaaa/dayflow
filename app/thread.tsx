@@ -176,6 +176,30 @@ export default function ThreadScreen() {
     setDraft((d) => (d.trim() ? d : draftParam));
   }, [draftParam]);
 
+  // Unsent drafts survive leaving the thread (like task drafts do): seed from
+  // the persisted map once, then save what's typed (debounced + on unmount).
+  const setThreadDraft = useMessages((s) => s.setThreadDraft);
+  const storedDraftSeeded = useRef(false);
+  useEffect(() => {
+    if (storedDraftSeeded.current || !number) return;
+    storedDraftSeeded.current = true;
+    const stored = useMessages.getState().threadDrafts[number];
+    if (stored) setDraft((d) => (d.trim() ? d : stored));
+  }, [number]);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  useEffect(() => {
+    if (!number) return;
+    const t = setTimeout(() => setThreadDraft(number, draft), 600);
+    return () => clearTimeout(t);
+  }, [number, draft, setThreadDraft]);
+  useEffect(
+    () => () => {
+      if (number) setThreadDraft(number, draftRef.current);
+    },
+    [number, setThreadDraft]
+  );
+
   // Read state: clear the unread count on focus and again after each sync.
   const focusedRef = useRef(false);
   useFocusEffect(
@@ -599,7 +623,7 @@ export default function ThreadScreen() {
                 showStatus={item.showStatus}
                 pending={
                   isTelegram && item.msg.direction === 'out' && !('sid' in item.msg)
-                    ? item.msg.id.includes(':local-')
+                    ? item.msg.pending === true || item.msg.id.includes(':local-')
                     : undefined
                 }
                 onPressPhoto={openPhoto}

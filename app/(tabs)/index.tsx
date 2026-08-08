@@ -37,6 +37,7 @@ import { addDays, isToday, minutesOfDay, todayKey } from '../../src/lib/dates';
 import { successHaptic, tapHaptic } from '../../src/lib/haptics';
 import { syncTaskNotifications } from '../../src/lib/notifications';
 import { useSettings } from '../../src/store/settings';
+import { useMeetingSession } from '../../src/store/meetingSession';
 import { instancesForDay, useTasks } from '../../src/store/tasks';
 import { showUndo } from '../../src/store/undo';
 import { useTheme } from '../../src/theme';
@@ -73,8 +74,28 @@ export default function TodayScreen() {
   const deleteTask = useTasks((s) => s.deleteTask);
   const skipOccurrence = useTasks((s) => s.skipOccurrence);
   const duplicateTask = useTasks((s) => s.duplicateTask);
-  const detachOccurrence = useTasks((s) => s.detachOccurrence);
+  const rawDetachOccurrence = useTasks((s) => s.detachOccurrence);
   const settings = useSettings((s) => s.settings);
+
+  /**
+   * Detach one occurrence AND keep a running live session pointing at the
+   * right task. Detaching adds the day to the series' skips; if the live
+   * meeting still referenced the series id, ending it would write money onto
+   * a skipped (invisible-everywhere) day.
+   */
+  const detachOccurrence = useCallback(
+    (id: string, day: DayKey) => {
+      const copy = rawDetachOccurrence(id, day);
+      if (copy) {
+        const active = useMeetingSession.getState().active;
+        if (active && active.taskId === id && active.dateKey === day) {
+          useMeetingSession.setState({ active: { ...active, taskId: copy.id } });
+        }
+      }
+      return copy;
+    },
+    [rawDetachOccurrence]
+  );
 
   const [selectedDay, setSelectedDay] = useState<DayKey>(() => todayKey());
   const [hideCompleted, setHideCompleted] = useState(false);

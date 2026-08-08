@@ -318,6 +318,9 @@ struct TodayWidgetEntryView: View {
 
   var body: some View {
     content
+      // StandBy / locked contexts redact task titles and client names —
+      // counts and layout remain, content does not.
+      .privacySensitive()
       .containerBackground(for: .widget) { background }
       .widgetURL(URL(string: "dayflow://"))
   }

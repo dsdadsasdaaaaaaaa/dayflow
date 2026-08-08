@@ -113,13 +113,13 @@ export const useMeetingSession = create<MeetingSessionState>()(
           },
         });
         const kind = task.meeting?.kind ?? 'incall';
+        // Live Activities land on the LOCK SCREEN — while the user is
+        // physically with the client. Same discretion rule as notifications:
+        // no client name, no kind, no rate. The timer is the whole point.
         void startMeetingActivity({
-          clientName: label,
-          kindLabel: meetingKindMeta(kind).label,
-          rateLabel: formatMoney(
-            occurrenceAmount(task, dateKey),
-            useSettings.getState().settings.currencySymbol
-          ),
+          clientName: 'Meeting',
+          kindLabel: 'In progress',
+          rateLabel: '',
           symbolName: KIND_SYMBOLS[kind],
           startedAtMs: startedAt,
           endAtMs: plannedEndAt,

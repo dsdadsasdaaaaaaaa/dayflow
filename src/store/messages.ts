@@ -107,6 +107,14 @@ interface MessagesState {
   lastError: string | null;
   /** True once credentials were confirmed present (UI gate). */
   configured: boolean;
+  /** Unsent composer drafts per thread (SMS E.164 or 'tgc:…' keys). */
+  threadDrafts: Record<string, string>;
+  /**
+   * Bumped by clearAll. In-flight syncs capture it before fetching and drop
+   * their merge when it changed — an erase must never be repopulated by a
+   * network call that raced it.
+   */
+  generation: number;
 
   refreshConfigured: () => Promise<void>;
   sync: () => Promise<void>;
@@ -124,6 +132,9 @@ interface MessagesState {
   /** Drop a failed send without retrying. */
   discardOutbox: (localId: string) => void;
   markRead: (counterparty: string) => void;
+  /** Persist an unsent composer draft per thread ('' clears). Works for
+   * Telegram counterparties ('tgc:…') too — one map for both channels. */
+  setThreadDraft: (counterparty: string, text: string) => void;
   clearAll: () => void;
 }
 
@@ -176,6 +187,8 @@ export const useMessages = create<MessagesState>()(
       lastSyncAt: null,
       lastError: null,
       configured: false,
+      threadDrafts: {},
+      generation: 0,
 
       refreshConfigured: async () => {
         const creds = await loadSmsCredentials();
@@ -191,6 +204,10 @@ export const useMessages = create<MessagesState>()(
         }
         set({ syncing: true, lastError: null, configured: true });
         try {
+          // Erase/disconnect fence: if the store is cleared while this sync's
+          // network call is in flight, the late merge must be dropped —
+          // otherwise "erased" client messages repopulate AsyncStorage.
+          const gen = get().generation;
           // Don't re-fetch media lists for messages whose media we already have.
           const knownMediaSids = new Set(
             Object.values(get().messages)
@@ -217,7 +234,12 @@ export const useMessages = create<MessagesState>()(
             (max, m) => (m.status === 'scheduled' ? max : Math.max(max, m.sentAt)),
             0
           );
+          // A saturated page cap means the window may hold MORE unfetched
+          // traffic — advancing the mark past it would leave a permanent gap.
+          const capped =
+            mark != null && fetched.length >= PAGE_SIZE * SYNC_PAGES_PER_DIRECTION;
           set((s) => {
+            if (s.generation !== gen) return s; // cleared mid-flight
             const messages = { ...s.messages };
             for (const m of fetched) mergeMessage(messages, m);
             // Reconcile scheduled sends: a fetched record still "scheduled"
@@ -239,7 +261,9 @@ export const useMessages = create<MessagesState>()(
               messages,
               scheduled,
               lastSyncAt: Date.now(),
-              highWaterMark: Math.max(s.highWaterMark ?? 0, newestFetched) || Date.now(),
+              highWaterMark: capped
+                ? s.highWaterMark ?? Date.now()
+                : Math.max(s.highWaterMark ?? 0, newestFetched) || Date.now(),
             };
           });
         } catch (e) {
@@ -452,8 +476,22 @@ export const useMessages = create<MessagesState>()(
           lastReadAt: { ...s.lastReadAt, [normalizePhone(counterparty)]: Date.now() },
         })),
 
+      setThreadDraft: (counterparty, text) =>
+        set((s) => {
+          const key = counterparty.startsWith('tgc:')
+            ? counterparty
+            : normalizePhone(counterparty);
+          if (!key) return s;
+          const trimmedEmpty = text.trim().length === 0;
+          if (trimmedEmpty && !(key in s.threadDrafts)) return s;
+          const threadDrafts = { ...s.threadDrafts };
+          if (trimmedEmpty) delete threadDrafts[key];
+          else threadDrafts[key] = text;
+          return { threadDrafts };
+        }),
+
       clearAll: () =>
-        set({
+        set((s) => ({
           messages: {},
           lastReadAt: {},
           highWaterMark: null,
@@ -463,7 +501,9 @@ export const useMessages = create<MessagesState>()(
           hiddenSids: {},
           lastSyncAt: null,
           lastError: null,
-        }),
+          threadDrafts: {},
+          generation: s.generation + 1,
+        })),
     }),
     {
       name: 'dayflow-messages',
@@ -480,6 +520,7 @@ export const useMessages = create<MessagesState>()(
         outbox: s.outbox,
         scheduled: s.scheduled,
         hiddenSids: s.hiddenSids,
+        threadDrafts: s.threadDrafts,
       }) as Partial<MessagesState>,
     }
   )

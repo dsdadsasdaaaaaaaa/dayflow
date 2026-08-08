@@ -53,6 +53,14 @@ function normalizeMeeting(raw: any): MeetingInfo | null {
       if (typeof v === 'number' && Number.isFinite(v)) extras[k] = v;
     }
   }
+  // Deposits are money ALREADY RECEIVED — dropping them on import would
+  // inflate what clients appear to owe. Carry them (and no-show history).
+  const deposits: Record<string, number> = {};
+  if (raw.deposits && typeof raw.deposits === 'object') {
+    for (const [k, v] of Object.entries(raw.deposits)) {
+      if (typeof v === 'number' && Number.isFinite(v) && v >= 0) deposits[k] = v;
+    }
+  }
   return {
     kind: MEETING_KINDS.includes(raw.kind) ? raw.kind : 'incall',
     client: typeof raw.client === 'string' ? raw.client : '',
@@ -60,6 +68,8 @@ function normalizeMeeting(raw: any): MeetingInfo | null {
     paidDates: asStringArray(raw.paidDates),
     location: typeof raw.location === 'string' ? raw.location : '',
     extras,
+    deposits,
+    noShows: asStringArray(raw.noShows),
   };
 }
 

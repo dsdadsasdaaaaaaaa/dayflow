@@ -357,6 +357,7 @@ export default function TaskEditorScreen() {
           paidDates: live?.meeting?.paidDates ?? [],
           extras: live?.meeting?.extras,
           deposits: live?.meeting?.deposits,
+          noShows: live?.meeting?.noShows,
         }
       : null;
     const fields = {

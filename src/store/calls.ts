@@ -54,6 +54,8 @@ interface CallsState {
   callNotes: Record<string, string>;
   syncing: boolean;
   lastError: string | null;
+  /** Bumped by clearAll — in-flight syncs drop their merge when it changed. */
+  generation: number;
 
   sync: (forwardTo: string) => Promise<void>;
   markHeard: (sid: string) => void;
@@ -71,6 +73,7 @@ export const useCalls = create<CallsState>()(
       callNotes: {},
       syncing: false,
       lastError: null,
+      generation: 0,
 
       sync: async (forwardTo) => {
         if (get().syncing) return;
@@ -81,6 +84,7 @@ export const useCalls = create<CallsState>()(
         }
         set({ syncing: true, lastError: null });
         try {
+          const gen = get().generation;
           const fwd = normalizePhone(forwardTo);
           const [callsResult, vmResult, trResult] = await Promise.all([
             listCallHistory(creds, fwd),
@@ -149,6 +153,8 @@ export const useCalls = create<CallsState>()(
             error = error ?? trResult.error;
           }
 
+          // Erase/disconnect fence — a cleared store must stay cleared.
+          if (get().generation !== gen) return;
           set({ calls, voicemails, lastError: error });
         } catch (e) {
           set({ lastError: e instanceof Error ? e.message : 'Call sync failed' });
@@ -173,7 +179,14 @@ export const useCalls = create<CallsState>()(
         }),
 
       clearAll: () =>
-        set({ calls: {}, voicemails: {}, heardAt: {}, callNotes: {}, lastError: null }),
+        set((s) => ({
+          calls: {},
+          voicemails: {},
+          heardAt: {},
+          callNotes: {},
+          lastError: null,
+          generation: s.generation + 1,
+        })),
     }),
     {
       name: 'dayflow-calls',

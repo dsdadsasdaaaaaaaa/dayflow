@@ -396,6 +396,18 @@ async function serviceHasNumber(creds: SmsCredentials, serviceSid: string): Prom
  * cached in AsyncStorage only after the number is confirmed attached, so a
  * half-finished setup retries cleanly on the next attempt.
  */
+/**
+ * Forget the cached Messaging Service SID (account disconnect/switch — the
+ * SID belongs to the OLD account; scheduled sends would silently die).
+ */
+export async function clearMessagingServiceState(): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(MESSAGING_SERVICE_STORAGE_KEY);
+  } catch {
+    // Best-effort — a stale key self-heals on the next ensure (it verifies).
+  }
+}
+
 export async function ensureMessagingService(
   creds: SmsCredentials
 ): Promise<EnsureMessagingServiceResult> {

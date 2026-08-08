@@ -54,7 +54,8 @@ import {
   ensureNotificationPermission,
   syncAllNotifications,
 } from '../src/lib/notifications';
-import { clearSmsCredentials } from '../src/lib/smsCredentials';
+import { cancelScheduledSms, clearMessagingServiceState } from '../src/lib/smsApi';
+import { clearSmsCredentials, loadSmsCredentials } from '../src/lib/smsCredentials';
 import { useCalls } from '../src/store/calls';
 import { useClientMeta } from '../src/store/clientMeta';
 import { useDrafts } from '../src/store/drafts';
@@ -394,6 +395,22 @@ export default function SettingsScreen() {
     useHabits.setState({ habits: {} });
     useFocus.getState().clearHistory();
     useDrafts.setState({ drafts: {} });
+    // Cancel any Twilio-scheduled sends BEFORE dropping credentials — armed
+    // messages would otherwise still deliver after the erase.
+    try {
+      const creds = await loadSmsCredentials();
+      if (creds) {
+        const scheduled = useMessages.getState().scheduled;
+        await Promise.all(
+          Object.keys(scheduled).map((sid) =>
+            cancelScheduledSms(creds, sid).catch(() => {})
+          )
+        );
+      }
+    } catch {
+      // Offline — the scheduled map is wiped below either way; Twilio-side
+      // sends can be canceled from the console if it comes to that.
+    }
     // The sensitive layer: messages, client book, call log, credentials.
     useMessages.getState().clearAll();
     useCalls.getState().clearAll();
@@ -402,6 +419,12 @@ export default function SettingsScreen() {
       await clearSmsCredentials();
     } catch {
       // Keychain entry already gone (or unavailable) — nothing left to clear.
+    }
+    await clearMessagingServiceState();
+    try {
+      await clearBackupPassphrase();
+    } catch {
+      // Keychain entry already gone — nothing left to clear.
     }
     // Telegram: end the session, wipe the on-disk TDLib database, and clear
     // the API keys — teardownTelegram verifies each step and reports honestly.

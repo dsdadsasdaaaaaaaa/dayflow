@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { formatDayShort, isToday, toDayKey } from '../../lib/dates';
 import { useMediaDataUri } from '../../lib/mediaCache';
 import { successHaptic, tapHaptic } from '../../lib/haptics';
@@ -395,8 +395,12 @@ function TelegramVoice({
       setState('playing');
     } catch {
       setState('idle');
-      // Old binary without expo-audio, or download failure.
-      successHaptic();
+      // Old binary without expo-audio, or the download failed — say so
+      // instead of failing silently.
+      Alert.alert(
+        'Voice message',
+        'Playback needs the newest app build — or the download failed. Try again on a connection.'
+      );
     }
   };
 

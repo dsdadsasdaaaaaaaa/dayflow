@@ -10,7 +10,11 @@ import {
   View,
 } from 'react-native';
 import { successHaptic, tapHaptic, warningHaptic } from '../../lib/haptics';
-import { verifySmsCredentials } from '../../lib/smsApi';
+import {
+  cancelScheduledSms,
+  clearMessagingServiceState,
+  verifySmsCredentials,
+} from '../../lib/smsApi';
 import {
   clearSmsCredentials,
   loadSmsCredentials,
@@ -141,14 +145,22 @@ export function MessagingSection() {
           style: 'destructive',
           onPress: async () => {
             warningHaptic();
-            // Detach the voice webhook while we still have credentials
-            // (best-effort — the local teardown happens regardless).
-            if (callingEnabled) {
-              const creds = await loadSmsCredentials();
-              if (creds) await disableCalling(creds);
+            // While we still have credentials: detach the voice webhook and
+            // cancel any Twilio-scheduled sends — they'd otherwise deliver
+            // from an account the app no longer controls (best-effort).
+            const creds = await loadSmsCredentials();
+            if (creds) {
+              if (callingEnabled) await disableCalling(creds);
+              const scheduled = useMessages.getState().scheduled;
+              await Promise.all(
+                Object.keys(scheduled).map((sid) =>
+                  cancelScheduledSms(creds, sid).catch(() => {})
+                )
+              );
             }
             await clearSmsCredentials();
             await clearVoiceState();
+            await clearMessagingServiceState();
             clearAll();
             clearCalls();
             updateSettings({ callingEnabled: false });

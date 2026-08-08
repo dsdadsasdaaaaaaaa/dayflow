@@ -130,7 +130,15 @@ export async function runAutoBackup(): Promise<void> {
       const json = JSON.stringify(currentPayload());
       // With a passphrase set, on-device snapshots are encrypted envelopes
       // too — an unlocked phone backup (or iCloud copy) exposes nothing.
-      const passphrase = await loadBackupPassphrase();
+      // FAIL CLOSED: a keychain read ERROR must skip the snapshot rather
+      // than quietly writing the client book as plaintext; only a definite
+      // "no passphrase set" (null) may write plain.
+      let passphrase: string | null;
+      try {
+        passphrase = await loadBackupPassphrase();
+      } catch {
+        return;
+      }
       file.create();
       file.write(passphrase ? encryptBackup(json, passphrase) : json);
     }
@@ -344,6 +352,11 @@ export function sanitizeClientMeta(raw: unknown): Record<string, ClientMeta> {
     const m = v as Record<string, unknown>;
     const entry: ClientMeta = { notes: typeof m.notes === 'string' ? m.notes : '' };
     if (typeof m.phone === 'string' && m.phone.trim()) entry.phone = m.phone;
+    // Telegram link must survive the round-trip — dropping it would silently
+    // un-block a blocked Telegram contact after a restore.
+    if (typeof m.telegram === 'string' && m.telegram.trim()) {
+      entry.telegram = m.telegram.trim();
+    }
     if (m.status === 'lead' || m.status === 'client' || m.status === 'blocked') {
       entry.status = m.status;
     }
@@ -378,10 +391,33 @@ function sanitizeSettings(raw: unknown): Settings {
     callForwardTo: current.callForwardTo,
     callShowWorkNumber: current.callShowWorkNumber,
     voicemailGreeting: current.voicemailGreeting,
+    // Safety + lock config must never regress to defaults on restore — a
+    // restore that silently disarms the trusted-contact alert is dangerous.
+    safetyAlertEnabled: current.safetyAlertEnabled,
+    trustedContactName: current.trustedContactName,
+    trustedContactPhone: current.trustedContactPhone,
+    safetyGraceMinutes: current.safetyGraceMinutes,
+    safetyMessage: current.safetyMessage,
+    appLockGraceSeconds: current.appLockGraceSeconds,
+    appLock: current.appLock,
     onboardingDone: true,
   };
   if (!raw || typeof raw !== 'object') return out;
   const s = raw as Record<string, unknown>;
+
+  // Prefer the backup's own safety block when it carries one (newer files do).
+  if (typeof s.safetyAlertEnabled === 'boolean') out.safetyAlertEnabled = s.safetyAlertEnabled;
+  if (typeof s.trustedContactName === 'string') out.trustedContactName = s.trustedContactName;
+  if (typeof s.trustedContactPhone === 'string') out.trustedContactPhone = s.trustedContactPhone;
+  if (typeof s.safetyGraceMinutes === 'number' && Number.isFinite(s.safetyGraceMinutes)) {
+    out.safetyGraceMinutes = Math.min(60, Math.max(5, Math.round(s.safetyGraceMinutes)));
+  }
+  if (typeof s.safetyMessage === 'string' && s.safetyMessage.trim()) {
+    out.safetyMessage = s.safetyMessage;
+  }
+  if (typeof s.appLockGraceSeconds === 'number' && Number.isFinite(s.appLockGraceSeconds)) {
+    out.appLockGraceSeconds = Math.max(0, Math.round(s.appLockGraceSeconds));
+  }
 
   if (s.themeMode === 'system' || s.themeMode === 'light' || s.themeMode === 'dark') {
     out.themeMode = s.themeMode;

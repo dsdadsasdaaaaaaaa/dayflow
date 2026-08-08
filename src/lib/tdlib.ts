@@ -43,6 +43,12 @@ export interface TgMessage {
   senderName?: string;
   /** True when TDLib reported the send failed (blocked peer, upload error…). */
   failed?: boolean;
+  /**
+   * Still in flight (temporary id, awaiting sendSucceeded/sendFailed).
+   * Pending entries are NEVER persisted — after an app kill the settled copy
+   * arrives via history/updates, so persisting the temp would duplicate it.
+   */
+  pending?: boolean;
 }
 
 /** A private chat from the user's Telegram account. */

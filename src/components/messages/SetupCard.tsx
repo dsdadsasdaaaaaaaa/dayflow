@@ -18,7 +18,7 @@ export function SetupCard() {
         </View>
         <Text style={[styles.title, { color: theme.text }]}>Text clients right here</Text>
         <Text style={[styles.blurb, { color: theme.textSecondary }]}>
-          Two ways to message from DayFlow — pick whichever fits.
+          Three ways to message from DayFlow — pick whichever fits.
         </Text>
       </View>
 
@@ -41,6 +41,31 @@ export function SetupCard() {
           <Text style={[styles.optionTitle, { color: theme.text }]}>Connect a number</Text>
           <Text style={[styles.optionCaption, { color: theme.textSecondary }]}>
             A $1/mo number from Twilio, or port your own — set up in Settings → Messaging
+          </Text>
+        </View>
+        <Ionicons name="chevron-forward" size={17} color={theme.textTertiary} />
+      </Pressable>
+
+      <Pressable
+        onPress={() => {
+          tapHaptic();
+          router.push('/telegram-login');
+        }}
+        accessibilityRole="button"
+        accessibilityLabel="Connect Telegram"
+        style={({ pressed }) => [
+          styles.optionRow,
+          { borderTopColor: theme.separator },
+          pressed && { backgroundColor: theme.surface },
+        ]}
+      >
+        <View style={[styles.optionIcon, { backgroundColor: theme.accentSoft }]}>
+          <Ionicons name="paper-plane-outline" size={17} color={theme.accent} />
+        </View>
+        <View style={styles.optionText}>
+          <Text style={[styles.optionTitle, { color: theme.text }]}>Connect Telegram</Text>
+          <Text style={[styles.optionCaption, { color: theme.textSecondary }]}>
+            Free — your own Telegram account, only the chats you choose
           </Text>
         </View>
         <Ionicons name="chevron-forward" size={17} color={theme.textTertiary} />

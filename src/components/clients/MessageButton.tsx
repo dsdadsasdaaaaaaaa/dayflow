@@ -28,6 +28,7 @@ export function MessageButton({ client, onNeedPhone }: Props) {
   const router = useRouter();
 
   const phone = useClientMeta((s) => s.meta[clientMetaKey(client)]?.phone ?? '');
+  const telegram = useClientMeta((s) => s.meta[clientMetaKey(client)]?.telegram ?? '');
   const configured = useMessages((s) => s.configured);
   const refreshConfigured = useMessages((s) => s.refreshConfigured);
 
@@ -57,6 +58,12 @@ export function MessageButton({ client, onNeedPhone }: Props) {
   const onPress = async () => {
     tapHaptic();
     if (!phone) {
+      // Telegram-linked but no phone: their thread is the messaging home —
+      // don't dead-end into the phone input.
+      if (telegram) {
+        router.push(`/thread?number=${encodeURIComponent(`tgc:${telegram}`)}`);
+        return;
+      }
       onNeedPhone();
       return;
     }
