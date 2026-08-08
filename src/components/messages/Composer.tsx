@@ -16,6 +16,12 @@ interface Props {
   quickOpen?: boolean;
   /** Renders the paperclip attach button when provided. */
   onAttach?: () => void;
+  /**
+   * Clear the draft even when the send fails. Pass true when the channel
+   * preserves failed sends elsewhere (the SMS retry outbox) so the text
+   * isn't duplicated between the input and the "Not delivered" bubble.
+   */
+  clearOnFail?: boolean;
 }
 
 /** Pinned message composer: grow-able input + solid accent send circle. */
@@ -27,6 +33,7 @@ export function Composer({
   onToggleQuick,
   quickOpen = false,
   onAttach,
+  clearOnFail = false,
 }: Props) {
   const theme = useTheme();
   const [inner, setInner] = useState('');
@@ -43,7 +50,10 @@ export function Composer({
       setValue('');
       successHaptic();
     } else {
-      // Keep the draft so nothing is lost; the screen shows the error inline.
+      // Failure: keep the draft so nothing is lost — unless the channel
+      // already preserved it (retry outbox), in which case clear to avoid
+      // a duplicate. The screen shows the error inline either way.
+      if (clearOnFail) setValue('');
       warningHaptic();
     }
   };

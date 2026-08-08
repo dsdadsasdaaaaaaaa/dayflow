@@ -45,6 +45,34 @@ interface TwilioMediaRecord {
   content_type?: string;
 }
 
+/** One Twilio list page: records + a relative link to the next (older) page. */
+interface TwilioMessagePage {
+  messages?: TwilioMessageRecord[];
+  next_page_uri?: string | null;
+}
+
+/**
+ * UTC calendar date ("YYYY-MM-DD") for Twilio's DateSent filters. The filter
+ * is day-granular (GMT), so floors/ceilings widen to whole days — callers
+ * always dedupe by SID.
+ */
+function isoDateOf(epochMs: number): string {
+  return new Date(epochMs).toISOString().slice(0, 10);
+}
+
+export interface ListSmsOptions {
+  /**
+   * Only fetch messages sent at/after this epoch ms (DateSent>= filter).
+   * Day-granular — expect overlap with already-cached traffic.
+   */
+  sentAfterMs?: number;
+  /**
+   * Pages of PageSize to follow per direction via next_page_uri.
+   * Default 1 = the classic newest-window behavior (no pagination).
+   */
+  maxPagesPerDirection?: number;
+}
+
 /** Parse Twilio's stringly-typed num_media. Defensive: bad input → 0. */
 function numMediaOf(rec: TwilioMessageRecord): number {
   const n = parseInt(rec.num_media ?? '0', 10);
@@ -154,8 +182,84 @@ export async function sendSms(
 const MEDIA_FETCH_CAP = 10;
 
 /**
+ * Fetch one Messages.json URL and follow next_page_uri up to `maxPages`.
+ * Only warns about hitting the cap when the caller actually asked for
+ * pagination (maxPages > 1) — single-page callers expect a partial window.
+ */
+async function fetchMessagePages(
+  creds: SmsCredentials,
+  firstUrl: string,
+  maxPages: number
+): Promise<TwilioMessageRecord[]> {
+  const records: TwilioMessageRecord[] = [];
+  let url: string | null = firstUrl;
+  for (let page = 0; url; page++) {
+    if (page >= maxPages) {
+      if (maxPages > 1) {
+        console.warn(
+          `[smsApi] page cap (${maxPages}) hit — remaining history left for a later fetch`
+        );
+      }
+      break;
+    }
+    const res = await fetch(url, { headers: { Authorization: authHeader(creds) } });
+    if (!res.ok) {
+      const json = (await res.json().catch(() => null)) as { message?: string } | null;
+      throw new Error(json?.message ?? `Fetch failed (${res.status})`);
+    }
+    const json = (await res.json()) as TwilioMessagePage;
+    const batch = json.messages ?? [];
+    records.push(...batch);
+    url =
+      batch.length > 0 && typeof json.next_page_uri === 'string' && json.next_page_uri
+        ? `https://api.twilio.com${json.next_page_uri}`
+        : null;
+  }
+  return records;
+}
+
+/** Dedupe raw records by SID into SmsMessages + the subset still needing media. */
+function mergeRecords(
+  records: TwilioMessageRecord[],
+  ownNumber: string,
+  skipMediaSids?: ReadonlySet<string>
+): { merged: SmsMessage[]; needsMedia: SmsMessage[] } {
+  const seen = new Set<string>();
+  const merged: SmsMessage[] = [];
+  const needsMedia: SmsMessage[] = [];
+  for (const rec of records) {
+    const msg = toSmsMessage(rec, ownNumber);
+    if (msg && !seen.has(msg.sid)) {
+      seen.add(msg.sid);
+      merged.push(msg);
+      if (numMediaOf(rec) > 0 && !skipMediaSids?.has(msg.sid)) needsMedia.push(msg);
+    }
+  }
+  return { merged, needsMedia };
+}
+
+/** Resolve media URLs for up to MEDIA_FETCH_CAP messages, newest first. */
+async function resolveMediaFor(creds: SmsCredentials, needsMedia: SmsMessage[]): Promise<void> {
+  if (needsMedia.length === 0) return;
+  // Newest first so fresh photos resolve before old history.
+  needsMedia.sort((a, b) => b.sentAt - a.sentAt);
+  const batch = needsMedia.slice(0, MEDIA_FETCH_CAP);
+  await Promise.all(
+    batch.map(async (msg) => {
+      const urls = await fetchMediaUrls(creds, msg.sid);
+      if (urls && urls.length > 0) msg.mediaUrls = urls;
+    })
+  );
+}
+
+/**
  * List recent messages involving our number (both directions), newest first.
  * Twilio needs two queries (To=us and From=us); results are merged/deduped.
+ *
+ * Incremental mode: pass `opts.sentAfterMs` (DateSent>= floor, encoded as
+ * `DateSent%3E=`) plus `opts.maxPagesPerDirection` and the call pages through
+ * next_page_uri until the window is drained or the cap hits — so gaps beyond
+ * one page are never silently lost.
  *
  * MMS: message records only carry a media COUNT (num_media); the URLs live in
  * a Media subresource. To stay bounded we resolve media for at most
@@ -166,48 +270,49 @@ const MEDIA_FETCH_CAP = 10;
 export async function listRecentSms(
   creds: SmsCredentials,
   pageSize = 100,
+  skipMediaSids?: ReadonlySet<string>,
+  opts?: ListSmsOptions
+): Promise<SmsMessage[]> {
+  const own = encodeURIComponent(normalizePhone(creds.fromNumber));
+  // %3E= is the URL-encoded '>=' Twilio expects in the param name.
+  const floor = opts?.sentAfterMs != null ? `&DateSent%3E=${isoDateOf(opts.sentAfterMs)}` : '';
+  const maxPages = opts?.maxPagesPerDirection ?? 1;
+  const urls = [
+    `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&To=${own}${floor}`,
+    `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&From=${own}${floor}`,
+  ];
+  const results = await Promise.all(urls.map((u) => fetchMessagePages(creds, u, maxPages)));
+  const { merged, needsMedia } = mergeRecords(results.flat(), creds.fromNumber, skipMediaSids);
+  merged.sort((a, b) => b.sentAt - a.sentAt);
+  await resolveMediaFor(creds, needsMedia);
+  return merged;
+}
+
+/**
+ * One page of history OLDER than `beforeMs` for a single counterparty, both
+ * directions (Twilio supports combining To= and From= filters in one query,
+ * so each direction is exactly one query). `DateSent%3C=` (encoded '<=') is
+ * day-granular, so results overlap the oldest cached day — callers dedupe by
+ * SID and count only genuinely new messages.
+ */
+export async function listOlderSms(
+  creds: SmsCredentials,
+  counterparty: string,
+  beforeMs: number,
+  pageSize = 100,
   skipMediaSids?: ReadonlySet<string>
 ): Promise<SmsMessage[]> {
   const own = encodeURIComponent(normalizePhone(creds.fromNumber));
+  const other = encodeURIComponent(normalizePhone(counterparty));
+  const ceiling = `&DateSent%3C=${isoDateOf(beforeMs)}`;
   const urls = [
-    `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&To=${own}`,
-    `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&From=${own}`,
+    `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&To=${own}&From=${other}${ceiling}`,
+    `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&From=${own}&To=${other}${ceiling}`,
   ];
-  const results = await Promise.all(
-    urls.map(async (url) => {
-      const res = await fetch(url, { headers: { Authorization: authHeader(creds) } });
-      if (!res.ok) {
-        const json = (await res.json().catch(() => null)) as { message?: string } | null;
-        throw new Error(json?.message ?? `Fetch failed (${res.status})`);
-      }
-      const json = (await res.json()) as { messages?: TwilioMessageRecord[] };
-      return json.messages ?? [];
-    })
-  );
-  const seen = new Set<string>();
-  const merged: SmsMessage[] = [];
-  const needsMedia: SmsMessage[] = [];
-  for (const rec of results.flat()) {
-    const msg = toSmsMessage(rec, creds.fromNumber);
-    if (msg && !seen.has(msg.sid)) {
-      seen.add(msg.sid);
-      merged.push(msg);
-      if (numMediaOf(rec) > 0 && !skipMediaSids?.has(msg.sid)) needsMedia.push(msg);
-    }
-  }
+  const results = await Promise.all(urls.map((u) => fetchMessagePages(creds, u, 1)));
+  const { merged, needsMedia } = mergeRecords(results.flat(), creds.fromNumber, skipMediaSids);
   merged.sort((a, b) => b.sentAt - a.sentAt);
-
-  if (needsMedia.length > 0) {
-    // Newest first so fresh photos resolve before old history.
-    needsMedia.sort((a, b) => b.sentAt - a.sentAt);
-    const batch = needsMedia.slice(0, MEDIA_FETCH_CAP);
-    await Promise.all(
-      batch.map(async (msg) => {
-        const urls = await fetchMediaUrls(creds, msg.sid);
-        if (urls && urls.length > 0) msg.mediaUrls = urls;
-      })
-    );
-  }
+  await resolveMediaFor(creds, needsMedia);
   return merged;
 }
 

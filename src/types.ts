@@ -219,6 +219,11 @@ export interface Settings {
   voicemailGreeting: string;
   /** Require Face ID / passcode to open the app. */
   appLock: boolean;
+  /**
+   * Seconds the app may stay out of the foreground before Face ID is
+   * required again. 0 = immediately (any exit from 'active' re-locks).
+   */
+  appLockGraceSeconds: number;
   /** Text a trusted contact if a post-meeting check-in is missed. */
   safetyAlertEnabled: boolean;
   /** Who gets the safety alert (display name, for UI only). */

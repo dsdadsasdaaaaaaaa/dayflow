@@ -3,6 +3,8 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -185,10 +187,16 @@ export default function ClientDetailScreen() {
         <BackButton />
       </View>
 
+      {/* Keeps the notes card and deposit fields visible above the keyboard. */}
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={styles.flex}
+      >
       <ScrollView
-        style={{ flex: 1 }}
+        style={styles.flex}
         contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 48 }]}
         showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
       >
         {/* Hero */}
         <View style={styles.hero}>
@@ -485,6 +493,7 @@ export default function ClientDetailScreen() {
           </View>
         ) : null}
       </ScrollView>
+      </KeyboardAvoidingView>
     </View>
   );
 }
@@ -493,6 +502,7 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
   },
+  flex: { flex: 1 },
   header: {
     flexDirection: 'row',
     alignItems: 'center',

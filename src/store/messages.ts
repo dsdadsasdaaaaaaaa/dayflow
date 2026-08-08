@@ -1,7 +1,14 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import { fetchSmsStatus, listRecentSms, sendSms, type SmsMessage } from '../lib/smsApi';
+import { uid } from '../lib/id';
+import {
+  fetchSmsStatus,
+  listOlderSms,
+  listRecentSms,
+  sendSms,
+  type SmsMessage,
+} from '../lib/smsApi';
 import { loadSmsCredentials, normalizePhone } from '../lib/smsCredentials';
 import { uploadPhotoAsset } from '../lib/twilioAssets';
 
@@ -9,7 +16,7 @@ import { uploadPhotoAsset } from '../lib/twilioAssets';
  * Local message cache + sync for the in-app messenger. The provider account
  * (user-owned) is the source of truth; this store merges fetched traffic and
  * tracks read state locally. Send is optimistic-free: we post, then merge the
- * confirmed record.
+ * confirmed record. Failed sends land in a persisted outbox for tap-to-retry.
  */
 
 export interface Thread {
@@ -18,13 +25,57 @@ export interface Thread {
   unread: number;
 }
 
+/** A failed send waiting for retry (persisted until retried or discarded). */
+export interface OutboxEntry {
+  localId: string;
+  /** Destination (E.164). */
+  to: string;
+  body: string;
+  mediaUrls?: string[];
+  failedAt: number;
+}
+
+/** Sync window slack: re-fetch this far below the high-water mark. */
+const CLOCK_SKEW_MS = 10 * 60_000;
+
+/** Per-direction page cap for incremental sync: 5 × 2 directions = 10 pages/sync. */
+const SYNC_PAGES_PER_DIRECTION = 5;
+
+/** Page size used everywhere; loadOlder's "no more history" check keys off it. */
+const PAGE_SIZE = 100;
+
+/** Terminal outbound statuses that mean the carrier rejected the message. */
+const FAILED_SEND = new Set(['failed', 'undelivered']);
+
 interface MessagesState {
   /** All known messages by SID. */
   messages: Record<string, SmsMessage>;
   /** Last time a thread was opened, per counterparty (for unread counts). */
   lastReadAt: Record<string, number>;
+  /**
+   * Newest sentAt ever synced (epoch ms). Normal syncs only fetch traffic
+   * with DateSent >= mark − CLOCK_SKEW_MS instead of re-downloading the
+   * whole newest-100 window on every poll.
+   */
+  highWaterMark: number | null;
+  /**
+   * Whether older history may exist beyond the oldest cached message, per
+   * counterparty. Missing = unknown (assume yes); false once a loadOlder
+   * fetch returns fewer than PAGE_SIZE new messages.
+   */
+  hasMoreOlder: Record<string, boolean>;
+  /** Failed sends awaiting retry, by localId. */
+  outbox: Record<string, OutboxEntry>;
+  /**
+   * SIDs of provider records for sends that were moved into the outbox.
+   * They stay in Twilio's history forever, so without this set every sync
+   * (or messageAlerts merge) would resurrect them as ghost bubbles.
+   */
+  hiddenSids: Record<string, true>;
   syncing: boolean;
   sendingTo: string | null;
+  /** Counterparty currently loading older history (spinner on the pill). */
+  loadingOlder: string | null;
   /** Photo send progress (uploading = hosting the photo, ~30-60s). */
   photoSending: 'uploading' | 'sending' | null;
   lastSyncAt: number | null;
@@ -37,6 +88,12 @@ interface MessagesState {
   send: (to: string, body: string, mediaUrls?: string[]) => Promise<boolean>;
   /** Host a local photo on the user's Twilio account, then MMS it. */
   sendPhoto: (to: string, localUri: string) => Promise<boolean>;
+  /** Fetch the next page of history older than the oldest cached message. */
+  loadOlder: (counterparty: string) => Promise<void>;
+  /** Re-attempt a failed send; removes the outbox entry on success. */
+  retryOutbox: (localId: string) => Promise<boolean>;
+  /** Drop a failed send without retrying. */
+  discardOutbox: (localId: string) => void;
   markRead: (counterparty: string) => void;
   clearAll: () => void;
 }
@@ -45,8 +102,11 @@ interface MessagesState {
  * Merge one fetched message into the map, preserving mediaUrls we already
  * resolved (syncs skip re-fetching known media, so fresh records may lack it).
  * Exported for messageAlerts, which merges fetched windows the same way.
+ * Skips hidden SIDs (failed sends living in the retry outbox) so no merge
+ * path — sync, loadOlder, or the background alerts task — resurrects them.
  */
 export function mergeMessage(messages: Record<string, SmsMessage>, m: SmsMessage): void {
+  if (useMessages.getState().hiddenSids[m.sid]) return;
   const prev = messages[m.sid];
   if (!m.mediaUrls?.length && prev?.mediaUrls?.length) {
     messages[m.sid] = { ...m, mediaUrls: prev.mediaUrls };
@@ -55,13 +115,30 @@ export function mergeMessage(messages: Record<string, SmsMessage>, m: SmsMessage
   }
 }
 
+/** New outbox map with one fresh entry appended. */
+function withOutboxEntry(
+  outbox: Record<string, OutboxEntry>,
+  to: string,
+  body: string,
+  mediaUrls?: string[]
+): Record<string, OutboxEntry> {
+  const entry: OutboxEntry = { localId: uid(), to: normalizePhone(to), body, failedAt: Date.now() };
+  if (mediaUrls && mediaUrls.length > 0) entry.mediaUrls = [...mediaUrls];
+  return { ...outbox, [entry.localId]: entry };
+}
+
 export const useMessages = create<MessagesState>()(
   persist(
     (set, get) => ({
       messages: {},
       lastReadAt: {},
+      highWaterMark: null,
+      hasMoreOlder: {},
+      outbox: {},
+      hiddenSids: {},
       syncing: false,
       sendingTo: null,
+      loadingOlder: null,
       photoSending: null,
       lastSyncAt: null,
       lastError: null,
@@ -87,11 +164,30 @@ export const useMessages = create<MessagesState>()(
               .filter((m) => m.mediaUrls && m.mediaUrls.length > 0)
               .map((m) => m.sid)
           );
-          const fetched = await listRecentSms(creds, 100, knownMediaSids);
+          const mark = get().highWaterMark;
+          // Incremental after the first sync: only fetch traffic since the
+          // high-water mark (minus a clock-skew margin), paging through
+          // next_page_uri so a busy stretch never silently loses messages.
+          // First-ever sync keeps the classic newest-window behavior and
+          // just plants the mark.
+          const fetched =
+            mark == null
+              ? await listRecentSms(creds, PAGE_SIZE, knownMediaSids)
+              : await listRecentSms(creds, PAGE_SIZE, knownMediaSids, {
+                  sentAfterMs: mark - CLOCK_SKEW_MS,
+                  maxPagesPerDirection: SYNC_PAGES_PER_DIRECTION,
+                });
+          // Advance the mark from message timestamps (Twilio's clock), never
+          // the device clock — skew-proof by construction.
+          const newestFetched = fetched.reduce((max, m) => Math.max(max, m.sentAt), 0);
           set((s) => {
             const messages = { ...s.messages };
             for (const m of fetched) mergeMessage(messages, m);
-            return { messages, lastSyncAt: Date.now() };
+            return {
+              messages,
+              lastSyncAt: Date.now(),
+              highWaterMark: Math.max(s.highWaterMark ?? 0, newestFetched) || Date.now(),
+            };
           });
         } catch (e) {
           set({ lastError: e instanceof Error ? e.message : 'Sync failed' });
@@ -102,11 +198,17 @@ export const useMessages = create<MessagesState>()(
 
       send: async (to, body, mediaUrls) => {
         const creds = await loadSmsCredentials();
+        const target = normalizePhone(to);
         if (!creds) {
-          set({ configured: false, lastError: 'Messaging is not set up yet.' });
+          // Still file it in the outbox — the text isn't lost, and retry
+          // works as soon as messaging is configured.
+          set((s) => ({
+            configured: false,
+            lastError: 'Messaging is not set up yet.',
+            outbox: withOutboxEntry(s.outbox, target, body, mediaUrls),
+          }));
           return false;
         }
-        const target = normalizePhone(to);
         set({ sendingTo: target, lastError: null });
         try {
           const sent = await sendSms(creds, target, body, mediaUrls);
@@ -120,7 +222,28 @@ export const useMessages = create<MessagesState>()(
           for (const delay of [4000, 15000]) {
             setTimeout(async () => {
               const updated = await fetchSmsStatus(creds, sent.sid);
-              if (updated) {
+              if (!updated) return;
+              if (FAILED_SEND.has(updated.status)) {
+                // The carrier rejected it after the fact — move the message
+                // into the retry outbox. Both timers can land here, so
+                // hiddenSids doubles as the "already moved" guard.
+                set((s) => {
+                  if (s.hiddenSids[updated.sid]) return {};
+                  const messages = { ...s.messages };
+                  const prev = messages[updated.sid];
+                  delete messages[updated.sid];
+                  return {
+                    messages,
+                    hiddenSids: { ...s.hiddenSids, [updated.sid]: true as const },
+                    outbox: withOutboxEntry(
+                      s.outbox,
+                      updated.counterparty,
+                      updated.body,
+                      prev?.mediaUrls ?? updated.mediaUrls
+                    ),
+                  };
+                });
+              } else {
                 set((s) => {
                   const messages = { ...s.messages };
                   mergeMessage(messages, updated);
@@ -131,7 +254,11 @@ export const useMessages = create<MessagesState>()(
           }
           return true;
         } catch (e) {
-          set({ lastError: e instanceof Error ? e.message : 'Send failed' });
+          set((s) => ({
+            lastError: e instanceof Error ? e.message : 'Send failed',
+            // Keep the failed message retryable instead of just erroring.
+            outbox: withOutboxEntry(s.outbox, target, body, mediaUrls),
+          }));
           return false;
         } finally {
           set({ sendingTo: null });
@@ -163,12 +290,81 @@ export const useMessages = create<MessagesState>()(
         }
       },
 
+      loadOlder: async (counterparty) => {
+        const key = normalizePhone(counterparty);
+        if (get().loadingOlder != null) return;
+        const creds = await loadSmsCredentials();
+        if (!creds) {
+          set({ configured: false });
+          return;
+        }
+        const cached = threadMessages(get().messages, key);
+        if (cached.length === 0) return;
+        const oldest = cached[0]; // threadMessages sorts oldest first
+        set({ loadingOlder: key, lastError: null });
+        try {
+          const knownMediaSids = new Set(
+            Object.values(get().messages)
+              .filter((m) => m.mediaUrls && m.mediaUrls.length > 0)
+              .map((m) => m.sid)
+          );
+          const fetched = await listOlderSms(creds, key, oldest.sentAt, PAGE_SIZE, knownMediaSids);
+          // Day-granular DateSent<= overlaps the oldest cached day, so only
+          // genuinely NEW sids count toward "was there more history?".
+          const existing = get().messages;
+          const hidden = get().hiddenSids;
+          const fresh = fetched.filter((m) => !existing[m.sid] && !hidden[m.sid]).length;
+          set((s) => {
+            const messages = { ...s.messages };
+            for (const m of fetched) mergeMessage(messages, m);
+            return {
+              messages,
+              hasMoreOlder: { ...s.hasMoreOlder, [key]: fresh >= PAGE_SIZE },
+            };
+          });
+        } catch (e) {
+          set({ lastError: e instanceof Error ? e.message : 'Could not load earlier messages' });
+        } finally {
+          set({ loadingOlder: null });
+        }
+      },
+
+      retryOutbox: async (localId) => {
+        const entry = get().outbox[localId];
+        if (!entry) return false;
+        // Remove first — a failed re-send files a fresh entry via send()'s
+        // failure path, so the message can never be lost, only re-queued.
+        set((s) => {
+          const outbox = { ...s.outbox };
+          delete outbox[localId];
+          return { outbox };
+        });
+        return get().send(entry.to, entry.body, entry.mediaUrls);
+      },
+
+      discardOutbox: (localId) =>
+        set((s) => {
+          const outbox = { ...s.outbox };
+          delete outbox[localId];
+          return { outbox };
+        }),
+
       markRead: (counterparty) =>
         set((s) => ({
           lastReadAt: { ...s.lastReadAt, [normalizePhone(counterparty)]: Date.now() },
         })),
 
-      clearAll: () => set({ messages: {}, lastReadAt: {}, lastSyncAt: null, lastError: null }),
+      clearAll: () =>
+        set({
+          messages: {},
+          lastReadAt: {},
+          highWaterMark: null,
+          hasMoreOlder: {},
+          outbox: {},
+          hiddenSids: {},
+          lastSyncAt: null,
+          lastError: null,
+        }),
     }),
     {
       name: 'dayflow-messages',
@@ -178,6 +374,10 @@ export const useMessages = create<MessagesState>()(
         messages: s.messages,
         lastReadAt: s.lastReadAt,
         lastSyncAt: s.lastSyncAt,
+        highWaterMark: s.highWaterMark,
+        hasMoreOlder: s.hasMoreOlder,
+        outbox: s.outbox,
+        hiddenSids: s.hiddenSids,
       }) as Partial<MessagesState>,
     }
   )
@@ -206,15 +406,30 @@ export function buildThreads(
     .sort((a, b) => b.lastMessage.sentAt - a.lastMessage.sentAt);
 }
 
-/** One thread's messages, oldest first. */
+/**
+ * One thread's messages, oldest first. Pass `hiddenSids` to exclude failed
+ * sends that live in the retry outbox (they render as outbox bubbles instead).
+ */
 export function threadMessages(
   messages: Record<string, SmsMessage>,
-  counterparty: string
+  counterparty: string,
+  hiddenSids?: Record<string, true>
 ): SmsMessage[] {
   const key = normalizePhone(counterparty);
   return Object.values(messages)
-    .filter((m) => m.counterparty === key)
+    .filter((m) => m.counterparty === key && !hiddenSids?.[m.sid])
     .sort((a, b) => a.sentAt - b.sentAt);
+}
+
+/** Failed sends waiting for retry in one thread, oldest first. */
+export function threadOutbox(
+  outbox: Record<string, OutboxEntry>,
+  counterparty: string
+): OutboxEntry[] {
+  const key = normalizePhone(counterparty);
+  return Object.values(outbox)
+    .filter((e) => normalizePhone(e.to) === key)
+    .sort((a, b) => a.failedAt - b.failedAt);
 }
 
 /** Total unread across threads (tab badge). */

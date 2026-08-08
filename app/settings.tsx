@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
   AppState,
+  KeyboardAvoidingView,
   Linking,
   Platform,
   Pressable,
@@ -382,12 +383,19 @@ export default function SettingsScreen() {
         <View style={styles.headerSpacer} />
       </View>
 
+      {/* Keeps credential fields, quick replies and the safety message editor
+          visible above the keyboard. */}
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={styles.flex}
+      >
       <ScrollView
         contentContainerStyle={[
           styles.content,
-          { paddingBottom: 40 + insets.bottom },
+          { paddingBottom: 60 + insets.bottom },
         ]}
         showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
       >
         <SettingsSection title="Appearance" delay={0}>
           <SettingsRow
@@ -696,6 +704,23 @@ export default function SettingsScreen() {
               />
             }
           />
+          {Platform.OS !== 'web' && settings.appLock ? (
+            <View style={styles.block}>
+              <Text style={[styles.blockLabel, { color: theme.textTertiary }]}>
+                Require Face ID again
+              </Text>
+              <GlassSegmented<'0' | '60'>
+                options={[
+                  { value: '0', label: 'Immediately' },
+                  { value: '60', label: 'After 1 minute' },
+                ]}
+                value={settings.appLockGraceSeconds === 0 ? '0' : '60'}
+                onChange={(v) =>
+                  update({ appLockGraceSeconds: v === '0' ? 0 : 60 })
+                }
+              />
+            </View>
+          ) : null}
         </SettingsSection>
 
         <SettingsSection
@@ -767,6 +792,7 @@ export default function SettingsScreen() {
           </View>
         </SettingsSection>
       </ScrollView>
+      </KeyboardAvoidingView>
 
       <ImportBackupModal
         visible={importVisible}
@@ -782,6 +808,7 @@ export default function SettingsScreen() {
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },
+  flex: { flex: 1 },
   header: {
     flexDirection: 'row',
     alignItems: 'center',

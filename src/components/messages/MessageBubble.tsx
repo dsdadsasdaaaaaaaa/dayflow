@@ -1,9 +1,13 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useEffect, useState } from 'react';
+import * as Clipboard from 'expo-clipboard';
+import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { formatDayShort, isToday, toDayKey } from '../../lib/dates';
 import { useMediaDataUri } from '../../lib/mediaCache';
+import { successHaptic, tapHaptic } from '../../lib/haptics';
 import { tdResolvePhoto } from '../../lib/tdlib';
 import { RADIUS, useTheme } from '../../theme';
+import { formatClockTime } from './format';
 
 /**
  * Structural message shape — SmsMessage (lib/smsApi) and TgMessage (lib/tdlib)
@@ -12,6 +16,8 @@ import { RADIUS, useTheme } from '../../theme';
 export interface BubbleMessage {
   direction: 'in' | 'out';
   body: string;
+  /** Epoch ms — powers the tap-to-reveal timestamp. */
+  sentAt: number;
   /** Delivery status (SMS channel only). */
   status?: string;
   /** MMS attachments — Twilio media URLs (SMS channel). */
@@ -36,7 +42,20 @@ function statusLabel(status: string): string {
   return status.charAt(0).toUpperCase() + status.slice(1);
 }
 
-/** One chat bubble: outbound = solid accent right, inbound = flat surface left. */
+/** How long the "Copied" confirmation caption stays visible. */
+const COPIED_MS = 1500;
+
+/**
+ * One chat bubble: outbound = solid accent right, inbound = flat surface left.
+ *
+ * Interactions (both channels — SMS and Telegram share this component):
+ * - TEXT bubbles: tap toggles the exact timestamp caption; long-press copies
+ *   the text (haptic + brief "Copied" caption).
+ * - PHOTO attachments keep tap = open the full-screen viewer, so their
+ *   secondary actions move to LONG-PRESS: it toggles the timestamp and, when
+ *   the message has a caption, copies it too. One consistent rule: tap is the
+ *   primary action, long-press the secondary.
+ */
 export function MessageBubble({ msg, showStatus = false, onPressPhoto }: Props) {
   const theme = useTheme();
   const out = msg.direction === 'out';
@@ -44,16 +63,61 @@ export function MessageBubble({ msg, showStatus = false, onPressPhoto }: Props) 
   const hasBody = msg.body.trim().length > 0;
   const hasAttachment = mediaUrls.length > 0 || msg.photoFileId != null;
 
+  const [showTime, setShowTime] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (copiedTimer.current) clearTimeout(copiedTimer.current);
+    },
+    []
+  );
+
+  const toggleTime = () => {
+    tapHaptic();
+    setShowTime((v) => !v);
+  };
+
+  const copyBody = () => {
+    if (!hasBody) return;
+    void Clipboard.setStringAsync(msg.body);
+    successHaptic();
+    setCopied(true);
+    if (copiedTimer.current) clearTimeout(copiedTimer.current);
+    copiedTimer.current = setTimeout(() => setCopied(false), COPIED_MS);
+  };
+
+  /** Photo long-press: timestamp + copy the caption when there is one. */
+  const photoLongPress = () => {
+    setShowTime((v) => !v);
+    if (hasBody) copyBody();
+    else tapHaptic();
+  };
+
+  const sentDay = toDayKey(new Date(msg.sentAt));
+  const timeLabel = isToday(sentDay)
+    ? formatClockTime(msg.sentAt)
+    : `${formatDayShort(sentDay)} · ${formatClockTime(msg.sentAt)}`;
+
   return (
     <View style={[styles.wrap, out ? styles.wrapOut : styles.wrapIn]}>
       {mediaUrls.map((url) => (
-        <MediaPhoto key={url} url={url} onPress={onPressPhoto} />
+        <MediaPhoto key={url} url={url} onPress={onPressPhoto} onLongPress={photoLongPress} />
       ))}
       {msg.photoFileId != null ? (
-        <TelegramPhoto fileId={msg.photoFileId} onPress={onPressPhoto} />
+        <TelegramPhoto
+          fileId={msg.photoFileId}
+          onPress={onPressPhoto}
+          onLongPress={photoLongPress}
+        />
       ) : null}
       {hasBody || !hasAttachment ? (
-        <View
+        <Pressable
+          onPress={toggleTime}
+          onLongPress={hasBody ? copyBody : undefined}
+          accessibilityRole="button"
+          accessibilityLabel={`${out ? 'Sent' : 'Received'} message: ${msg.body}`}
+          accessibilityHint="Shows the time sent. Long press to copy."
           style={[
             styles.bubble,
             out
@@ -62,7 +126,18 @@ export function MessageBubble({ msg, showStatus = false, onPressPhoto }: Props) 
           ]}
         >
           <Text style={[styles.body, { color: out ? '#FFFFFF' : theme.text }]}>{msg.body}</Text>
-        </View>
+        </Pressable>
+      ) : null}
+      {showTime || copied ? (
+        <Text
+          style={[
+            styles.caption,
+            { color: copied ? theme.success : theme.textTertiary },
+          ]}
+          accessibilityLiveRegion="polite"
+        >
+          {copied ? 'Copied' : timeLabel}
+        </Text>
       ) : null}
       {showStatus && msg.status ? (
         <Text
@@ -79,16 +154,26 @@ export function MessageBubble({ msg, showStatus = false, onPressPhoto }: Props) 
 }
 
 /** One photo attachment: cached image, tap to view full screen. */
-function MediaPhoto({ url, onPress }: { url: string; onPress?: (url: string) => void }) {
+function MediaPhoto({
+  url,
+  onPress,
+  onLongPress,
+}: {
+  url: string;
+  onPress?: (url: string) => void;
+  onLongPress?: () => void;
+}) {
   const theme = useTheme();
   const { dataUri, loading } = useMediaDataUri(url);
 
   return (
     <Pressable
       onPress={() => onPress?.(url)}
+      onLongPress={onLongPress}
       disabled={!onPress || !dataUri}
       accessibilityRole="button"
       accessibilityLabel="Photo attachment"
+      accessibilityHint="Opens the photo. Long press for the time sent."
       style={({ pressed }) => [
         styles.photoFrame,
         { backgroundColor: theme.surface, opacity: pressed ? 0.85 : 1 },
@@ -119,9 +204,11 @@ const tgPhotoUriCache = new Map<number, string>();
 function TelegramPhoto({
   fileId,
   onPress,
+  onLongPress,
 }: {
   fileId: number;
   onPress?: (uri: string) => void;
+  onLongPress?: () => void;
 }) {
   const theme = useTheme();
   const [uri, setUri] = useState<string | null>(tgPhotoUriCache.get(fileId) ?? null);
@@ -157,9 +244,11 @@ function TelegramPhoto({
       onPress={() => {
         if (uri) onPress?.(uri);
       }}
+      onLongPress={onLongPress}
       disabled={!onPress || !uri}
       accessibilityRole="button"
       accessibilityLabel="Photo attachment"
+      accessibilityHint="Opens the photo. Long press for the time sent."
       style={({ pressed }) => [
         styles.photoFrame,
         { backgroundColor: theme.surface, opacity: pressed ? 0.85 : 1 },
@@ -190,6 +279,7 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
   },
   body: { fontSize: 16, lineHeight: 21 },
+  caption: { fontSize: 11, fontWeight: '500', marginTop: 3, marginHorizontal: 4 },
   status: { fontSize: 11, fontWeight: '500', marginTop: 3, marginHorizontal: 4 },
   photoFrame: {
     borderRadius: RADIUS.lg,

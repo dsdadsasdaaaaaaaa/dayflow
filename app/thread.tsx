@@ -2,6 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   FlatList,
   Image,
@@ -60,7 +61,12 @@ import {
   effectiveStatus,
   useClientMeta,
 } from '../src/store/clientMeta';
-import { threadMessages, useMessages } from '../src/store/messages';
+import {
+  threadMessages,
+  threadOutbox,
+  useMessages,
+  type OutboxEntry,
+} from '../src/store/messages';
 import { useSettings } from '../src/store/settings';
 import { useTasks } from '../src/store/tasks';
 import { telegramChatTitle, useTelegram } from '../src/store/telegramAccount';
@@ -77,7 +83,9 @@ function msgKey(m: ThreadMsg): string {
 
 type Row =
   | { type: 'day'; key: string; day: DayKey }
-  | { type: 'message'; key: string; msg: ThreadMsg; showStatus: boolean };
+  | { type: 'message'; key: string; msg: ThreadMsg; showStatus: boolean }
+  /** A failed send waiting in the retry outbox — pinned to the bottom. */
+  | { type: 'outbox'; key: string; entry: OutboxEntry };
 
 /** "Today" / "Tomorrow" / "Friday" / "Wednesday, July 16" + optional time. */
 function confirmationDraft(occ: MeetingOccurrence): string {
@@ -114,6 +122,13 @@ export default function ThreadScreen() {
   const markRead = useMessages((s) => s.markRead);
   const sendPhoto = useMessages((s) => s.sendPhoto);
   const photoSending = useMessages((s) => s.photoSending);
+  const hiddenSids = useMessages((s) => s.hiddenSids);
+  const outbox = useMessages((s) => s.outbox);
+  const hasMoreOlder = useMessages((s) => s.hasMoreOlder);
+  const loadingOlder = useMessages((s) => s.loadingOlder);
+  const loadOlder = useMessages((s) => s.loadOlder);
+  const retryOutbox = useMessages((s) => s.retryOutbox);
+  const discardOutbox = useMessages((s) => s.discardOutbox);
   const tgMessages = useTelegram((s) => s.messages);
   const tgChats = useTelegram((s) => s.chats);
   const tgSendingTo = useTelegram((s) => s.sendingTo);
@@ -222,8 +237,16 @@ export default function ThreadScreen() {
         .filter((m) => m.counterparty === number)
         .sort((a, b) => a.sentAt - b.sentAt);
     }
-    return threadMessages(messages, number);
-  }, [isTelegram, tgMessages, messages, number]);
+    // hiddenSids excludes failed sends that live in the retry outbox — they
+    // render as "Not delivered" bubbles at the bottom instead.
+    return threadMessages(messages, number, hiddenSids);
+  }, [isTelegram, tgMessages, messages, number, hiddenSids]);
+
+  /** Failed sends for this thread (SMS only), oldest first. */
+  const failedSends = useMemo<OutboxEntry[]>(
+    () => (isTelegram ? [] : threadOutbox(outbox, number)),
+    [isTelegram, outbox, number]
+  );
 
   /** Chronological rows with day separators, reversed for the inverted list. */
   const rows = useMemo<Row[]>(() => {
@@ -250,8 +273,36 @@ export default function ThreadScreen() {
           key === lastOutKey && (status === 'failed' || status === 'undelivered'),
       });
     }
+    // Failed sends pin to the bottom of the thread, awaiting retry/discard.
+    for (const entry of failedSends) {
+      out.push({ type: 'outbox', key: `outbox-${entry.localId}`, entry });
+    }
     return out.reverse();
-  }, [msgs]);
+  }, [msgs, failedSends]);
+
+  /** Older-history pill: show while more may exist (unknown counts as yes). */
+  const showLoadOlder = !isTelegram && msgs.length > 0 && hasMoreOlder[number] !== false;
+
+  const handleLoadOlder = useCallback(() => {
+    tapHaptic();
+    void loadOlder(number);
+  }, [loadOlder, number]);
+
+  const handleRetry = useCallback(
+    (localId: string) => {
+      tapHaptic();
+      void retryOutbox(localId);
+    },
+    [retryOutbox]
+  );
+
+  const handleDiscard = useCallback(
+    (localId: string) => {
+      tapHaptic();
+      discardOutbox(localId);
+    },
+    [discardOutbox]
+  );
 
   const handleSend = useCallback(
     async (body: string) => {
@@ -472,6 +523,12 @@ export default function ThreadScreen() {
               <Text style={[styles.daySep, { color: theme.textTertiary }]}>
                 {formatDayRelative(item.day)}
               </Text>
+            ) : item.type === 'outbox' ? (
+              <FailedBubble
+                entry={item.entry}
+                onRetry={() => handleRetry(item.entry.localId)}
+                onDiscard={() => handleDiscard(item.entry.localId)}
+              />
             ) : (
               <MessageBubble
                 msg={item.msg}
@@ -479,6 +536,33 @@ export default function ThreadScreen() {
                 onPressPhoto={openPhoto}
               />
             )
+          }
+          // Inverted list: the footer renders at the TOP — exactly where the
+          // user lands when they scroll back for older history.
+          ListFooterComponent={
+            showLoadOlder ? (
+              <Pressable
+                onPress={handleLoadOlder}
+                disabled={loadingOlder != null}
+                accessibilityRole="button"
+                accessibilityLabel="Load earlier messages"
+                style={({ pressed }) => [
+                  styles.loadOlderPill,
+                  {
+                    backgroundColor: theme.surface,
+                    opacity: loadingOlder != null ? 0.6 : pressed ? 0.8 : 1,
+                  },
+                ]}
+              >
+                {loadingOlder === number ? (
+                  <ActivityIndicator size="small" color={theme.textSecondary} />
+                ) : (
+                  <Text style={[styles.loadOlderText, { color: theme.textSecondary }]}>
+                    Load earlier messages
+                  </Text>
+                )}
+              </Pressable>
+            ) : null
           }
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
@@ -529,6 +613,9 @@ export default function ThreadScreen() {
           quickOpen={quickOpen}
           onToggleQuick={() => setQuickOpen((v) => !v)}
           onAttach={handleAttach}
+          // SMS failures land in the retry outbox, so the draft can clear;
+          // Telegram keeps the draft (no outbox on that channel).
+          clearOnFail={!isTelegram}
         />
       </View>
 
@@ -547,6 +634,61 @@ export default function ThreadScreen() {
       <PhotoViewer url={viewerUrl} onClose={() => setViewerUrl(null)} />
       <LocalPhotoViewer uri={localViewerUri} onClose={() => setLocalViewerUri(null)} />
     </KeyboardAvoidingView>
+  );
+}
+
+/**
+ * A failed send from the retry outbox: dimmed outbound-style bubble pinned to
+ * the bottom of the thread. Tap retries, the ✕ (or long-press) discards.
+ */
+function FailedBubble({
+  entry,
+  onRetry,
+  onDiscard,
+}: {
+  entry: OutboxEntry;
+  onRetry: () => void;
+  onDiscard: () => void;
+}) {
+  const theme = useTheme();
+  const label = entry.body.trim().length > 0 ? entry.body : 'Photo message';
+
+  const confirmDiscard = () => {
+    Alert.alert('Discard message?', 'The unsent message will be deleted.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Discard', style: 'destructive', onPress: onDiscard },
+    ]);
+  };
+
+  return (
+    <View style={styles.failedWrap}>
+      <View style={styles.failedRow}>
+        <Pressable
+          onPress={confirmDiscard}
+          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityLabel="Discard unsent message"
+          style={[styles.failedDiscard, { backgroundColor: theme.surface }]}
+        >
+          <Ionicons name="close" size={14} color={theme.textTertiary} />
+        </Pressable>
+        <Pressable
+          onPress={onRetry}
+          onLongPress={confirmDiscard}
+          accessibilityRole="button"
+          accessibilityLabel={`Not delivered: ${label}. Tap to retry.`}
+          style={({ pressed }) => [
+            styles.failedBubble,
+            { backgroundColor: theme.accent, opacity: pressed ? 0.45 : 0.55 },
+          ]}
+        >
+          <Text style={styles.failedBody}>{label}</Text>
+        </Pressable>
+      </View>
+      <Text style={[styles.failedCaption, { color: theme.danger }]}>
+        Not delivered · Tap to retry
+      </Text>
+    </View>
   );
 }
 
@@ -611,6 +753,34 @@ const styles = StyleSheet.create({
   },
   emptyWrap: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   emptyText: { fontSize: 14 },
+  loadOlderPill: {
+    alignSelf: 'center',
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    marginVertical: SPACING.sm,
+    minWidth: 150,
+    alignItems: 'center',
+  },
+  loadOlderText: { fontSize: 12, fontWeight: '600' },
+  failedWrap: { marginVertical: 2, maxWidth: '78%', alignSelf: 'flex-end', alignItems: 'flex-end' },
+  failedRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  failedDiscard: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  failedBubble: {
+    borderRadius: 18,
+    borderBottomRightRadius: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    flexShrink: 1,
+  },
+  failedBody: { fontSize: 16, lineHeight: 21, color: '#FFFFFF' },
+  failedCaption: { fontSize: 11, fontWeight: '500', marginTop: 3, marginHorizontal: 4 },
   photoProgress: {
     fontSize: 12,
     fontWeight: '500',

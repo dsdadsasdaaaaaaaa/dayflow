@@ -5,12 +5,13 @@ import { Alert, AppState, Platform, Pressable, StyleSheet, Text, View } from 're
 import { useSettings } from '../store/settings';
 import { useTheme } from '../theme';
 
-/** Re-lock when the app was backgrounded longer than this. */
-const RELOCK_AFTER_MS = 60_000;
-
 /**
  * Face ID / passcode gate. When settings.appLock is on, children are hidden
  * behind an opaque lock screen until the user authenticates.
+ *
+ * Re-lock timing comes from settings.appLockGraceSeconds: re-lock when the
+ * app was backgrounded longer than the grace, and 0 = immediately (ANY exit
+ * from the 'active' AppState requires re-auth on return).
  *
  * FAIL-OPEN BY DESIGN: if authentication is impossible (Face ID permission
  * denied for the app, biometrics not enrolled, no passcode set), the gate
@@ -20,6 +21,7 @@ const RELOCK_AFTER_MS = 60_000;
 export function LockGate({ children }: { children: React.ReactNode }) {
   const theme = useTheme();
   const appLock = useSettings((s) => s.settings.appLock);
+  const graceSeconds = useSettings((s) => s.settings.appLockGraceSeconds);
   const [locked, setLocked] = useState(appLock && Platform.OS !== 'web');
   // Opaque privacy cover shown whenever the app is not 'active' — it is what
   // the iOS app-switcher snapshot captures, so it must engage on 'inactive'
@@ -28,6 +30,12 @@ export function LockGate({ children }: { children: React.ReactNode }) {
   const [authBusy, setAuthBusy] = useState(false);
   const [hint, setHint] = useState<string | null>(null);
   const backgroundedAt = useRef<number | null>(null);
+  // True while OUR Face ID sheet is up — the sheet itself flips AppState to
+  // 'inactive', and treating that as "left the app" in Immediately mode
+  // would re-lock on every successful unlock (an endless prompt loop).
+  const authInProgress = useRef(false);
+  // Immediately mode: set when the app leaves 'active'; consumed on return.
+  const relockPending = useRef(false);
 
   const failOpen = useCallback((reason: string) => {
     setLocked(false);
@@ -50,6 +58,7 @@ export function LockGate({ children }: { children: React.ReactNode }) {
     if (Date.now() - lastAttemptAt.current < 1500) return;
     lastAttemptAt.current = Date.now();
     setAuthBusy(true);
+    authInProgress.current = true;
     setHint(null);
     try {
       const [hasHardware, enrolled, secLevel] = await Promise.all([
@@ -105,6 +114,7 @@ export function LockGate({ children }: { children: React.ReactNode }) {
         `Couldn’t start Face ID (${e instanceof Error ? e.message : 'error'}) — tap Unlock to try again.`
       );
     } finally {
+      authInProgress.current = false;
       setAuthBusy(false);
     }
   }, [authBusy, failOpen]);
@@ -123,12 +133,13 @@ export function LockGate({ children }: { children: React.ReactNode }) {
   }, [appLock]);
 
   // Cover the moment the app leaves 'active' (hides the switcher snapshot);
-  // re-lock after a long background stay.
+  // re-lock per the user's grace setting (0 = any exit from 'active').
   useEffect(() => {
     if (!appLock || Platform.OS === 'web') {
       setCovered(false);
       return;
     }
+    const graceMs = Math.max(0, graceSeconds) * 1000;
     const sub = AppState.addEventListener('change', (state) => {
       if (state !== 'active') {
         // 'inactive' fires on the way to the switcher — cover synchronously.
@@ -136,10 +147,15 @@ export function LockGate({ children }: { children: React.ReactNode }) {
         // is on top and the cover clears when we return to 'active'.)
         setCovered(true);
         if (state === 'background') backgroundedAt.current = Date.now();
+        // Immediately mode: ANY exit from 'active' demands re-auth — except
+        // the 'inactive' blip caused by our own Face ID sheet (see ref note).
+        if (graceMs === 0 && !authInProgress.current) relockPending.current = true;
       } else {
         const away = backgroundedAt.current ? Date.now() - backgroundedAt.current : 0;
         backgroundedAt.current = null;
-        if (away > RELOCK_AFTER_MS) {
+        const mustRelock = relockPending.current || away > graceMs;
+        relockPending.current = false;
+        if (mustRelock) {
           setLocked(true);
           setTimeout(() => void unlock(), 350);
         }
@@ -147,7 +163,7 @@ export function LockGate({ children }: { children: React.ReactNode }) {
       }
     });
     return () => sub.remove();
-  }, [appLock, unlock]);
+  }, [appLock, graceSeconds, unlock]);
 
   // The app ALWAYS renders underneath; the lock is an opaque cover on top.
   // (Never conditionally unmount the navigator — a successful unlock must
