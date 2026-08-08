@@ -21,6 +21,7 @@ import {
   registerSafetyCategory,
 } from '../src/lib/safety';
 import { subscribeWidgetSync } from '../src/lib/widgetBridge';
+import { getPushTokenSafe, setPushRelayActive, subscribePushRefresh } from '../src/lib/push';
 import { loadSmsCredentials } from '../src/lib/smsCredentials';
 import { ensureVoiceFunctionCurrent } from '../src/lib/voiceApi';
 import { useSettings } from '../src/store/settings';
@@ -124,27 +125,41 @@ export default function RootLayout() {
     const heal = async () => {
       if (attempted) return;
       const s = useSettings.getState().settings;
-      if (!s.callingEnabled) return;
       attempted = true;
       try {
         const creds = await loadSmsCredentials();
-        if (!creds) return;
-        const result = await ensureVoiceFunctionCurrent(creds, {
-          forwardTo: s.callForwardTo,
-          showWorkNumber: s.callShowWorkNumber,
-          greeting: s.voicemailGreeting,
-        });
+        if (!creds) {
+          attempted = false; // creds may appear after setup — retry later
+          return;
+        }
+        // Push token (null when permission/APNs aren't there — fine, the
+        // relay just stays token-less and polling covers freshness).
+        const pushToken = await getPushTokenSafe();
+        const result = await ensureVoiceFunctionCurrent(
+          creds,
+          {
+            forwardTo: s.callForwardTo,
+            showWorkNumber: s.callShowWorkNumber,
+            greeting: s.voicemailGreeting,
+          },
+          pushToken
+        );
         // Failure: retry next foreground (deploys are idempotent).
         if (!result.ok) attempted = false;
+        await setPushRelayActive(result.ok && pushToken != null);
       } catch {
         attempted = false;
       }
     };
     void heal();
+    const unsubPush = subscribePushRefresh();
     const sub = AppState.addEventListener('change', (state) => {
       if (state === 'active') void heal();
     });
-    return () => sub.remove();
+    return () => {
+      unsubPush();
+      sub.remove();
+    };
   }, []);
 
   // Missed-check-in escalation: check whenever the app runs. Foregrounding

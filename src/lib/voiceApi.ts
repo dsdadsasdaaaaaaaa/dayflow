@@ -102,6 +102,11 @@ export interface VoiceEnvVars {
   /** 'true' | 'false'. */
   SHOW_WORK_NUMBER: string;
   VM_GREETING: string;
+  /**
+   * Expo push token for the inbound-SMS relay. OMIT (undefined) to leave the
+   * deployed value untouched — a failed token fetch must never kill push.
+   */
+  EXPO_PUSH_TOKEN?: string;
 }
 
 /** UI-level calling config (mapped onto VoiceEnvVars). */
@@ -204,6 +209,47 @@ const VOICE_FUNCTION_SOURCE = `exports.handler = function (context, event, callb
 };
 `;
 
+/**
+ * The inbound-SMS push relay: Twilio calls this the instant a text arrives;
+ * it fires a CONTENT-FREE Expo push (generic title/body, the sender only in
+ * the tap-through data) so the app updates in seconds instead of on a poll.
+ * Replies with empty TwiML so Twilio neither errors nor auto-responds.
+ */
+const SMS_FUNCTION_SOURCE = `exports.handler = function (context, event, callback) {
+  var twiml = new Twilio.twiml.MessagingResponse();
+  var token = context.EXPO_PUSH_TOKEN || '';
+  if (!token) return callback(null, twiml);
+  var https = require('https');
+  var payload = JSON.stringify({
+    to: token,
+    title: 'DayFlow',
+    body: 'You have a new message.',
+    sound: 'default',
+    // No message content — only the counterparty for tap-through routing.
+    data: { messageThread: event.From || '' },
+  });
+  var req = https.request(
+    {
+      hostname: 'exp.host',
+      path: '/--/api/v2/push/send',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+    },
+    function () { callback(null, twiml); }
+  );
+  req.on('error', function () { callback(null, twiml); });
+  req.setTimeout(5000, function () { req.destroy(); callback(null, twiml); });
+  req.write(payload);
+  req.end();
+};
+`;
+
+const SMS_FUNCTION_FRIENDLY_NAME = 'sms';
+const SMS_FUNCTION_PATH = '/sms';
+
 /** Cheap stable hash (djb2) of the deployed source. */
 function hashSource(src: string): string {
   let h = 5381;
@@ -211,8 +257,8 @@ function hashSource(src: string): string {
   return h.toString(36);
 }
 
-/** Persisted with the deploy state — a mismatch forces a redeploy. */
-const FUNCTION_SOURCE_HASH = hashSource(VOICE_FUNCTION_SOURCE);
+/** Persisted with the deploy state — a mismatch forces a redeploy of BOTH. */
+const FUNCTION_SOURCE_HASH = hashSource(VOICE_FUNCTION_SOURCE + SMS_FUNCTION_SOURCE);
 
 // ---------------------------------------------------------------------------
 // Persisted deploy state (function/number survive across sessions)
@@ -220,9 +266,15 @@ const FUNCTION_SOURCE_HASH = hashSource(VOICE_FUNCTION_SOURCE);
 
 interface PersistedVoice {
   functionSid?: string;
+  /** The inbound-SMS push relay Function. */
+  smsFunctionSid?: string;
   phoneNumberSid?: string;
   /** "https://{domain}/voice" once deployed. */
   voiceUrl?: string;
+  /** "https://{domain}/sms" once the number's SMS webhook points at us. */
+  smsUrl?: string;
+  /** The Expo push token last written into the env vars. */
+  pushToken?: string;
   /** Hash of the source that was deployed — stale hash forces a redeploy. */
   sourceHash?: string;
 }
@@ -312,23 +364,24 @@ function restError(what: string, res: RestResponse): string {
 // Function deploy pipeline (mirrors the twilioAssets photo pipeline)
 // ---------------------------------------------------------------------------
 
-/** Find the 'voice' Function in the service, creating it if needed. */
+/** Find a Function by friendly name in the service, creating it if needed. */
 async function findOrCreateFunction(
   creds: SmsCredentials,
-  serviceSid: string
+  serviceSid: string,
+  friendlyName: string
 ): Promise<string | null> {
   const res = await restGet(creds, `${SERVERLESS}/Services/${serviceSid}/Functions?PageSize=50`);
   const list = res.json?.functions;
   if (res.ok && Array.isArray(list)) {
     for (const item of list) {
       const rec = asRecord(item);
-      if (str(rec, 'friendly_name') === FUNCTION_FRIENDLY_NAME) {
+      if (str(rec, 'friendly_name') === friendlyName) {
         const sid = str(rec, 'sid');
         if (sid) return sid;
       }
     }
   }
-  const form = new URLSearchParams({ FriendlyName: FUNCTION_FRIENDLY_NAME });
+  const form = new URLSearchParams({ FriendlyName: friendlyName });
   const created = await restPostForm(creds, `${SERVERLESS}/Services/${serviceSid}/Functions`, form);
   if (!created.ok) {
     console.warn('[voiceApi]', restError('Function create', created));
@@ -344,7 +397,10 @@ async function findOrCreateFunction(
 async function uploadFunctionVersion(
   creds: SmsCredentials,
   serviceSid: string,
-  functionSid: string
+  functionSid: string,
+  fnPath: string,
+  source: string,
+  stageName: string
 ): Promise<string | null> {
   const url = `${UPLOAD}/Services/${serviceSid}/Functions/${functionSid}/Versions`;
   try {
@@ -354,12 +410,12 @@ async function uploadFunctionVersion(
     if (Platform.OS === 'web') {
       // Web preview: standard multipart with the source as a Blob.
       const form = new FormData();
-      form.append('Path', FUNCTION_PATH);
+      form.append('Path', fnPath);
       form.append('Visibility', 'protected');
       form.append(
         'Content',
-        new Blob([VOICE_FUNCTION_SOURCE], { type: 'application/javascript' }),
-        'voice.js'
+        new Blob([source], { type: 'application/javascript' }),
+        stageName
       );
       const res = await fetch(url, {
         method: 'POST',
@@ -371,15 +427,15 @@ async function uploadFunctionVersion(
     } else {
       // Native: the upload API wants a real file — stage the source in cache.
       const { File, Paths, UploadType } = require('expo-file-system') as typeof import('expo-file-system');
-      const file = new File(Paths.cache, 'dayflow-voice-function.js');
-      file.write(VOICE_FUNCTION_SOURCE);
+      const file = new File(Paths.cache, stageName);
+      file.write(source);
       const result = await file.upload(url, {
         httpMethod: 'POST',
         uploadType: UploadType.MULTIPART,
         fieldName: 'Content',
         mimeType: 'application/javascript',
         headers: { Authorization: authHeader(creds) },
-        parameters: { Path: FUNCTION_PATH, Visibility: 'protected' },
+        parameters: { Path: fnPath, Visibility: 'protected' },
       });
       status = result.status;
       try {
@@ -477,29 +533,43 @@ async function deployVoiceFunction(
   const env = envResult.env;
 
   // The skip is only valid while the deployed source is the current one —
-  // a source change must redeploy even with a persisted functionSid.
+  // a source change must redeploy even with a persisted functionSid. (The
+  // number webhooks — voiceUrl/smsUrl — are configured separately; their
+  // absence must not force rebuilds for messaging-only users.)
   const persisted = await loadPersisted();
   if (
     persisted.functionSid &&
-    persisted.voiceUrl &&
+    persisted.smsFunctionSid &&
     persisted.sourceHash === FUNCTION_SOURCE_HASH
   ) {
     return { ok: true, domainName: env.domainName };
   }
 
-  const functionSid = await findOrCreateFunction(creds, serviceSid);
+  const functionSid = await findOrCreateFunction(creds, serviceSid, FUNCTION_FRIENDLY_NAME);
   if (!functionSid) return fail('Could not set up calling on your Twilio account.');
+  const smsFunctionSid = await findOrCreateFunction(creds, serviceSid, SMS_FUNCTION_FRIENDLY_NAME);
+  if (!smsFunctionSid) return fail('Could not set up message push on your Twilio account.');
 
-  console.log('[voiceApi] uploading function source');
-  const versionSid = await uploadFunctionVersion(creds, serviceSid, functionSid);
+  console.log('[voiceApi] uploading function sources');
+  const versionSid = await uploadFunctionVersion(
+    creds, serviceSid, functionSid, FUNCTION_PATH, VOICE_FUNCTION_SOURCE, 'dayflow-voice-function.js'
+  );
   if (!versionSid) return fail('Could not upload the voice setup. Check your connection.');
+  const smsVersionSid = await uploadFunctionVersion(
+    creds, serviceSid, smsFunctionSid, SMS_FUNCTION_PATH, SMS_FUNCTION_SOURCE, 'dayflow-sms-function.js'
+  );
+  if (!smsVersionSid) return fail('Could not upload the message push setup.');
 
   // A Build replaces ALL live content — re-bundle the hosted photos (and any
-  // other live functions) alongside the new voice version. A failed listing
+  // other live functions) alongside the new versions. A failed listing
   // aborts the build rather than un-deploying whatever it missed.
   const live = await collectLiveVersions(creds, serviceSid);
   if (!live.ok) return live;
-  const functionVersionSids = new Set<string>([versionSid, ...live.functionVersionSids]);
+  const functionVersionSids = new Set<string>([
+    versionSid,
+    smsVersionSid,
+    ...live.functionVersionSids,
+  ]);
 
   console.log(
     '[voiceApi] building with',
@@ -524,7 +594,7 @@ async function deployVoiceFunction(
   const deployed = await createDeployment(creds, serviceSid, env.sid, buildSid);
   if (!deployed) return fail('Could not publish the voice setup.');
 
-  await savePersisted({ functionSid, sourceHash: FUNCTION_SOURCE_HASH });
+  await savePersisted({ functionSid, smsFunctionSid, sourceHash: FUNCTION_SOURCE_HASH });
   return { ok: true, domainName: env.domainName };
 }
 
@@ -563,6 +633,8 @@ export async function setEnvVariables(
     }
 
     for (const [key, value] of Object.entries(vars)) {
+      // undefined = "leave the deployed value alone"; '' = "delete it".
+      if (value === undefined) continue;
       const cur = existing.get(key);
       if (!value) {
         if (cur) {
@@ -584,24 +656,61 @@ export async function setEnvVariables(
   }
 }
 
+/** Point the number's SMS webhook at the push relay ('/sms'). */
+async function configureSmsWebhook(
+  creds: SmsCredentials,
+  domainName: string
+): Promise<VoiceOkResult> {
+  const persisted = await loadPersisted();
+  const pnSid = persisted.phoneNumberSid ?? (await findIncomingNumberSid(creds));
+  if (!pnSid) return fail('Could not find your Twilio number.');
+  const smsUrl = `https://${domainName}${SMS_FUNCTION_PATH}`;
+  const form = new URLSearchParams({ SmsUrl: smsUrl, SmsMethod: 'POST' });
+  const res = await restPostForm(
+    creds,
+    `${API}/Accounts/${encodeURIComponent(creds.accountSid)}/IncomingPhoneNumbers/${pnSid}.json`,
+    form
+  );
+  if (!res.ok) return fail(restError('SMS webhook', res));
+  await savePersisted({ phoneNumberSid: pnSid, smsUrl });
+  return { ok: true };
+}
+
 /**
- * Self-healing rollout: if the voice function source shipped in this app
- * version differs from what's deployed on the user's Twilio account, redeploy
- * it and refresh the env vars — no manual "Save changes" required. Cheap when
- * current (one AsyncStorage read). Call on app foreground when calling is on.
+ * Self-healing rollout: if the serverless source shipped in this app version
+ * differs from what's deployed on the user's Twilio account — or the SMS
+ * push webhook / push token aren't wired yet — fix all of it silently. No
+ * manual "Save changes" required, ever. Cheap when current (one AsyncStorage
+ * read). Call on app foreground whenever messaging or calling is set up.
  */
 export async function ensureVoiceFunctionCurrent(
   creds: SmsCredentials,
-  cfg: CallingConfig
+  cfg: CallingConfig,
+  pushToken?: string | null
 ): Promise<VoiceOkResult> {
   try {
     const persisted = await loadPersisted();
-    if (persisted.voiceUrl && persisted.sourceHash === FUNCTION_SOURCE_HASH) {
-      return { ok: true };
-    }
+    const deployCurrent =
+      persisted.functionSid &&
+      persisted.smsFunctionSid &&
+      persisted.sourceHash === FUNCTION_SOURCE_HASH;
+    const tokenCurrent = pushToken == null || persisted.pushToken === pushToken;
+    if (deployCurrent && persisted.smsUrl && tokenCurrent) return { ok: true };
+
     const deployed = await deployVoiceFunction(creds);
     if (!deployed.ok) return deployed;
-    return setEnvVariables(creds, varsFor(cfg));
+
+    if (!persisted.smsUrl) {
+      const hooked = await configureSmsWebhook(creds, deployed.domainName);
+      if (!hooked.ok) return hooked;
+    }
+
+    const vars = varsFor(cfg);
+    if (pushToken) vars.EXPO_PUSH_TOKEN = pushToken;
+    const set = await setEnvVariables(creds, vars);
+    if (!set.ok) return set;
+    if (pushToken) await savePersisted({ pushToken });
+    return { ok: true };
   } catch (e) {
     return fail(e instanceof Error ? e.message : 'Voice update failed.');
   }

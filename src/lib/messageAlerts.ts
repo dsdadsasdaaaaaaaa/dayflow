@@ -4,6 +4,7 @@ import * as TaskManager from 'expo-task-manager';
 import { Platform } from 'react-native';
 import { useClientMeta, isPhoneBlocked } from '../store/clientMeta';
 import { mergeMessage, useMessages } from '../store/messages';
+import { isPushRelayActive } from './push';
 import { maybeEscalate } from './safety';
 import { listRecentSms } from './smsApi';
 import { loadSmsCredentials } from './smsCredentials';
@@ -75,6 +76,11 @@ async function notifyNewInbound(): Promise<void> {
 
   // Merge first so opening the app shows them immediately.
   merge();
+
+  // When the Twilio-side push relay is live, the phone was already notified
+  // the moment each text arrived — a second local notification here would be
+  // a duplicate. Merge (above) still happened; just stay quiet.
+  if (await isPushRelayActive()) return;
 
   // Deliberately discreet: no sender, no preview — the lock screen only ever
   // says that messages exist. One combined notification, not one per text.

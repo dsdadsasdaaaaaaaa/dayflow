@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import { useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
-import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { tapHaptic } from '../../lib/haptics';
 import { clientMetaKey, useClientMeta } from '../../store/clientMeta';
 import { useMessages } from '../../store/messages';
@@ -55,20 +55,33 @@ export function MessageButton({ client, onNeedPhone }: Props) {
     }, NOTICE_MS);
   };
 
+  const openTelegram = () =>
+    router.push(`/thread?number=${encodeURIComponent(`tgc:${telegram}`)}`);
+  const openSms = () => router.push(`/thread?number=${encodeURIComponent(phone)}`);
+
   const onPress = async () => {
     tapHaptic();
     if (!phone) {
       // Telegram-linked but no phone: their thread is the messaging home —
       // don't dead-end into the phone input.
       if (telegram) {
-        router.push(`/thread?number=${encodeURIComponent(`tgc:${telegram}`)}`);
+        openTelegram();
         return;
       }
       onNeedPhone();
       return;
     }
     if (configured) {
-      router.push(`/thread?number=${encodeURIComponent(phone)}`);
+      // One profile, two channels — let the user pick where this goes.
+      if (telegram) {
+        Alert.alert('Message via', undefined, [
+          { text: 'Text message', onPress: openSms },
+          { text: 'Telegram', onPress: openTelegram },
+          { text: 'Cancel', style: 'cancel' },
+        ]);
+        return;
+      }
+      openSms();
       return;
     }
     // TextNow handoff: the number rides the clipboard; opening the app is

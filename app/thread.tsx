@@ -232,7 +232,7 @@ export default function ThreadScreen() {
     useCallback(() => {
       if (isTelegram || !number) return;
       void pollThread(number);
-      const id = setInterval(() => void pollThread(number), 4000);
+      const id = setInterval(() => void pollThread(number), 2500);
       return () => clearInterval(id);
     }, [isTelegram, number, pollThread])
   );

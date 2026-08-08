@@ -51,6 +51,7 @@ import { renameClientEverywhere } from '../src/lib/renameClient';
 import { clientMetaKey, effectiveStatus, useClientMeta } from '../src/store/clientMeta';
 import { useMeetingSession } from '../src/store/meetingSession';
 import { useSettings } from '../src/store/settings';
+import { useTelegram } from '../src/store/telegramAccount';
 import { showUndo } from '../src/store/undo';
 import { useTasks } from '../src/store/tasks';
 import { SPACING, taskColor, useTheme } from '../src/theme';
@@ -85,6 +86,7 @@ export default function ClientDetailScreen() {
   const callForwardTo = useSettings((s) => s.settings.callForwardTo);
   const metaMap = useClientMeta((s) => s.meta);
   const setStatus = useClientMeta((s) => s.setStatus);
+  const setTelegram = useClientMeta((s) => s.setTelegram);
 
   const profiles = useMemo(() => clientProfiles(tasks, log), [tasks, log]);
   const profile = useMemo(() => {
@@ -102,6 +104,12 @@ export default function ClientDetailScreen() {
   const blocked = status === 'blocked';
   /** Linked phone number (E.164) — gates the Call action. */
   const phone = metaMap[clientMetaKey(displayName)]?.phone ?? '';
+  /** Linked Telegram chat id — this profile is home to BOTH channels. */
+  const telegramChat = metaMap[clientMetaKey(displayName)]?.telegram ?? '';
+  const tgChats = useTelegram((s) => s.chats);
+  const tgChatTitle = telegramChat
+    ? (tgChats[telegramChat]?.title ?? 'Telegram chat')
+    : '';
 
   /**
    * Recent past occurrences for this client, newest first, capped at 20:
@@ -418,6 +426,47 @@ export default function ClientDetailScreen() {
           ) : null}
         </View>
 
+        {/* Telegram — one profile holds both channels */}
+        {telegramChat ? (
+          <View>
+            <SectionLabel>Telegram</SectionLabel>
+            <Pressable
+              onPress={() => {
+                tapHaptic();
+                router.push(`/thread?number=${encodeURIComponent(`tgc:${telegramChat}`)}`);
+              }}
+              onLongPress={() => {
+                Alert.alert(
+                  'Unlink Telegram?',
+                  `The chat stays in Messages — it just won't be linked to ${displayName} anymore.`,
+                  [
+                    { text: 'Cancel', style: 'cancel' },
+                    {
+                      text: 'Unlink',
+                      style: 'destructive',
+                      onPress: () => setTelegram(displayName, null),
+                    },
+                  ]
+                );
+              }}
+              accessibilityRole="button"
+              accessibilityLabel={`Open ${displayName}'s Telegram chat`}
+              accessibilityHint="Long press to unlink"
+              style={({ pressed }) => [
+                styles.telegramRow,
+                { backgroundColor: theme.surface },
+                pressed && { opacity: 0.85 },
+              ]}
+            >
+              <Ionicons name="paper-plane-outline" size={17} color={theme.accent} />
+              <Text style={[styles.telegramLabel, { color: theme.text }]} numberOfLines={1}>
+                {tgChatTitle}
+              </Text>
+              <Ionicons name="chevron-forward" size={15} color={theme.textTertiary} />
+            </Pressable>
+          </View>
+        ) : null}
+
         {/* Notes */}
         <View>
           <SectionLabel>Notes</SectionLabel>
@@ -712,6 +761,15 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     marginTop: SPACING.sm,
   },
+  telegramRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  telegramLabel: { flex: 1, fontSize: 14, fontWeight: '600' },
   callBtnLabel: {
     fontSize: 14,
     fontWeight: '700',
