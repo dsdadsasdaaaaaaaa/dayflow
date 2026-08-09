@@ -811,6 +811,13 @@ function FailedBubble({
       <Text style={[styles.failedCaption, { color: theme.danger }]}>
         Not delivered · Tap to retry
       </Text>
+      {entry.reason ? (
+        // The WHY — carrier filtering, STOP list, etc. Without this, retrying
+        // an unfixable message looks like an app bug.
+        <Text style={[styles.failedReason, { color: theme.textSecondary }]}>
+          {entry.reason}
+        </Text>
+      ) : null}
     </View>
   );
 }
@@ -904,6 +911,14 @@ const styles = StyleSheet.create({
   },
   failedBody: { fontSize: 16, lineHeight: 21, color: '#FFFFFF' },
   failedCaption: { fontSize: 11, fontWeight: '500', marginTop: 3, marginHorizontal: 4 },
+  failedReason: {
+    fontSize: 11,
+    lineHeight: 15,
+    marginTop: 1,
+    marginHorizontal: 4,
+    maxWidth: 260,
+    textAlign: 'right',
+  },
   photoProgress: {
     fontSize: 12,
     fontWeight: '500',

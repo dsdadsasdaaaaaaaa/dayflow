@@ -24,6 +24,8 @@ export interface SmsMessage {
    * media list hasn't been fetched yet (it's re-tried on the next sync).
    */
   mediaUrls?: string[];
+  /** Twilio error code when status is failed/undelivered (30007 = filtered). */
+  errorCode?: number;
 }
 
 interface TwilioMessageRecord {
@@ -37,6 +39,9 @@ interface TwilioMessageRecord {
   status?: string;
   /** Twilio returns this as a string, e.g. "0" or "2". */
   num_media?: string | null;
+  /** Set on failed/undelivered messages, e.g. 30007 (carrier filtering). */
+  error_code?: number | null;
+  error_message?: string | null;
 }
 
 interface TwilioMediaRecord {
@@ -100,7 +105,7 @@ function toSmsMessage(rec: TwilioMessageRecord, ownNumber: string): SmsMessage |
   const counterparty = inbound ? from : to;
   if (!counterparty || counterparty === own) return null;
   const when = rec.date_sent ?? rec.date_created;
-  return {
+  const msg: SmsMessage = {
     sid: rec.sid,
     counterparty,
     direction: inbound ? 'in' : 'out',
@@ -108,6 +113,48 @@ function toSmsMessage(rec: TwilioMessageRecord, ownNumber: string): SmsMessage |
     sentAt: when ? Date.parse(when) : Date.now(),
     status: rec.status ?? 'unknown',
   };
+  if (typeof rec.error_code === 'number') msg.errorCode = rec.error_code;
+  return msg;
+}
+
+/** Thrown by sendSms with Twilio's numeric error code attached. */
+export class SmsSendError extends Error {
+  code?: number;
+  constructor(message: string, code?: number) {
+    super(message);
+    this.code = code;
+  }
+}
+
+/**
+ * Human explanation for a failed send. Content filtering is the one users
+ * hit most — the same text failing every retry while different text sends
+ * is exactly what carrier filtering looks like, and without the reason the
+ * retry button is a lie.
+ */
+export function explainSmsFailure(code?: number, fallback?: string): string {
+  switch (code) {
+    case 30007:
+    case 30008:
+      return 'Filtered by the carrier — reword the message and try again. Finishing A2P registration (Twilio console) stops most filtering.';
+    case 30034:
+    case 30032:
+      return 'US carriers are blocking this number until its A2P registration is finished in the Twilio console.';
+    case 21610:
+      return 'This person texted STOP to your number. They must text START before anything can reach them.';
+    case 21617:
+      return 'Too long for one message — shorten it and try again.';
+    case 30006:
+      return 'This looks like a landline — it can’t receive texts.';
+    case 30003:
+      return 'Their phone is unreachable or switched off — try again later.';
+    case 30005:
+      return 'This number looks disconnected or invalid.';
+    case 63038:
+      return 'Daily message limit reached on your Twilio account — try again tomorrow or finish A2P registration.';
+    default:
+      return fallback && fallback.trim() ? fallback : 'Not delivered.';
+  }
 }
 
 /**
@@ -170,9 +217,15 @@ export async function sendSms(
     },
     body: form.toString(),
   });
-  const json = (await res.json()) as TwilioMessageRecord & { message?: string };
+  const json = (await res.json()) as TwilioMessageRecord & {
+    message?: string;
+    code?: number;
+  };
   if (!res.ok) {
-    throw new Error(json.message ?? `Send failed (${res.status})`);
+    throw new SmsSendError(
+      json.message ?? `Send failed (${res.status})`,
+      typeof json.code === 'number' ? json.code : undefined
+    );
   }
   const msg = toSmsMessage(json, creds.fromNumber);
   if (!msg) throw new Error('Send succeeded but the response was unreadable.');

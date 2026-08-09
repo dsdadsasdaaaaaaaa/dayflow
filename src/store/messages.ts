@@ -6,8 +6,10 @@ import {
   cancelScheduledSms,
   fetchSmsStatus,
   listOlderSms,
+  explainSmsFailure,
   listInboundFrom,
   listRecentSms,
+  SmsSendError,
   scheduleSms,
   sendSms,
   type SmsMessage,
@@ -37,6 +39,8 @@ export interface OutboxEntry {
   body: string;
   mediaUrls?: string[];
   failedAt: number;
+  /** WHY it failed, human-readable (carrier filtering, STOP list…). */
+  reason?: string;
 }
 
 /** Sync window slack: re-fetch this far below the high-water mark. */
@@ -169,10 +173,12 @@ function withOutboxEntry(
   outbox: Record<string, OutboxEntry>,
   to: string,
   body: string,
-  mediaUrls?: string[]
+  mediaUrls?: string[],
+  reason?: string
 ): Record<string, OutboxEntry> {
   const entry: OutboxEntry = { localId: uid(), to: normalizePhone(to), body, failedAt: Date.now() };
   if (mediaUrls && mediaUrls.length > 0) entry.mediaUrls = [...mediaUrls];
+  if (reason) entry.reason = reason;
   return { ...outbox, [entry.localId]: entry };
 }
 
@@ -308,8 +314,9 @@ export const useMessages = create<MessagesState>()(
               if (!updated) return;
               if (FAILED_SEND.has(updated.status)) {
                 // The carrier rejected it after the fact — move the message
-                // into the retry outbox. Both timers can land here, so
-                // hiddenSids doubles as the "already moved" guard.
+                // into the retry outbox WITH the real reason. Both timers can
+                // land here, so hiddenSids doubles as the "already moved"
+                // guard.
                 set((s) => {
                   if (s.hiddenSids[updated.sid]) return {};
                   const messages = { ...s.messages };
@@ -322,7 +329,8 @@ export const useMessages = create<MessagesState>()(
                       s.outbox,
                       updated.counterparty,
                       updated.body,
-                      prev?.mediaUrls ?? updated.mediaUrls
+                      prev?.mediaUrls ?? updated.mediaUrls,
+                      explainSmsFailure(updated.errorCode)
                     ),
                   };
                 });
@@ -337,10 +345,14 @@ export const useMessages = create<MessagesState>()(
           }
           return true;
         } catch (e) {
+          const reason = explainSmsFailure(
+            e instanceof SmsSendError ? e.code : undefined,
+            e instanceof Error ? e.message : 'Send failed'
+          );
           set((s) => ({
-            lastError: e instanceof Error ? e.message : 'Send failed',
+            lastError: reason,
             // Keep the failed message retryable instead of just erroring.
-            outbox: withOutboxEntry(s.outbox, target, body, mediaUrls),
+            outbox: withOutboxEntry(s.outbox, target, body, mediaUrls, reason),
           }));
           return false;
         } finally {
