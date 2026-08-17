@@ -26,6 +26,12 @@ export interface SmsMessage {
   mediaUrls?: string[];
   /** Twilio error code when status is failed/undelivered (30007 = filtered). */
   errorCode?: number;
+  /**
+   * Attachment count from the message record. > 0 with no mediaUrls means
+   * the Media subresource hasn't been resolved yet (cap/transient failure) —
+   * render a placeholder and backfill, never a blank bubble.
+   */
+  numMedia?: number;
 }
 
 interface TwilioMessageRecord {
@@ -114,6 +120,8 @@ function toSmsMessage(rec: TwilioMessageRecord, ownNumber: string): SmsMessage |
     status: rec.status ?? 'unknown',
   };
   if (typeof rec.error_code === 'number') msg.errorCode = rec.error_code;
+  const nm = numMediaOf(rec);
+  if (nm > 0) msg.numMedia = nm;
   return msg;
 }
 
@@ -373,24 +381,28 @@ export async function listOlderSms(
 }
 
 /**
- * Live-thread poll: ONE query for today's inbound from a single counterparty.
+ * Live-thread poll: this counterparty's recent traffic, BOTH directions
+ * (outbound too, so scheduled sends and other-device sends appear live).
  * Cheap enough to run every few seconds while a conversation is open on
- * screen, so their reply appears before the user finishes typing theirs.
- * Day-granular filter → results overlap already-cached messages; callers
- * merge by SID (idempotent).
+ * screen. The floor is YESTERDAY's UTC date — a today-only floor goes blind
+ * to messages sent just before UTC midnight (evening in the US). Day-granular
+ * filter → results overlap cached messages; callers merge by SID.
  */
-export async function listInboundFrom(
+export async function listThreadToday(
   creds: SmsCredentials,
   counterparty: string,
-  pageSize = 10,
+  pageSize = 20,
   skipMediaSids?: ReadonlySet<string>
 ): Promise<SmsMessage[]> {
   const own = encodeURIComponent(normalizePhone(creds.fromNumber));
   const other = encodeURIComponent(normalizePhone(counterparty));
-  const floor = `&DateSent%3E=${isoDateOf(Date.now())}`;
-  const url = `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&To=${own}&From=${other}${floor}`;
-  const records = await fetchMessagePages(creds, url, 1);
-  const { merged, needsMedia } = mergeRecords(records, creds.fromNumber, skipMediaSids);
+  const floor = `&DateSent%3E=${isoDateOf(Date.now() - 24 * 3600_000)}`;
+  const urls = [
+    `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&To=${own}&From=${other}${floor}`,
+    `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&From=${own}&To=${other}${floor}`,
+  ];
+  const results = await Promise.all(urls.map((u) => fetchMessagePages(creds, u, 1)));
+  const { merged, needsMedia } = mergeRecords(results.flat(), creds.fromNumber, skipMediaSids);
   await resolveMediaFor(creds, needsMedia);
   return merged;
 }

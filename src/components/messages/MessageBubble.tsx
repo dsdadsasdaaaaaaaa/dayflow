@@ -22,6 +22,8 @@ export interface BubbleMessage {
   status?: string;
   /** MMS attachments — Twilio media URLs (SMS channel). */
   mediaUrls?: string[];
+  /** MMS attachment count — >0 with no mediaUrls = unresolved placeholder. */
+  numMedia?: number;
   /** Telegram photo attachment — TDLib file id. */
   photoFileId?: number;
   /** Telegram voice note — TDLib file id + duration. */
@@ -73,7 +75,10 @@ export function MessageBubble({ msg, showStatus = false, pending, onPressPhoto }
   const mediaUrls = msg.mediaUrls ?? [];
   const hasBody = msg.body.trim().length > 0;
   const hasAttachment =
-    mediaUrls.length > 0 || msg.photoFileId != null || msg.voiceFileId != null;
+    mediaUrls.length > 0 ||
+    (msg.numMedia ?? 0) > 0 ||
+    msg.photoFileId != null ||
+    msg.voiceFileId != null;
 
   const [showTime, setShowTime] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -116,6 +121,21 @@ export function MessageBubble({ msg, showStatus = false, pending, onPressPhoto }
       {mediaUrls.map((url) => (
         <MediaPhoto key={url} url={url} onPress={onPressPhoto} onLongPress={photoLongPress} />
       ))}
+      {mediaUrls.length === 0 && (msg.numMedia ?? 0) > 0 ? (
+        // Attachment exists but its URL hasn't resolved yet (per-sync cap or
+        // transient failure) — a photo placeholder, never a blank bubble.
+        // Thread focus + the live poll backfill these automatically.
+        <View
+          style={[styles.photoFrame, { backgroundColor: theme.surface }]}
+          accessible
+          accessibilityLabel="Photo — still loading from the carrier"
+        >
+          <View style={styles.photoPlaceholder}>
+            <ActivityIndicator size="small" color={theme.textTertiary} />
+            <Text style={[styles.photoHint, { color: theme.textTertiary }]}>Photo</Text>
+          </View>
+        </View>
+      ) : null}
       {msg.photoFileId != null ? (
         <TelegramPhoto
           fileId={msg.photoFileId}
@@ -180,7 +200,10 @@ export function MessageBubble({ msg, showStatus = false, pending, onPressPhoto }
   );
 }
 
-/** One photo attachment: cached image, tap to view full screen. */
+/**
+ * One photo attachment: cached image, tap to view full screen. A failed load
+ * becomes a tap-to-retry affordance instead of a dead gray box.
+ */
 function MediaPhoto({
   url,
   onPress,
@@ -191,29 +214,45 @@ function MediaPhoto({
   onLongPress?: () => void;
 }) {
   const theme = useTheme();
-  const { dataUri, loading } = useMediaDataUri(url);
+  const { uri, loading, error, retry } = useMediaDataUri(url);
 
   return (
     <Pressable
-      onPress={() => onPress?.(url)}
+      onPress={() => {
+        if (uri) onPress?.(uri);
+        else if (error) retry();
+      }}
       onLongPress={onLongPress}
-      disabled={!onPress || !dataUri}
+      disabled={loading || (!uri && !error) || (!onPress && !error)}
       accessibilityRole="button"
-      accessibilityLabel="Photo attachment"
-      accessibilityHint="Opens the photo. Long press for the time sent."
+      accessibilityLabel={error ? 'Photo failed to load' : 'Photo attachment'}
+      accessibilityHint={
+        error ? 'Tap to try again.' : 'Opens the photo. Long press for the time sent.'
+      }
       style={({ pressed }) => [
         styles.photoFrame,
         { backgroundColor: theme.surface, opacity: pressed ? 0.85 : 1 },
       ]}
     >
-      {dataUri ? (
-        <Image source={{ uri: dataUri }} style={styles.photo} resizeMode="cover" />
+      {uri ? (
+        <Image source={{ uri }} style={styles.photo} resizeMode="cover" />
       ) : (
         <View style={styles.photoPlaceholder}>
           {loading ? (
             <ActivityIndicator size="small" color={theme.textTertiary} />
           ) : (
-            <Ionicons name="image-outline" size={22} color={theme.textTertiary} />
+            <>
+              <Ionicons
+                name={error ? 'refresh-outline' : 'image-outline'}
+                size={22}
+                color={error ? theme.accent : theme.textTertiary}
+              />
+              {error ? (
+                <Text style={[styles.photoHint, { color: theme.textSecondary }]}>
+                  Tap to retry
+                </Text>
+              ) : null}
+            </>
           )}
         </View>
       )}
@@ -223,6 +262,8 @@ function MediaPhoto({
 
 /** Resolved Telegram photo uris by TDLib file id — instant on re-render. */
 const tgPhotoUriCache = new Map<number, string>();
+/** Audio session configured for silent-switch playback (once per session). */
+let audioModeSet = false;
 
 /**
  * Does a local file uri still exist? TDLib's storage optimizer may delete
@@ -384,6 +425,20 @@ function TelegramVoice({
       const path = await tdResolvePhoto(fileId); // generic TDLib file download
       if (!path) throw new Error('download failed');
       const audio = await import('expo-audio');
+      // Voice notes must play through the mute switch — this phone lives on
+      // silent. Set the playback category once per session.
+      if (!audioModeSet) {
+        audioModeSet = true;
+        await audio.setAudioModeAsync({ playsInSilentMode: true }).catch(() => {
+          audioModeSet = false;
+        });
+      }
+      // Replays must not leak native players — tear down the old one first.
+      try {
+        playerRef.current?.remove();
+      } catch {
+        // Already gone.
+      }
       const player = audio.createAudioPlayer(
         path.startsWith('file://') ? path : `file://${path}`
       );
@@ -471,5 +526,7 @@ const styles = StyleSheet.create({
     height: 120,
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 5,
   },
+  photoHint: { fontSize: 11, fontWeight: '600' },
 });

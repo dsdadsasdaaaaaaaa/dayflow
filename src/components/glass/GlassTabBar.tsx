@@ -102,7 +102,11 @@ export function GlassTabBar({ state, descriptors, navigation }: TabBarProps) {
             style={styles.tab}
             accessibilityRole="tab"
             accessibilityState={{ selected: focused }}
-            accessibilityLabel={label}
+            accessibilityLabel={
+              route.name === 'messages' && badgeCount > 0
+                ? `${label}, ${badgeCount} unread`
+                : label
+            }
           >
             <View>
               <Ionicons

@@ -4,16 +4,18 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import { uid } from '../lib/id';
 import {
   cancelScheduledSms,
+  explainSmsFailure,
+  fetchMediaUrls,
   fetchSmsStatus,
   listOlderSms,
-  explainSmsFailure,
-  listInboundFrom,
   listRecentSms,
+  listThreadToday,
   SmsSendError,
   scheduleSms,
   sendSms,
   type SmsMessage,
 } from '../lib/smsApi';
+import { primeMediaCache } from '../lib/mediaCache';
 import { loadSmsCredentials, normalizePhone } from '../lib/smsCredentials';
 import { uploadPhotoAsset } from '../lib/twilioAssets';
 import { PERSIST_VERSION, migrateStore } from './persistVersion';
@@ -142,6 +144,8 @@ interface MessagesState {
    * Runs every few seconds while their conversation is open on screen.
    */
   pollThread: (counterparty: string) => Promise<void>;
+  /** Bounded retry of unresolved photo attachments for one open thread. */
+  backfillThreadMedia: (counterparty: string) => Promise<void>;
   /** Persist an unsent composer draft per thread ('' clears). Works for
    * Telegram counterparties ('tgc:…') too — one map for both channels. */
   setThreadDraft: (counterparty: string, text: string) => void;
@@ -252,6 +256,19 @@ export const useMessages = create<MessagesState>()(
             mark != null && fetched.length >= PAGE_SIZE * SYNC_PAGES_PER_DIRECTION;
           set((s) => {
             if (s.generation !== gen) return s; // cleared mid-flight
+            // Idle syncs that fetched nothing new must be free: rebuilding
+            // (and re-persisting) the whole unbounded map every 15s costs
+            // real scroll jank for zero information.
+            const idle =
+              fetched.every((m) => {
+                const prev = s.messages[m.sid];
+                return (
+                  prev != null &&
+                  prev.status === m.status &&
+                  (prev.mediaUrls?.length ?? 0) >= (m.mediaUrls?.length ?? 0)
+                );
+              }) && Object.keys(s.scheduled).length === 0;
+            if (idle) return s;
             const messages = { ...s.messages };
             for (const m of fetched) mergeMessage(messages, m);
             // Reconcile scheduled sends: a fetched record still "scheduled"
@@ -299,17 +316,21 @@ export const useMessages = create<MessagesState>()(
           return false;
         }
         set({ sendingTo: target, lastError: null });
+        const gen = get().generation;
         try {
           const sent = await sendSms(creds, target, body, mediaUrls);
           set((s) => {
+            if (s.generation !== gen) return s;
             const messages = { ...s.messages };
             mergeMessage(messages, sent);
             return { messages };
           });
           // Twilio answers "queued" immediately; settle the real status with
           // two cheap single-message checks instead of a full history sync.
+          // Both timers honor the erase fence — a wiped store stays wiped.
           for (const delay of [4000, 15000]) {
             setTimeout(async () => {
+              if (get().generation !== gen) return;
               const updated = await fetchSmsStatus(creds, sent.sid);
               if (!updated) return;
               if (FAILED_SEND.has(updated.status)) {
@@ -318,7 +339,7 @@ export const useMessages = create<MessagesState>()(
                 // land here, so hiddenSids doubles as the "already moved"
                 // guard.
                 set((s) => {
-                  if (s.hiddenSids[updated.sid]) return {};
+                  if (s.generation !== gen || s.hiddenSids[updated.sid]) return {};
                   const messages = { ...s.messages };
                   const prev = messages[updated.sid];
                   delete messages[updated.sid];
@@ -336,6 +357,7 @@ export const useMessages = create<MessagesState>()(
                 });
               } else {
                 set((s) => {
+                  if (s.generation !== gen) return s;
                   const messages = { ...s.messages };
                   mergeMessage(messages, updated);
                   return { messages };
@@ -375,6 +397,9 @@ export const useMessages = create<MessagesState>()(
             set({ lastError: hosted.error });
             return false;
           }
+          // The photo already exists locally — render the bubble from the
+          // local file instead of re-downloading what we just uploaded.
+          primeMediaCache(hosted.url, localUri);
           set({ photoSending: 'sending' });
           return await get().send(to, '', [hosted.url]);
         } catch (e) {
@@ -404,17 +429,17 @@ export const useMessages = create<MessagesState>()(
               .map((m) => m.sid)
           );
           const fetched = await listOlderSms(creds, key, oldest.sentAt, PAGE_SIZE, knownMediaSids);
-          // Day-granular DateSent<= overlaps the oldest cached day, so only
-          // genuinely NEW sids count toward "was there more history?".
-          const existing = get().messages;
-          const hidden = get().hiddenSids;
-          const fresh = fetched.filter((m) => !existing[m.sid] && !hidden[m.sid]).length;
+          // "More history?" keys on RAW returned volume, not new-SID count —
+          // the day-granular overlap means most records re-fetch the cached
+          // day, and counting only fresh sids latched this false while whole
+          // months of older history still existed.
+          const hasMore = fetched.length >= PAGE_SIZE;
           set((s) => {
             const messages = { ...s.messages };
             for (const m of fetched) mergeMessage(messages, m);
             return {
               messages,
-              hasMoreOlder: { ...s.hasMoreOlder, [key]: fresh >= PAGE_SIZE },
+              hasMoreOlder: { ...s.hasMoreOlder, [key]: hasMore },
             };
           });
         } catch (e) {
@@ -504,20 +529,75 @@ export const useMessages = create<MessagesState>()(
               .filter((m) => m.mediaUrls && m.mediaUrls.length > 0)
               .map((m) => m.sid)
           );
-          const fetched = await listInboundFrom(creds, counterparty, 10, knownMediaSids);
-          const hasNew = fetched.some((m) => !get().messages[m.sid]);
-          if (!hasNew) return;
+          const fetched = await listThreadToday(creds, counterparty, 20, knownMediaSids);
+          // "Changed" must count RESOLVED MEDIA and settled statuses, not
+          // just unseen SIDs — an MMS often lists before its media exists,
+          // and the first version of this gate threw the photo away on every
+          // later tick (the "photos never appear in the open thread" bug).
+          const cur = get().messages;
+          const changed = fetched.some((m) => {
+            const prev = cur[m.sid];
+            if (!prev) return true;
+            if (m.mediaUrls?.length && !prev.mediaUrls?.length) return true;
+            return m.status !== prev.status;
+          });
+          if (!changed) return;
           set((s) => {
             if (s.generation !== gen) return s;
             const messages = { ...s.messages };
             for (const m of fetched) mergeMessage(messages, m);
+            // Outbound records also reconcile scheduled sends live — a
+            // delivered scheduled message leaves the banner immediately.
+            let scheduled = s.scheduled;
+            for (const m of fetched) {
+              if (s.scheduled[m.sid] && m.status !== 'scheduled') {
+                if (scheduled === s.scheduled) scheduled = { ...scheduled };
+                delete scheduled[m.sid];
+              }
+            }
             // lastSyncAt drives the thread screen's mark-read effect, so the
             // just-arrived message doesn't linger as "unread" while visible.
-            return { messages, lastSyncAt: Date.now() };
+            return { messages, scheduled, lastSyncAt: Date.now() };
           });
         } catch {
           // Poll misses are fine — the next tick (or full sync) catches up.
         }
+      },
+
+      backfillThreadMedia: async (counterparty) => {
+        // Photos whose Media.json was never resolved (over the per-sync cap,
+        // or a transient failure) get one bounded retry when their thread is
+        // actually being looked at — newest first.
+        const creds = await loadSmsCredentials();
+        if (!creds) return;
+        const gen = get().generation;
+        const key = normalizePhone(counterparty);
+        const missing = Object.values(get().messages)
+          .filter(
+            (m) =>
+              m.counterparty === key &&
+              (m.numMedia ?? 0) > 0 &&
+              (!m.mediaUrls || m.mediaUrls.length === 0)
+          )
+          .sort((a, b) => b.sentAt - a.sentAt)
+          .slice(0, 10);
+        if (missing.length === 0) return;
+        const resolved = await Promise.all(
+          missing.map(async (m) => ({ sid: m.sid, urls: await fetchMediaUrls(creds, m.sid) }))
+        );
+        set((s) => {
+          if (s.generation !== gen) return s;
+          const messages = { ...s.messages };
+          let changed = false;
+          for (const { sid, urls } of resolved) {
+            const prev = messages[sid];
+            if (prev && urls && urls.length > 0) {
+              messages[sid] = { ...prev, mediaUrls: urls };
+              changed = true;
+            }
+          }
+          return changed ? { messages } : s;
+        });
       },
 
       setThreadDraft: (counterparty, text) =>

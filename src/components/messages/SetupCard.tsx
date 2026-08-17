@@ -25,7 +25,7 @@ export function SetupCard() {
       <Pressable
         onPress={() => {
           tapHaptic();
-          router.push('/settings');
+          router.push('/settings-messaging');
         }}
         accessibilityRole="button"
         style={({ pressed }) => [
@@ -40,7 +40,7 @@ export function SetupCard() {
         <View style={styles.optionText}>
           <Text style={[styles.optionTitle, { color: theme.text }]}>Connect a number</Text>
           <Text style={[styles.optionCaption, { color: theme.textSecondary }]}>
-            A $1/mo number from Twilio, or port your own — set up in Settings → Messaging
+            A $1/mo number from Twilio, or port your own — set up in Settings → Business → Messaging & calls
           </Text>
         </View>
         <Ionicons name="chevron-forward" size={17} color={theme.textTertiary} />

@@ -1,6 +1,6 @@
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ScrollView, StyleSheet, View } from 'react-native';
+import { AppState, ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { EmptyState } from '../../src/components/EmptyState';
 import { Fab } from '../../src/components/Fab';
@@ -129,6 +129,15 @@ export default function TodayScreen() {
   );
 
   // ── Device-calendar events for the selected day ───────────────────────────
+  // Re-fetched on every foreground too: events added in the Calendar app
+  // while DayFlow was backgrounded must not be invisible until a day switch.
+  const [calendarRefresh, setCalendarRefresh] = useState(0);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') setCalendarRefresh((n) => n + 1);
+    });
+    return () => sub.remove();
+  }, []);
   useEffect(() => {
     let alive = true;
     if (!settings.showCalendarEvents) {
@@ -141,7 +150,7 @@ export default function TodayScreen() {
     return () => {
       alive = false;
     };
-  }, [selectedDay, settings.showCalendarEvents, settings.hiddenCalendarIds]);
+  }, [selectedDay, settings.showCalendarEvents, settings.hiddenCalendarIds, calendarRefresh]);
 
   // ── Day computations (memoized) ───────────────────────────────────────────
   const dayData = useMemo(() => {

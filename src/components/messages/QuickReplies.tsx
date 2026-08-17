@@ -191,7 +191,7 @@ function PhotoChip({
   onPress?: (photo: PhotoReply) => void;
 }) {
   const theme = useTheme();
-  const { dataUri } = useMediaDataUri(photo.url);
+  const { uri } = useMediaDataUri(photo.url);
 
   return (
     <Pressable
@@ -206,8 +206,8 @@ function PhotoChip({
         { backgroundColor: theme.surface, opacity: pressed ? 0.8 : 1 },
       ]}
     >
-      {dataUri ? (
-        <Image source={{ uri: dataUri }} style={styles.photoThumb} />
+      {uri ? (
+        <Image source={{ uri }} style={styles.photoThumb} />
       ) : (
         <View style={[styles.photoThumb, { backgroundColor: theme.surface }]} />
       )}

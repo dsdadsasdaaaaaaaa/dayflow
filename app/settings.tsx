@@ -79,7 +79,7 @@ function formatHour(h: number): string {
  * by lib/mediaCache) and downloaded voicemail audio (voicemail-*.mp3, written
  * by lib/voiceApi).
  */
-const CACHED_MEDIA_RE = /^(dayflow-mms-.+\.b64|voicemail-.+\.mp3)$/;
+const CACHED_MEDIA_RE = /^(dayflow-mms-.+|voicemail-.+\.mp3)$/;
 
 /** Sweep cached photos/voicemails out of the cache dir. Best-effort. */
 function deleteCachedMediaFiles(): void {

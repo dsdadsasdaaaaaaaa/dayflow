@@ -190,7 +190,12 @@ export default function CallsScreen() {
   // Pull fresh history on mount + every focus (like the messages tab).
   useFocusEffect(
     useCallback(() => {
-      if (callingEnabled) void sync(forwardTo);
+      if (!callingEnabled) return;
+      void sync(forwardTo);
+      // Keep the log live while the screen is open — new calls/voicemails
+      // should not require pull-to-refresh.
+      const id = setInterval(() => void sync(forwardTo), 30000);
+      return () => clearInterval(id);
     }, [callingEnabled, forwardTo, sync])
   );
 

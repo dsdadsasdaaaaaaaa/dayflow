@@ -312,7 +312,13 @@ export default function MessagesScreen() {
       <ScreenHeader
         title="Messages"
         subtitle={
-          anyConfigured ? (unread > 0 ? `${unread} unread` : 'All caught up') : undefined
+          anyConfigured
+            ? unread > 0
+              ? `${unread} unread`
+              : unheardVoicemails > 0
+                ? `${unheardVoicemails} new voicemail${unheardVoicemails === 1 ? '' : 's'}`
+                : 'All caught up'
+            : undefined
         }
         right={headerRight}
       />

@@ -1,20 +1,28 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Platform } from 'react-native';
 import { loadSmsCredentials, type SmsCredentials } from './smsCredentials';
 
 /**
  * MMS media cache. Twilio media URLs require Basic auth and redirect to a
- * short-lived S3 URL, so we fetch once, convert to a base64 data URI, and
- * cache it (in-memory + on disk) so threads open instantly and offline.
+ * short-lived S3 URL, so we fetch once and cache the BYTES on disk, then
+ * render the file:// URI. (The old design cached base64 data URIs in JS
+ * memory — megabytes of Hermes strings re-crossing the bridge on every
+ * scroll. Files are decoded natively and cost the JS side a short path.)
+ *
+ * Web preview has no usable file store — it falls back to in-memory data
+ * URIs, which is fine for a dev preview.
  *
  * Everything here is best-effort and never throws to callers: failures come
  * back as null / an error string, and messages without media are untouched.
  */
 
-/** In-memory cache: media URL → data URI. */
+/** In-memory: media URL → displayable uri (file:// native, data: web). */
 const memoryCache = new Map<string, string>();
 /** De-dupe concurrent loads of the same URL. */
 const inFlight = new Map<string, Promise<string | null>>();
+
+/** Keep at most this many cached media files; oldest pruned at startup. */
+const MAX_CACHED_FILES = 200;
 
 /** Tiny stable hash (FNV-1a) for cache filenames. Not cryptographic. */
 function hashUrl(url: string): string {
@@ -26,34 +34,86 @@ function hashUrl(url: string): string {
   return (h >>> 0).toString(16).padStart(8, '0');
 }
 
-/**
- * Disk cache file for a URL, or null when disk caching isn't available
- * (web preview). Wrapped defensively — expo-file-system may be unavailable.
- */
-function diskFile(url: string): { exists: boolean; read: () => Promise<string>; write: (s: string) => void } | null {
+type FS = typeof import('expo-file-system');
+
+function fs(): FS | null {
   if (Platform.OS === 'web') return null;
   try {
     // Static require keeps this synchronous; expo-file-system is in the binary.
-    const { File, Paths } = require('expo-file-system') as typeof import('expo-file-system');
-    const file = new File(Paths.cache, `dayflow-mms-${hashUrl(url)}.b64`);
-    return {
-      exists: file.exists,
-      read: () => file.text(),
-      write: (s: string) => {
-        try {
-          file.write(s);
-        } catch (e) {
-          console.warn('[mediaCache] disk write failed', e);
-        }
-      },
-    };
-  } catch (e) {
-    console.warn('[mediaCache] file system unavailable', e);
+    return require('expo-file-system') as FS;
+  } catch {
     return null;
   }
 }
 
-/** Blob → base64 data URI via FileReader (works on RN Hermes and web). */
+function extFor(contentType: string): string {
+  const t = contentType.toLowerCase();
+  if (t.includes('png')) return 'png';
+  if (t.includes('gif')) return 'gif';
+  if (t.includes('webp')) return 'webp';
+  if (t.includes('heic') || t.includes('heif')) return 'heic';
+  return 'jpg';
+}
+
+/** Any already-cached file for this URL (extension unknown at lookup time). */
+function findCachedFile(url: string): string | null {
+  const mod = fs();
+  if (!mod) return null;
+  try {
+    const prefix = `dayflow-mms-${hashUrl(url)}`;
+    for (const entry of mod.Paths.cache.list()) {
+      if (entry instanceof mod.File && entry.name.startsWith(prefix)) {
+        return entry.uri;
+      }
+    }
+  } catch {
+    // Cache dir unavailable.
+  }
+  return null;
+}
+
+/**
+ * One-time startup prune: keep the newest MAX_CACHED_FILES media files.
+ * Fire-and-forget — a failed prune never blocks a photo load.
+ */
+let pruned = false;
+function pruneMediaCache(): void {
+  if (pruned) return;
+  pruned = true;
+  const mod = fs();
+  if (!mod) return;
+  try {
+    const files = mod.Paths.cache
+      .list()
+      .filter(
+        (e): e is InstanceType<FS['File']> =>
+          e instanceof mod.File && e.name.startsWith('dayflow-mms-')
+      );
+    if (files.length <= MAX_CACHED_FILES) return;
+    const dated = files
+      .map((f) => {
+        let at = 0;
+        try {
+          at = f.modificationTime ?? 0;
+        } catch {
+          at = 0;
+        }
+        return { f, at };
+      })
+      .sort((a, b) => b.at - a.at);
+    for (const { f } of dated.slice(MAX_CACHED_FILES)) {
+      try {
+        f.delete();
+      } catch {
+        // A stuck file just survives until next prune.
+      }
+    }
+  } catch {
+    // Best-effort.
+  }
+}
+
+/** Blob → base64 data URI via FileReader (web fallback path). */
 function blobToDataUri(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -83,59 +143,75 @@ function looksLikeMedia(res: Response): boolean {
  * the signed URL). So: try authed first; on a non-media result, retry bare
  * (Twilio media URLs are fetchable without auth by default).
  */
-async function fetchMediaBlob(creds: SmsCredentials, mediaUrl: string): Promise<Blob> {
+async function fetchMediaResponse(creds: SmsCredentials, mediaUrl: string): Promise<Response> {
   const auth = 'Basic ' + btoa(`${creds.accountSid}:${creds.authToken}`);
   let lastStatus = 0;
   try {
     const res = await fetch(mediaUrl, { headers: { Authorization: auth } });
     lastStatus = res.status;
-    if (looksLikeMedia(res)) return await res.blob();
+    if (looksLikeMedia(res)) return res;
     console.warn(`[mediaCache] authed fetch not media (${res.status}); retrying without auth`);
   } catch (e) {
     console.warn('[mediaCache] authed fetch failed; retrying without auth', e);
   }
   const bare = await fetch(mediaUrl);
-  if (looksLikeMedia(bare)) return await bare.blob();
+  if (looksLikeMedia(bare)) return bare;
   throw new Error(`Media fetch failed (${bare.status || lastStatus}).`);
 }
 
 /**
- * Resolve a Twilio media URL to a displayable data URI. Checks memory, then
- * disk, then the network. Returns null on failure (safe to retry later).
+ * Resolve a Twilio media URL to a displayable uri. Checks memory, then disk,
+ * then the network (native: bytes → file:// URI; web: data URI in memory).
+ * Returns null on failure (safe to retry later).
  */
 export async function getMediaDataUri(
   creds: SmsCredentials,
   mediaUrl: string
 ): Promise<string | null> {
   if (!mediaUrl) return null;
+  pruneMediaCache();
   const cached = memoryCache.get(mediaUrl);
   if (cached) return cached;
   const pending = inFlight.get(mediaUrl);
   if (pending) return pending;
 
   const task = (async (): Promise<string | null> => {
-    // Disk cache.
-    try {
-      const file = diskFile(mediaUrl);
-      if (file?.exists) {
-        const text = await file.read();
-        if (text.startsWith('data:')) {
-          memoryCache.set(mediaUrl, text);
-          return text;
-        }
-      }
-    } catch (e) {
-      console.warn('[mediaCache] disk read failed', e);
+    // Disk cache (native only).
+    const onDisk = findCachedFile(mediaUrl);
+    if (onDisk) {
+      memoryCache.set(mediaUrl, onDisk);
+      return onDisk;
     }
     // Network.
     try {
-      const blob = await fetchMediaBlob(creds, mediaUrl);
-      const dataUri = await blobToDataUri(blob);
+      const res = await fetchMediaResponse(creds, mediaUrl);
+      const mod = fs();
+      if (mod) {
+        const contentType = res.headers.get('content-type') ?? 'image/jpeg';
+        const bytes = new Uint8Array(await res.arrayBuffer());
+        const file = new mod.File(
+          mod.Paths.cache,
+          `dayflow-mms-${hashUrl(mediaUrl)}.${extFor(contentType)}`
+        );
+        try {
+          if (!file.exists) file.create();
+          file.write(bytes);
+        } catch (e) {
+          console.warn('[mediaCache] disk write failed', e);
+          // Fall back to a data URI for this session only.
+          const dataUri = await blobToDataUri(await (await fetch(mediaUrl)).blob());
+          memoryCache.set(mediaUrl, dataUri);
+          return dataUri;
+        }
+        memoryCache.set(mediaUrl, file.uri);
+        return file.uri;
+      }
+      // Web preview: data URI in memory.
+      const dataUri = await blobToDataUri(await res.blob());
       memoryCache.set(mediaUrl, dataUri);
-      diskFile(mediaUrl)?.write(dataUri);
       return dataUri;
     } catch (e) {
-      console.warn('[mediaCache] media load failed', mediaUrl, e);
+      console.warn('[mediaCache] media load failed', e);
       return null;
     }
   })();
@@ -148,61 +224,77 @@ export async function getMediaDataUri(
   }
 }
 
+/**
+ * Pre-seed the cache: a photo we just SENT already exists locally — map its
+ * hosted URL to the local file so the bubble renders instantly instead of
+ * re-downloading what we uploaded seconds ago.
+ */
+export function primeMediaCache(hostedUrl: string, localUri: string): void {
+  if (hostedUrl && localUri) memoryCache.set(hostedUrl, localUri);
+}
+
 export interface MediaLoadState {
-  /** Displayable data URI, or null while loading / on failure. */
-  dataUri: string | null;
+  /** Displayable uri (file:// or data:), or null while loading / on failure. */
+  uri: string | null;
   loading: boolean;
   /** Friendly error message when the load failed. */
   error: string | null;
+  /** Re-attempt a failed load (no-op while loading or after success). */
+  retry: () => void;
 }
 
 /**
- * React hook: resolve one media URL to a data URI with load state. Loads
- * credentials itself; pass undefined to render nothing (no media).
+ * React hook: resolve one media URL to a displayable uri with load state and
+ * a retry affordance. Loads credentials itself; pass undefined for no media.
  */
 export function useMediaDataUri(mediaUrl: string | undefined): MediaLoadState {
-  const [state, setState] = useState<MediaLoadState>({
-    dataUri: mediaUrl ? memoryCache.get(mediaUrl) ?? null : null,
+  const [attempt, setAttempt] = useState(0);
+  const [state, setState] = useState<Omit<MediaLoadState, 'retry'>>({
+    uri: mediaUrl ? memoryCache.get(mediaUrl) ?? null : null,
     loading: false,
     error: null,
   });
 
   useEffect(() => {
     if (!mediaUrl) {
-      setState({ dataUri: null, loading: false, error: null });
+      setState({ uri: null, loading: false, error: null });
       return;
     }
     const hit = memoryCache.get(mediaUrl);
     if (hit) {
-      setState({ dataUri: hit, loading: false, error: null });
+      setState({ uri: hit, loading: false, error: null });
       return;
     }
     let alive = true;
-    setState({ dataUri: null, loading: true, error: null });
+    setState({ uri: null, loading: true, error: null });
     (async () => {
       try {
         const creds = await loadSmsCredentials();
         if (!creds) {
-          if (alive) setState({ dataUri: null, loading: false, error: 'Messaging is not set up.' });
+          if (alive) setState({ uri: null, loading: false, error: 'Messaging is not set up.' });
           return;
         }
         const uri = await getMediaDataUri(creds, mediaUrl);
         if (!alive) return;
         setState(
           uri
-            ? { dataUri: uri, loading: false, error: null }
-            : { dataUri: null, loading: false, error: 'Photo could not be loaded.' }
+            ? { uri, loading: false, error: null }
+            : { uri: null, loading: false, error: 'Photo could not be loaded.' }
         );
       } catch {
-        if (alive) setState({ dataUri: null, loading: false, error: 'Photo could not be loaded.' });
+        if (alive) setState({ uri: null, loading: false, error: 'Photo could not be loaded.' });
       }
     })();
     return () => {
       alive = false;
     };
-  }, [mediaUrl]);
+  }, [mediaUrl, attempt]);
 
-  return state;
+  const retry = useCallback(() => {
+    setAttempt((n) => n + 1);
+  }, []);
+
+  return { ...state, retry };
 }
 
 /** Drop the in-memory cache (used by tests / sign-out flows). Disk stays. */

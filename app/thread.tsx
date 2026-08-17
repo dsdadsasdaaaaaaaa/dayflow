@@ -163,8 +163,6 @@ export default function ThreadScreen() {
   const [shareOpen, setShareOpen] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
-  /** Full-screen viewer for Telegram photos (local files, no auth fetch). */
-  const [localViewerUri, setLocalViewerUri] = useState<string | null>(null);
 
   // Seed the composer from ?draft= (e.g. client-detail's "Request deposit").
   // Once only — never clobber what the user has typed since.
@@ -215,7 +213,9 @@ export default function ThreadScreen() {
     }, [number, isTelegram, markRead, tgMarkRead])
   );
   useEffect(() => {
-    if (!isTelegram && number && lastSyncAt != null) markRead(number);
+    // Focus-gated like the Telegram twin below — a thread BURIED in the nav
+    // stack must not mark its counterparty read on every global sync bump.
+    if (!isTelegram && number && lastSyncAt != null && focusedRef.current) markRead(number);
   }, [isTelegram, number, lastSyncAt, markRead]);
   // Telegram arrivals while the thread is FOCUSED get read receipts
   // immediately — a thread merely buried in the nav stack must not mark.
@@ -228,13 +228,17 @@ export default function ThreadScreen() {
   // finished typing a reply. One cheap single-counterparty query per tick;
   // stops the moment the screen blurs.
   const pollThread = useMessages((s) => s.pollThread);
+  const backfillThreadMedia = useMessages((s) => s.backfillThreadMedia);
   useFocusEffect(
     useCallback(() => {
       if (isTelegram || !number) return;
       void pollThread(number);
+      // One bounded pass for any photos whose URLs never resolved (over the
+      // per-sync cap or a transient failure) — placeholders become photos.
+      void backfillThreadMedia(number);
       const id = setInterval(() => void pollThread(number), 2500);
       return () => clearInterval(id);
-    }, [isTelegram, number, pollThread])
+    }, [isTelegram, number, pollThread, backfillThreadMedia])
   );
 
   const known = useMemo(() => knownClients(tasks), [tasks]);
@@ -367,10 +371,16 @@ export default function ThreadScreen() {
     async (body: string) => {
       // Each store merges the sent message optimistically and settles its
       // status itself — no full history re-sync needed here.
-      if (isTelegram) return tgSend(number, body);
-      return send(number, body);
+      const ok = isTelegram ? await tgSend(number, body) : await send(number, body);
+      if (ok) {
+        // Clear the persisted draft NOW — backing out before the composer's
+        // own clear lands must not resurrect sent text as a draft.
+        draftRef.current = '';
+        setThreadDraft(number, '');
+      }
+      return ok;
     },
-    [isTelegram, tgSend, send, number]
+    [isTelegram, tgSend, send, number, setThreadDraft]
   );
 
   // ── Scheduled sends (SMS only — Twilio holds the message, phone can be off)
@@ -525,10 +535,10 @@ export default function ThreadScreen() {
         : 'Sending photo…'
       : null;
 
-  /** Route tapped photos: hosted MMS URLs → PhotoViewer, local files → inline viewer. */
+  // One viewer for both channels — PhotoViewer handles hosted URLs and
+  // local/data uris alike (zoom + share included).
   const openPhoto = useCallback((uri: string) => {
-    if (uri.startsWith('http')) setViewerUrl(uri);
-    else setLocalViewerUri(uri);
+    setViewerUrl(uri);
   }, []);
 
   const showError = lastError != null && lastError !== dismissedError;
@@ -755,7 +765,6 @@ export default function ThreadScreen() {
         />
       ) : null}
       <PhotoViewer url={viewerUrl} onClose={() => setViewerUrl(null)} />
-      <LocalPhotoViewer uri={localViewerUri} onClose={() => setLocalViewerUri(null)} />
     </KeyboardAvoidingView>
   );
 }
@@ -822,32 +831,6 @@ function FailedBubble({
   );
 }
 
-/**
- * Full-screen viewer for local photo files (Telegram downloads). PhotoViewer
- * only handles hosted media URLs (authenticated fetch), so local uris render
- * directly here with the same plain dark-backdrop look.
- */
-function LocalPhotoViewer({ uri, onClose }: { uri: string | null; onClose: () => void }) {
-  const insets = useSafeAreaInsets();
-  return (
-    <Modal visible={uri != null} transparent animationType="fade" onRequestClose={onClose}>
-      <View style={styles.viewerRoot}>
-        {uri ? (
-          <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="contain" />
-        ) : null}
-        <Pressable
-          onPress={onClose}
-          hitSlop={10}
-          accessibilityRole="button"
-          accessibilityLabel="Close photo"
-          style={[styles.viewerClose, { top: insets.top + 10 }]}
-        >
-          <Ionicons name="close" size={22} color="#FFFFFF" />
-        </Pressable>
-      </View>
-    </Modal>
-  );
-}
 
 const styles = StyleSheet.create({
   root: { flex: 1 },

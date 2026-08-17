@@ -25,6 +25,7 @@ import { getPushTokenSafe, setPushRelayActive, subscribePushRefresh } from '../s
 import { loadSmsCredentials } from '../src/lib/smsCredentials';
 import { ensureVoiceFunctionCurrent } from '../src/lib/voiceApi';
 import { useSettings } from '../src/store/settings';
+import { useTelegram } from '../src/store/telegramAccount';
 import { useTasks } from '../src/store/tasks';
 import { useTheme } from '../src/theme';
 
@@ -160,6 +161,27 @@ export default function RootLayout() {
       unsubPush();
       sub.remove();
     };
+  }, []);
+
+  // Telegram: connect at launch/foreground when chats are imported — waiting
+  // until the Messages tab is opened left badges stale and updates dead.
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    const connect = () => {
+      const s = useTelegram.getState();
+      if (s.importedChatIds.length > 0) void s.connectAndSync();
+    };
+    if (useTelegram.persist.hasHydrated()) connect();
+    else {
+      const unsub = useTelegram.persist.onFinishHydration(() => {
+        unsub();
+        connect();
+      });
+    }
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active' && useTelegram.persist.hasHydrated()) connect();
+    });
+    return () => sub.remove();
   }, []);
 
   // Missed-check-in escalation: check whenever the app runs. Foregrounding
