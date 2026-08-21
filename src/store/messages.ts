@@ -114,8 +114,19 @@ interface MessagesState {
   lastError: string | null;
   /** True once credentials were confirmed present (UI gate). */
   configured: boolean;
+  /**
+   * The work number currently sending (mirrored from the keychain so screens
+   * can compare it against a message's ownNumber without an async read).
+   */
+  currentNumber: string | null;
   /** Unsent composer drafts per thread (SMS E.164 or 'tgc:…' keys). */
   threadDrafts: Record<string, string>;
+  /**
+   * Work numbers retired by "Change number", newest first. Their history
+   * stays in the same threads and clients who still have an old number keep
+   * reaching us — every fetch covers them alongside the current number.
+   */
+  previousNumbers: string[];
   /**
    * Bumped by clearAll. In-flight syncs capture it before fetching and drop
    * their merge when it changed — an erase must never be repopulated by a
@@ -149,6 +160,8 @@ interface MessagesState {
   /** Persist an unsent composer draft per thread ('' clears). Works for
    * Telegram counterparties ('tgc:…') too — one map for both channels. */
   setThreadDraft: (counterparty: string, text: string) => void;
+  /** Record a retired work number so its traffic keeps syncing. */
+  addPreviousNumber: (number: string) => void;
   clearAll: () => void;
 }
 
@@ -203,12 +216,17 @@ export const useMessages = create<MessagesState>()(
       lastSyncAt: null,
       lastError: null,
       configured: false,
+      currentNumber: null,
       threadDrafts: {},
+      previousNumbers: [],
       generation: 0,
 
       refreshConfigured: async () => {
         const creds = await loadSmsCredentials();
-        set({ configured: creds != null });
+        set({
+          configured: creds != null,
+          currentNumber: creds ? normalizePhone(creds.fromNumber) : null,
+        });
       },
 
       sync: async () => {
@@ -236,12 +254,14 @@ export const useMessages = create<MessagesState>()(
           // next_page_uri so a busy stretch never silently loses messages.
           // First-ever sync keeps the classic newest-window behavior and
           // just plants the mark.
+          const previousNumbers = get().previousNumbers;
           const fetched =
             mark == null
-              ? await listRecentSms(creds, PAGE_SIZE, knownMediaSids)
+              ? await listRecentSms(creds, PAGE_SIZE, knownMediaSids, { previousNumbers })
               : await listRecentSms(creds, PAGE_SIZE, knownMediaSids, {
                   sentAfterMs: mark - CLOCK_SKEW_MS,
                   maxPagesPerDirection: SYNC_PAGES_PER_DIRECTION,
+                  previousNumbers,
                 });
           // Advance the mark from message timestamps (Twilio's clock), never
           // the device clock — skew-proof by construction.
@@ -428,7 +448,14 @@ export const useMessages = create<MessagesState>()(
               .filter((m) => m.mediaUrls && m.mediaUrls.length > 0)
               .map((m) => m.sid)
           );
-          const fetched = await listOlderSms(creds, key, oldest.sentAt, PAGE_SIZE, knownMediaSids);
+          const fetched = await listOlderSms(
+            creds,
+            key,
+            oldest.sentAt,
+            PAGE_SIZE,
+            knownMediaSids,
+            get().previousNumbers
+          );
           // "More history?" keys on RAW returned volume, not new-SID count —
           // the day-granular overlap means most records re-fetch the cached
           // day, and counting only fresh sids latched this false while whole
@@ -529,7 +556,13 @@ export const useMessages = create<MessagesState>()(
               .filter((m) => m.mediaUrls && m.mediaUrls.length > 0)
               .map((m) => m.sid)
           );
-          const fetched = await listThreadToday(creds, counterparty, 20, knownMediaSids);
+          const fetched = await listThreadToday(
+            creds,
+            counterparty,
+            20,
+            knownMediaSids,
+            get().previousNumbers
+          );
           // "Changed" must count RESOLVED MEDIA and settled statuses, not
           // just unseen SIDs — an MMS often lists before its media exists,
           // and the first version of this gate threw the photo away on every
@@ -614,6 +647,15 @@ export const useMessages = create<MessagesState>()(
           return { threadDrafts };
         }),
 
+      addPreviousNumber: (number) =>
+        set((s) => {
+          const n = normalizePhone(number);
+          if (!n || s.previousNumbers.includes(n)) return s;
+          // Newest first, capped — old numbers stop receiving eventually and
+          // each one costs two queries per sync.
+          return { previousNumbers: [n, ...s.previousNumbers].slice(0, 3) };
+        }),
+
       clearAll: () =>
         set((s) => ({
           messages: {},
@@ -626,6 +668,8 @@ export const useMessages = create<MessagesState>()(
           lastSyncAt: null,
           lastError: null,
           threadDrafts: {},
+          previousNumbers: [],
+          currentNumber: null,
           generation: s.generation + 1,
         })),
     }),
@@ -645,6 +689,7 @@ export const useMessages = create<MessagesState>()(
         scheduled: s.scheduled,
         hiddenSids: s.hiddenSids,
         threadDrafts: s.threadDrafts,
+        previousNumbers: s.previousNumbers,
       }) as Partial<MessagesState>,
     }
   )

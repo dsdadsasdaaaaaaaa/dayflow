@@ -166,6 +166,9 @@ export function MessagingSection() {
         return;
       }
       await saveSmsCredentials(updated);
+      // Remember the retired number: its history stays in the same threads,
+      // and clients who never got the new number keep reaching us there.
+      useMessages.getState().addPreviousNumber(creds.fromNumber);
       // Both caches are keyed to the OLD number — drop them so the next send
       // and the next calling check re-provision against the new one.
       await clearMessagingServiceState();
@@ -192,7 +195,7 @@ export function MessagingSection() {
       successHaptic();
       Alert.alert(
         'Number switched',
-        `Texts now send from ${next}. Your messages, clients and call history are untouched.${
+        `Texts now send from ${next}. Your history stays put, and texts to ${creds.fromNumber} keep arriving in the same threads.${
           stale > 0
             ? `\n\n${stale} scheduled message${stale === 1 ? '' : 's'} still queued on the old number — cancel them in the Twilio console if you no longer want them sent.`
             : ''

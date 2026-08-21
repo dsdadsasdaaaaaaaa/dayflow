@@ -107,6 +107,16 @@ function confirmationDraft(occ: MeetingOccurrence): string {
   return `Confirmed — ${dayLabel}${time}. See you then!`;
 }
 
+/**
+ * Preset for the first text to someone you already know, from a NEW work
+ * number: they have your old one saved, so an unexplained number is easy to
+ * ignore or block. Editable in the composer before sending.
+ */
+const NUMBER_CHANGE_NOTICE =
+  "Hey, it's Levi — I'm using this number for now, my old one is having " +
+  'carrier issues (again). Same me, everything else is unchanged. ' +
+  'Save this one and thanks for bearing with me!';
+
 /** One conversation: bubbles, day separators, CRM panel, pinned composer. */
 export default function ThreadScreen() {
   const theme = useTheme();
@@ -184,6 +194,26 @@ export default function ThreadScreen() {
     const stored = useMessages.getState().threadDrafts[number];
     if (stored) setDraft((d) => (d.trim() ? d : stored));
   }, [number]);
+  // First message to a known client from a NEW number: preset the explainer
+  // once. Only when this thread has history, none of it sent from the number
+  // in use now, and nothing is already typed or saved.
+  const noticeSeeded = useRef(false);
+  useEffect(() => {
+    if (noticeSeeded.current || isTelegram || !number) return;
+    const state = useMessages.getState();
+    if (state.previousNumbers.length === 0) return;
+    const mine = state.currentNumber;
+    if (!mine) return;
+    const history = threadMessages(state.messages, number, state.hiddenSids);
+    if (history.length === 0) return;
+    const sentFromCurrent = history.some(
+      (m) => m.direction === 'out' && m.ownNumber === mine
+    );
+    if (sentFromCurrent) return;
+    noticeSeeded.current = true;
+    setDraft((d) => (d.trim() ? d : NUMBER_CHANGE_NOTICE));
+  }, [isTelegram, number, messages]);
+
   const draftRef = useRef(draft);
   draftRef.current = draft;
   useEffect(() => {

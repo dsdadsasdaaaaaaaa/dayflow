@@ -27,6 +27,12 @@ export interface SmsMessage {
   /** Twilio error code when status is failed/undelivered (30007 = filtered). */
   errorCode?: number;
   /**
+   * Which of OUR numbers carried this message. Present once a user has had
+   * more than one work number — lets the UI tell "sent from your old number"
+   * from "sent from the current one".
+   */
+  ownNumber?: string;
+  /**
    * Attachment count from the message record. > 0 with no mediaUrls means
    * the Media subresource hasn't been resolved yet (cap/transient failure) —
    * render a placeholder and backfill, never a blank bubble.
@@ -78,11 +84,25 @@ export interface ListSmsOptions {
    * Day-granular — expect overlap with already-cached traffic.
    */
   sentAfterMs?: number;
+  /** Retired work numbers to fetch alongside the current one. */
+  previousNumbers?: readonly string[];
   /**
    * Pages of PageSize to follow per direction via next_page_uri.
    * Default 1 = the classic newest-window behavior (no pagination).
    */
   maxPagesPerDirection?: number;
+}
+
+/**
+ * Work numbers this account has used, current first. Retired numbers keep
+ * receiving texts from clients who never got the new one, and their history
+ * belongs in the same threads — so every fetch covers all of them.
+ */
+function ownNumbersOf(creds: SmsCredentials, previous?: readonly string[]): string[] {
+  const all = [creds.fromNumber, ...(previous ?? [])]
+    .map(normalizePhone)
+    .filter((n) => n.length > 0);
+  return [...new Set(all)];
 }
 
 /** Parse Twilio's stringly-typed num_media. Defensive: bad input → 0. */
@@ -100,16 +120,25 @@ function authHeader(creds: SmsCredentials): string {
   return 'Basic ' + btoa(`${creds.accountSid}:${creds.authToken}`);
 }
 
-function toSmsMessage(rec: TwilioMessageRecord, ownNumber: string): SmsMessage | null {
+/**
+ * Parse one Twilio record. `ownNumbers` is the CURRENT work number first,
+ * then any previous ones — history from a retired number has to thread with
+ * the same client, so every number we have ever owned counts as "us".
+ */
+function toSmsMessage(
+  rec: TwilioMessageRecord,
+  ownNumbers: readonly string[]
+): SmsMessage | null {
   if (!rec.sid || !rec.to) return null;
-  const own = normalizePhone(ownNumber);
+  const owned = new Set(ownNumbers.map(normalizePhone).filter(Boolean));
+  const primary = normalizePhone(ownNumbers[0] ?? '');
   // Scheduled (and canceled-before-send) messages have no From until Twilio
   // picks a number at send time — they're ours, so treat them as outbound.
-  const from = rec.from ? normalizePhone(rec.from) : own;
+  const from = rec.from ? normalizePhone(rec.from) : primary;
   const to = normalizePhone(rec.to);
-  const inbound = to === own;
+  const inbound = owned.has(to);
   const counterparty = inbound ? from : to;
-  if (!counterparty || counterparty === own) return null;
+  if (!counterparty || owned.has(counterparty)) return null;
   const when = rec.date_sent ?? rec.date_created;
   const msg: SmsMessage = {
     sid: rec.sid,
@@ -122,6 +151,8 @@ function toSmsMessage(rec: TwilioMessageRecord, ownNumber: string): SmsMessage |
   if (typeof rec.error_code === 'number') msg.errorCode = rec.error_code;
   const nm = numMediaOf(rec);
   if (nm > 0) msg.numMedia = nm;
+  const ours = inbound ? to : from;
+  if (ours) msg.ownNumber = ours;
   return msg;
 }
 
@@ -235,7 +266,7 @@ export async function sendSms(
       typeof json.code === 'number' ? json.code : undefined
     );
   }
-  const msg = toSmsMessage(json, creds.fromNumber);
+  const msg = toSmsMessage(json, [creds.fromNumber]);
   if (!msg) throw new Error('Send succeeded but the response was unreadable.');
   // We already know exactly which media we attached — no need to re-fetch.
   if (mediaUrls && mediaUrls.length > 0) msg.mediaUrls = [...mediaUrls];
@@ -285,14 +316,14 @@ async function fetchMessagePages(
 /** Dedupe raw records by SID into SmsMessages + the subset still needing media. */
 function mergeRecords(
   records: TwilioMessageRecord[],
-  ownNumber: string,
+  ownNumbers: readonly string[],
   skipMediaSids?: ReadonlySet<string>
 ): { merged: SmsMessage[]; needsMedia: SmsMessage[] } {
   const seen = new Set<string>();
   const merged: SmsMessage[] = [];
   const needsMedia: SmsMessage[] = [];
   for (const rec of records) {
-    const msg = toSmsMessage(rec, ownNumber);
+    const msg = toSmsMessage(rec, ownNumbers);
     if (msg && !seen.has(msg.sid)) {
       seen.add(msg.sid);
       merged.push(msg);
@@ -337,16 +368,19 @@ export async function listRecentSms(
   skipMediaSids?: ReadonlySet<string>,
   opts?: ListSmsOptions
 ): Promise<SmsMessage[]> {
-  const own = encodeURIComponent(normalizePhone(creds.fromNumber));
+  const owned = ownNumbersOf(creds, opts?.previousNumbers);
   // %3E= is the URL-encoded '>=' Twilio expects in the param name.
   const floor = opts?.sentAfterMs != null ? `&DateSent%3E=${isoDateOf(opts.sentAfterMs)}` : '';
   const maxPages = opts?.maxPagesPerDirection ?? 1;
-  const urls = [
-    `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&To=${own}${floor}`,
-    `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&From=${own}${floor}`,
-  ];
+  const urls = owned.flatMap((n) => {
+    const own = encodeURIComponent(n);
+    return [
+      `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&To=${own}${floor}`,
+      `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&From=${own}${floor}`,
+    ];
+  });
   const results = await Promise.all(urls.map((u) => fetchMessagePages(creds, u, maxPages)));
-  const { merged, needsMedia } = mergeRecords(results.flat(), creds.fromNumber, skipMediaSids);
+  const { merged, needsMedia } = mergeRecords(results.flat(), owned, skipMediaSids);
   merged.sort((a, b) => b.sentAt - a.sentAt);
   await resolveMediaFor(creds, needsMedia);
   return merged;
@@ -364,17 +398,21 @@ export async function listOlderSms(
   counterparty: string,
   beforeMs: number,
   pageSize = 100,
-  skipMediaSids?: ReadonlySet<string>
+  skipMediaSids?: ReadonlySet<string>,
+  previousNumbers?: readonly string[]
 ): Promise<SmsMessage[]> {
-  const own = encodeURIComponent(normalizePhone(creds.fromNumber));
+  const owned = ownNumbersOf(creds, previousNumbers);
   const other = encodeURIComponent(normalizePhone(counterparty));
   const ceiling = `&DateSent%3C=${isoDateOf(beforeMs)}`;
-  const urls = [
-    `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&To=${own}&From=${other}${ceiling}`,
-    `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&From=${own}&To=${other}${ceiling}`,
-  ];
+  const urls = owned.flatMap((n) => {
+    const own = encodeURIComponent(n);
+    return [
+      `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&To=${own}&From=${other}${ceiling}`,
+      `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&From=${own}&To=${other}${ceiling}`,
+    ];
+  });
   const results = await Promise.all(urls.map((u) => fetchMessagePages(creds, u, 1)));
-  const { merged, needsMedia } = mergeRecords(results.flat(), creds.fromNumber, skipMediaSids);
+  const { merged, needsMedia } = mergeRecords(results.flat(), owned, skipMediaSids);
   merged.sort((a, b) => b.sentAt - a.sentAt);
   await resolveMediaFor(creds, needsMedia);
   return merged;
@@ -392,17 +430,21 @@ export async function listThreadToday(
   creds: SmsCredentials,
   counterparty: string,
   pageSize = 20,
-  skipMediaSids?: ReadonlySet<string>
+  skipMediaSids?: ReadonlySet<string>,
+  previousNumbers?: readonly string[]
 ): Promise<SmsMessage[]> {
-  const own = encodeURIComponent(normalizePhone(creds.fromNumber));
+  const owned = ownNumbersOf(creds, previousNumbers);
   const other = encodeURIComponent(normalizePhone(counterparty));
   const floor = `&DateSent%3E=${isoDateOf(Date.now() - 24 * 3600_000)}`;
-  const urls = [
-    `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&To=${own}&From=${other}${floor}`,
-    `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&From=${own}&To=${other}${floor}`,
-  ];
+  const urls = owned.flatMap((n) => {
+    const own = encodeURIComponent(n);
+    return [
+      `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&To=${own}&From=${other}${floor}`,
+      `${baseUrl(creds)}/Messages.json?PageSize=${pageSize}&From=${own}&To=${other}${floor}`,
+    ];
+  });
   const results = await Promise.all(urls.map((u) => fetchMessagePages(creds, u, 1)));
-  const { merged, needsMedia } = mergeRecords(results.flat(), creds.fromNumber, skipMediaSids);
+  const { merged, needsMedia } = mergeRecords(results.flat(), owned, skipMediaSids);
   await resolveMediaFor(creds, needsMedia);
   return merged;
 }
@@ -418,7 +460,7 @@ export async function fetchSmsStatus(
     });
     if (!res.ok) return null;
     const json = (await res.json()) as TwilioMessageRecord;
-    const msg = toSmsMessage(json, creds.fromNumber);
+    const msg = toSmsMessage(json, [creds.fromNumber]);
     // Single message → one bounded extra call for its media, best-effort.
     if (msg && numMediaOf(json) > 0) {
       const urls = await fetchMediaUrls(creds, msg.sid);
