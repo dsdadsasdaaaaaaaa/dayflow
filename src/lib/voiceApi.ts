@@ -804,6 +804,24 @@ export async function disableCalling(creds: SmsCredentials): Promise<VoiceOkResu
  * pipeline). Call on account disconnect — the sids/urls belong to the old
  * account and would make every deploy short-circuit against it.
  */
+/**
+ * Forget only the NUMBER binding (which Twilio number the voice webhook is
+ * attached to), keeping the deployed function and its source hash. Used when
+ * the user swaps their work number: calling re-provisions against the new
+ * number without rebuilding the whole serverless function.
+ */
+export async function clearNumberBinding(): Promise<void> {
+  try {
+    const persisted = await loadPersisted();
+    const next: PersistedVoice = { ...persisted };
+    delete next.phoneNumberSid;
+    delete next.voiceUrl;
+    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  } catch (e) {
+    console.warn('[voiceApi] clear number binding failed', e);
+  }
+}
+
 export async function clearVoiceState(): Promise<void> {
   try {
     await AsyncStorage.removeItem(STORAGE_KEY);

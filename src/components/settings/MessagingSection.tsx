@@ -22,7 +22,12 @@ import {
   saveSmsCredentials,
   type SmsCredentials,
 } from '../../lib/smsCredentials';
-import { clearVoiceState, disableCalling } from '../../lib/voiceApi';
+import {
+  clearNumberBinding,
+  clearVoiceState,
+  disableCalling,
+  enableCalling,
+} from '../../lib/voiceApi';
 import { useCalls } from '../../store/calls';
 import { useMessages } from '../../store/messages';
 import { useSettings } from '../../store/settings';
@@ -39,7 +44,7 @@ const CAPTION_SETUP =
 const CAPTION_CONNECTED =
   'Messages are between your phone and your Twilio account only.';
 
-type Busy = 'connect' | 'test' | null;
+type Busy = 'connect' | 'test' | 'change' | null;
 
 /**
  * Settings → Messaging: connect the user's own Twilio account for in-app
@@ -54,6 +59,9 @@ export function MessagingSection() {
   const clearAll = useMessages((s) => s.clearAll);
   const clearCalls = useCalls((s) => s.clearAll);
   const callingEnabled = useSettings((s) => s.settings.callingEnabled);
+  const callForwardTo = useSettings((s) => s.settings.callForwardTo);
+  const callShowWorkNumber = useSettings((s) => s.settings.callShowWorkNumber);
+  const voicemailGreeting = useSettings((s) => s.settings.voicemailGreeting);
   const updateSettings = useSettings((s) => s.update);
 
   const [sid, setSid] = useState('');
@@ -61,6 +69,9 @@ export function MessagingSection() {
   const [fromNumber, setFromNumber] = useState('');
   const [busy, setBusy] = useState<Busy>(null);
   const [connectedNumber, setConnectedNumber] = useState<string | null>(null);
+  /** Inline 'change number' form (same account, new sending number). */
+  const [changingNumber, setChangingNumber] = useState(false);
+  const [newNumber, setNewNumber] = useState('');
 
   // Know which state to render as soon as the screen opens.
   useEffect(() => {
@@ -134,6 +145,64 @@ export function MessagingSection() {
     }
   };
 
+  /**
+   * Swap the work number on the SAME Twilio account. Unlike Disconnect this
+   * keeps every message, client and call record — only the sending identity
+   * changes. Calling and scheduled-send plumbing are re-provisioned against
+   * the new number (their cached bindings point at the old one).
+   */
+  const changeNumber = async () => {
+    const next = normalizePhone(newNumber);
+    if (!next || busy) return;
+    const creds = await loadSmsCredentials();
+    if (!creds) return;
+    setBusy('change');
+    try {
+      const updated: SmsCredentials = { ...creds, fromNumber: next };
+      const ok = await verifySmsCredentials(updated);
+      if (!ok) {
+        warningHaptic();
+        Alert.alert('Could not verify', 'Twilio rejected those credentials.');
+        return;
+      }
+      await saveSmsCredentials(updated);
+      // Both caches are keyed to the OLD number — drop them so the next send
+      // and the next calling check re-provision against the new one.
+      await clearMessagingServiceState();
+      await clearNumberBinding();
+      // Scheduled sends were queued on the old number's service; they can no
+      // longer be tracked or canceled from here.
+      const stale = Object.keys(useMessages.getState().scheduled).length;
+      if (callingEnabled) {
+        const result = await enableCalling(updated, {
+          forwardTo: callForwardTo,
+          showWorkNumber: callShowWorkNumber,
+          greeting: voicemailGreeting,
+        });
+        if (!result.ok) {
+          Alert.alert(
+            'Number switched — calling needs attention',
+            `Texting now uses ${next}, but calling could not re-point itself: ${result.error}`
+          );
+        }
+      }
+      await refreshConfigured();
+      setChangingNumber(false);
+      setNewNumber('');
+      successHaptic();
+      Alert.alert(
+        'Number switched',
+        `Texts now send from ${next}. Your messages, clients and call history are untouched.${
+          stale > 0
+            ? `\n\n${stale} scheduled message${stale === 1 ? '' : 's'} still queued on the old number — cancel them in the Twilio console if you no longer want them sent.`
+            : ''
+        }`
+      );
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const confirmDisconnect = () => {
     Alert.alert(
       'Disconnect messaging?',
@@ -200,6 +269,66 @@ export function MessagingSection() {
             ) : undefined
           }
         />
+        <SettingsRow
+          icon="swap-horizontal"
+          tint={taskColor('indigo').solid}
+          label="Change number"
+          sublabel="Same account, new work number — keeps your history"
+          onPress={() => setChangingNumber((v) => !v)}
+          right={
+            busy === 'change' ? (
+              <ActivityIndicator size="small" color={theme.textTertiary} />
+            ) : (
+              <Ionicons
+                name={changingNumber ? 'chevron-down' : 'chevron-forward'}
+                size={16}
+                color={theme.textTertiary}
+              />
+            )
+          }
+        />
+        {changingNumber ? (
+          <View style={styles.form}>
+            <TextInput
+              value={newNumber}
+              onChangeText={setNewNumber}
+              placeholder="+1 (555) 123-4567"
+              placeholderTextColor={theme.textTertiary}
+              keyboardType="phone-pad"
+              autoCorrect={false}
+              style={inputStyle}
+              accessibilityLabel="New Twilio number"
+            />
+            <Text style={[styles.hint, { color: theme.textTertiary }]}>
+              Messages, clients and call history stay exactly as they are.
+              Calling re-points itself at the new number.
+            </Text>
+            <Pressable
+              onPress={changeNumber}
+              disabled={busy !== null || normalizePhone(newNumber).length === 0}
+              accessibilityRole="button"
+              accessibilityLabel="Switch to this number"
+              style={({ pressed }) => [
+                styles.connectBtn,
+                {
+                  backgroundColor: theme.accent,
+                  opacity:
+                    busy !== null || normalizePhone(newNumber).length === 0
+                      ? 0.4
+                      : pressed
+                        ? 0.85
+                        : 1,
+                },
+              ]}
+            >
+              {busy === 'change' ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <Text style={styles.connectLabel}>Switch number</Text>
+              )}
+            </Pressable>
+          </View>
+        ) : null}
         <QuickRepliesEditor />
         <PhotoQuickReplies />
         <SettingsRow
@@ -296,6 +425,7 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   field: { gap: 6 },
+  hint: { fontSize: 12, lineHeight: 17 },
   fieldLabel: {
     fontSize: 12,
     fontWeight: '600',
