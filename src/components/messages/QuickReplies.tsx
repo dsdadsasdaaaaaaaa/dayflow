@@ -95,7 +95,7 @@ export function buildPaymentReminder(opts: {
       : diff < 7
         ? fromDayKey(oldestOwedDay).toLocaleDateString('en-US', { weekday: 'long' })
         : formatDayLong(oldestOwedDay);
-  return `Hi! Gentle reminder — ${formatMoney(amount, symbol)} outstanding from ${dayLabel}. Whenever's easy today or tomorrow.`;
+  return `Hi! Gentle reminder, ${formatMoney(amount, symbol)} outstanding from ${dayLabel}. Whenever's easy today or tomorrow.`;
 }
 
 interface Props {

@@ -104,7 +104,7 @@ function confirmationDraft(occ: MeetingOccurrence): string {
     !occ.task.allDay && occ.task.startMinutes != null
       ? ` at ${formatMinutes(occ.task.startMinutes)}`
       : '';
-  return `Confirmed — ${dayLabel}${time}. See you then!`;
+  return `Confirmed for ${dayLabel}${time}. See you then!`;
 }
 
 /**
@@ -113,7 +113,7 @@ function confirmationDraft(occ: MeetingOccurrence): string {
  * ignore or block. Editable in the composer before sending.
  */
 const NUMBER_CHANGE_NOTICE =
-  "Hey, it's Levi — I'm using this number for now, my old one is having " +
+  "Hey, it's Drew, I'm using this number for now, my old one is having " +
   'carrier issues (again). Same me, everything else is unchanged. ' +
   'Save this one and thanks for bearing with me!';
 

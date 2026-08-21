@@ -25,7 +25,7 @@ export const DEFAULT_SETTINGS: Settings = {
     'Hi! What day and time were you thinking?',
     'Can you tell me a little about yourself first?',
     'A deposit is required to confirm the booking.',
-    'Confirmed — see you then!',
+    'Confirmed, see you then!',
     'Running about 10 minutes late, be there soon.',
   ],
   photoQuickReplies: [],
