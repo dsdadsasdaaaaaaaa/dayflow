@@ -22,6 +22,9 @@ const SERVICE_UNIQUE_NAME = 'dayflow-media';
 const ENVIRONMENT_UNIQUE_NAME = 'prod';
 const STORAGE_KEY = 'dayflow-twilio-assets-v1';
 const BUILD_POLL_INTERVAL_MS = 3000;
+/** How long to wait for a freshly deployed asset to answer at its URL. */
+const ASSET_LIVE_MAX_MS = 45_000;
+const ASSET_LIVE_POLL_MS = 1500;
 const BUILD_POLL_MAX_MS = 90_000;
 /** Twilio list page size; listAllPages follows meta.next_page_url past it. */
 const LIST_PAGE_SIZE = 50;
@@ -598,6 +601,28 @@ function assetPathFor(filename: string): string {
  * Host one local photo publicly on the user's Twilio account and return its
  * URL (usable as an MMS MediaUrl). Slow path: bundling + deploy is ~30-60s.
  */
+/**
+ * A Twilio Serverless deployment returns before the asset is actually being
+ * served at its public URL — propagation takes a few seconds. Sending the MMS
+ * immediately means Twilio tries to fetch a URL that isn't live yet, and the
+ * message fails at the Twilio stage with no media attached. So: poll the real
+ * URL until it answers before handing it to the messaging API.
+ */
+async function waitForAssetLive(url: string): Promise<boolean> {
+  const deadline = Date.now() + ASSET_LIVE_MAX_MS;
+  while (Date.now() < deadline) {
+    try {
+      // Public asset — no auth. HEAD is enough and cheap.
+      const res = await fetch(url, { method: 'HEAD' });
+      if (res.ok) return true;
+    } catch {
+      // Network blip mid-propagation — keep waiting.
+    }
+    await new Promise((r) => setTimeout(r, ASSET_LIVE_POLL_MS));
+  }
+  return false;
+}
+
 export async function uploadPhotoAsset(
   creds: SmsCredentials,
   localUri: string,
@@ -649,7 +674,15 @@ export async function uploadPhotoAsset(
     if (!deployed) return fail('Could not publish the photo.');
 
     const url = `https://${env.domainName}${version.path}`;
-    console.log('[twilioAssets] photo live at', url);
+    // Do NOT hand back a URL Twilio can't fetch yet — that produces an MMS
+    // with no media that fails ~5s later for reasons the user can't see.
+    const servingLive = await waitForAssetLive(url);
+    if (!servingLive) {
+      return fail(
+        'The photo was uploaded but is not being served yet. Wait a moment and try again.'
+      );
+    }
+    console.log('[twilioAssets] photo live');
     return { ok: true, url };
   } catch (e) {
     return fail(e instanceof Error ? e.message : 'Photo upload failed.');

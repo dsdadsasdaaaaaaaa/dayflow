@@ -189,6 +189,11 @@ export function explainSmsFailure(code?: number, fallback?: string): string {
       return 'Their phone is unreachable or switched off — try again later.';
     case 30005:
       return 'This number looks disconnected or invalid.';
+    case 12300:
+    case 12200:
+      return 'The photo could not be fetched for sending. Try sending it again.';
+    case 11751:
+      return 'That photo is too large to send as a text. Try a smaller one.';
     case 63038:
       return 'Daily message limit reached on your Twilio account — try again tomorrow or finish A2P registration.';
     default:
