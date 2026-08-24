@@ -612,9 +612,15 @@ async function waitForAssetLive(url: string): Promise<boolean> {
   const deadline = Date.now() + ASSET_LIVE_MAX_MS;
   while (Date.now() < deadline) {
     try {
-      // Public asset — no auth. HEAD is enough and cheap.
-      const res = await fetch(url, { method: 'HEAD' });
-      if (res.ok) return true;
+      // MUST be GET: the twil.io asset host answers HEAD with 405, so a HEAD
+      // probe never succeeds even when the photo is perfectly live. Range
+      // keeps it to a byte where the host honors it (206); hosts that ignore
+      // it answer 200, which is equally good news.
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: { Range: 'bytes=0-0' },
+      });
+      if (res.status === 200 || res.status === 206) return true;
     } catch {
       // Network blip mid-propagation — keep waiting.
     }
