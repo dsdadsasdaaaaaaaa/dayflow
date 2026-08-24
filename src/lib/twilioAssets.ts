@@ -327,6 +327,9 @@ async function uploadAssetVersion(
 
 interface AssetEntry {
   sid: string;
+  /** Epoch ms the asset was created (0 when Twilio omitted/garbled it). */
+  createdAt: number;
+  friendlyName: string;
 }
 
 async function listAssets(creds: SmsCredentials, serviceSid: string): Promise<AssetEntry[] | null> {
@@ -339,9 +342,70 @@ async function listAssets(creds: SmsCredentials, serviceSid: string): Promise<As
   const out: AssetEntry[] = [];
   for (const rec of records) {
     const sid = str(rec, 'sid');
-    if (sid) out.push({ sid });
+    if (!sid) continue;
+    const created = str(rec, 'date_created');
+    const parsed = created ? Date.parse(created) : NaN;
+    out.push({
+      sid,
+      createdAt: Number.isFinite(parsed) ? parsed : 0,
+      friendlyName: str(rec, 'friendly_name') ?? '',
+    });
   }
   return out;
+}
+
+/** DELETE one asset (and its versions) from the service. Best-effort. */
+async function deleteAsset(
+  creds: SmsCredentials,
+  serviceSid: string,
+  assetSid: string
+): Promise<boolean> {
+  try {
+    const res = await fetch(`${SERVERLESS}/Services/${serviceSid}/Assets/${assetSid}`, {
+      method: 'DELETE',
+      headers: { Authorization: authHeader(creds) },
+    });
+    return res.ok || res.status === 404;
+  } catch {
+    return false;
+  }
+}
+
+/** Photos older than this stop being hosted on the user's Twilio account. */
+const PHOTO_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Delete hosted photos older than the retention window. Sent photos are
+ * public on a twil.io domain with no expiry, so without this the pile grows
+ * forever — every client photo ever sent stays fetchable indefinitely.
+ *
+ * Runs BEFORE the build in uploadPhotoAsset, so the deploy that publishes the
+ * new photo simultaneously stops serving the pruned ones (no extra build).
+ * Anything referenced by a photo quick reply is kept regardless of age.
+ * Never throws and never blocks a send: a failed prune just retries next time.
+ */
+export async function prunePhotoAssets(
+  creds: SmsCredentials,
+  serviceSid: string,
+  keepPaths: ReadonlySet<string>
+): Promise<number> {
+  try {
+    const assets = await listAssets(creds, serviceSid);
+    if (!assets) return 0;
+    const cutoff = Date.now() - PHOTO_RETENTION_MS;
+    let deleted = 0;
+    for (const a of assets) {
+      // createdAt 0 = unknown age; never delete something we can't date.
+      if (a.createdAt === 0 || a.createdAt >= cutoff) continue;
+      const name = a.friendlyName.startsWith('/') ? a.friendlyName : `/${a.friendlyName}`;
+      if (keepPaths.has(name)) continue;
+      if (await deleteAsset(creds, serviceSid, a.sid)) deleted++;
+    }
+    if (deleted > 0) console.log('[twilioAssets] pruned', deleted, 'expired photo(s)');
+    return deleted;
+  } catch {
+    return 0;
+  }
 }
 
 interface AssetVersionEntry {
@@ -632,7 +696,9 @@ async function waitForAssetLive(url: string): Promise<boolean> {
 export async function uploadPhotoAsset(
   creds: SmsCredentials,
   localUri: string,
-  filename: string
+  filename: string,
+  /** Asset paths to keep regardless of age (photo quick replies). */
+  keepPaths: ReadonlySet<string> = new Set()
 ): Promise<UploadPhotoResult> {
   try {
     const service = await ensureAssetService(creds);
@@ -653,6 +719,10 @@ export async function uploadPhotoAsset(
     console.log('[twilioAssets] uploading content');
     const version = await uploadAssetVersion(creds, serviceSid, assetSid, localUri, path, mimeType);
     if (!version) return fail('Photo upload failed. Check your connection and try again.');
+
+    // Retire expired photos first: the build below then simply omits them,
+    // so one deploy both publishes the new photo and un-serves the old ones.
+    await prunePhotoAssets(creds, serviceSid, keepPaths);
 
     // A build must include EVERY version that should stay live — existing
     // public assets AND every Function (e.g. the voice webhook), or they go

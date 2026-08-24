@@ -19,6 +19,7 @@ import { primeMediaCache } from '../lib/mediaCache';
 import { loadSmsCredentials, normalizePhone } from '../lib/smsCredentials';
 import { uploadPhotoAsset } from '../lib/twilioAssets';
 import { PERSIST_VERSION, migrateStore } from './persistVersion';
+import { useSettings } from './settings';
 
 /**
  * Local message cache + sync for the in-app messenger. The provider account
@@ -412,7 +413,21 @@ export const useMessages = create<MessagesState>()(
         try {
           const ext = /\.(png|gif|webp|heic|heif|jpe?g)$/i.exec(localUri)?.[1]?.toLowerCase();
           const filename = `photo-${Date.now()}.${ext === 'jpeg' ? 'jpg' : ext ?? 'jpg'}`;
-          const hosted = await uploadPhotoAsset(creds, localUri, filename);
+          // Photo quick replies are hosted assets too — exempt them from the
+          // retention prune, however old they are.
+          const keepPaths = new Set(
+            useSettings
+              .getState()
+              .settings.photoQuickReplies.map((p) => {
+                try {
+                  return new URL(p.url).pathname;
+                } catch {
+                  return '';
+                }
+              })
+              .filter(Boolean)
+          );
+          const hosted = await uploadPhotoAsset(creds, localUri, filename, keepPaths);
           if (!hosted.ok) {
             set({ lastError: hosted.error });
             return false;
