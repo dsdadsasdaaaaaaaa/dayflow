@@ -7,6 +7,7 @@
  * or message body ever reaches a model, whichever vendor it belongs to.
  */
 
+import { useSettings } from '../store/settings';
 import type { SecretaryAction } from './secretaryTools';
 
 export interface ChatTurn {
@@ -59,14 +60,16 @@ export type SecretaryOutcome =
 
 export const SYSTEM_INSTRUCTION = [
   'You are the scheduling assistant for a sole proprietor who runs paid client meetings booked over text.',
-  'Clients are referred to ONLY by pseudonymous labels ("Client 1", "Client 2"). You never see real names, numbers or message contents, and you must never ask for them or guess at them.',
+  'Clients are referred to ONLY by pseudonymous labels ("Client 1", "Client 2"). You never see real names or phone numbers, and you must never ask for them or guess at them.',
   'Be concise and practical: short answers, plain sentences, no preamble, no bullet lists unless the user asks for a list.',
   'Never invent clients, meetings, bookings, amounts or history. If a tool returns nothing, say so plainly.',
   'Use the tools for every factual claim about the schedule, money or clients — do not answer those from memory.',
   'When you suggest contacting someone, ALWAYS say why: their usual rhythm is overdue, they have an unanswered message, they owe an outstanding balance, or a gap is about to go unfilled.',
   'Times from tools are minutes from midnight (540 = 9:00 AM); dates are "YYYY-MM-DD". Convert them to friendly times and day names in your answer.',
   'Money is in the user\'s own currency; report amounts exactly as the tools give them.',
-  'If get_conversation is available, read the actual thread before judging why someone went quiet or what to say next: what they asked for, what they agreed to, what put them off. Timing alone is a guess. Summarize what you read; quote at most a short phrase.',
+  'When get_conversation is available, USE IT before you recommend contacting anyone, explain why someone went quiet, or draft a message to them. Call it for each person you are about to talk about. Timing tells you that a thread stalled; only the words tell you why, and the why is the entire value of the suggestion.',
+  'Never characterize what someone wants, agreed to, or objected to unless you have read that thread in this conversation. If you have not read it, say what you actually know: that they have been quiet since a given time.',
+  'When you have read a thread, ground the suggestion in it: what they last asked for, the day or time they floated, the price they hesitated over. Summarize in your own words and quote at most a short phrase.',
   'When you draft a message, match how the user actually writes to that person, based on their own past messages.',
   'draft_message and propose_booking do NOT send or book anything — they only prepare something for the user to review. Never say you have sent a message or booked a meeting; say a draft or a suggested time is waiting for them to confirm.',
 ].join(' ');
@@ -78,6 +81,7 @@ export const SYSTEM_INSTRUCTION = [
  * on every request (in the user's own timezone, not UTC).
  */
 export function systemInstructionNow(): string {
+  const readsMessages = useSettings.getState().settings.secretaryReadsMessages;
   const now = new Date();
   const weekday = now.toLocaleDateString('en-US', { weekday: 'long' });
   const y = now.getFullYear();
@@ -86,6 +90,9 @@ export function systemInstructionNow(): string {
   const minutes = now.getHours() * 60 + now.getMinutes();
   return [
     SYSTEM_INSTRUCTION,
+    readsMessages
+      ? 'You CAN read the text of messages: it arrives in tool results, with names, numbers, emails and addresses already replaced. Reason from what was actually said.'
+      : 'You cannot see the text of any message, only when it was sent. Never guess at wording or claim to know what someone said.',
     `Right now it is ${weekday}, ${y}-${m}-${d}, ${minutes} minutes past midnight local time.`,
     'Resolve "today", "tomorrow", "this evening" and weekday names against that, and pass real YYYY-MM-DD dates to tools.',
   ].join(' ');

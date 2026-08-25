@@ -136,7 +136,7 @@ const READ_TOOLS: ToolSpec[] = [
   {
     name: 'get_unanswered',
     description:
-      'Loose ends in the inbox. "waitingOnYou" = the client sent the last message and is owed a reply. "goneQuiet" = the user sent the last message over a day ago and got nothing back, and the client has nothing booked. Each row has a label, the channel and hours waiting. Message contents are never available.',
+      'Loose ends in the inbox. "waitingOnYou" = the client sent the last message and is owed a reply. "goneQuiet" = the user sent the last message over a day ago and got nothing back, and the client has nothing booked. Each row has a label, the channel and hours waiting. When the user allows message reading, each row also carries "lastText": what that last message actually said. Use it — it is usually the whole reason the thread stalled.',
   },
   {
     name: 'get_money_summary',
@@ -504,6 +504,13 @@ interface UnansweredRow {
   hoursWaiting: number;
   /** Pipeline stage when the thread is linked to a contact. */
   status: ClientStatus | 'unknown';
+  /**
+   * What the last message actually said, when the user allows message
+   * reading. Carried here rather than left to a follow-up get_conversation
+   * call: knowing someone went quiet is not useful on its own, and a model
+   * handed only labels and hours will answer from labels and hours.
+   */
+  lastText?: string;
 }
 
 interface UnansweredResult {
@@ -519,7 +526,8 @@ interface UnansweredResult {
  * The quiet side reuses the pure predicate from src/lib/followUps.ts, minus
  * its snooze/dismiss state — those live in a screen-owned store, and the
  * secretary reports the raw picture rather than the user's triage of it.
- * Message contents are never read: only direction and timestamp.
+ * Message text rides along as `lastText` when the user allows reading;
+ * otherwise only direction and timestamp are used.
  */
 function toolGetUnanswered(map: PseudonymMap): UnansweredResult {
   const tasks = useTasks.getState().tasks;
@@ -536,13 +544,16 @@ function toolGetUnanswered(map: PseudonymMap): UnansweredResult {
   const waitingOnYou: UnansweredRow[] = [];
   const goneQuiet: UnansweredRow[] = [];
 
+  const readsMessages = useSettings.getState().settings.secretaryReadsMessages;
+
   const consider = (
     counterparty: string,
     channel: FollowUpChannel,
-    lastMessage: { direction: 'in' | 'out'; sentAt: number },
+    lastMessage: { direction: 'in' | 'out'; sentAt: number; body?: string },
     client: string | null,
     blocked: boolean
   ) => {
+    const body = readsMessages ? (lastMessage.body ?? '').trim() : '';
     const row: UnansweredRow = {
       // Unlinked numbers get a label of their own so the model can still
       // talk about them; restoreText puts the number back on device.
@@ -550,6 +561,7 @@ function toolGetUnanswered(map: PseudonymMap): UnansweredResult {
       channel,
       hoursWaiting: round1((now - lastMessage.sentAt) / 3_600_000),
       status: client ? effectiveStatus(meta, client, true) : 'unknown',
+      ...(body ? { lastText: redactText(body, map).slice(0, MAX_BODY_CHARS) } : {}),
     };
     if (lastMessage.direction === 'in') {
       if (!blocked) waitingOnYou.push(row);
