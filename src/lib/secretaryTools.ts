@@ -11,7 +11,9 @@
  */
 
 import { moneyStats } from '../components/stats/compute';
+import { buildCallRows, useCalls } from '../store/calls';
 import {
+  clientMetaKey,
   clientNameForPhone,
   clientNameForTelegram,
   effectiveStatus,
@@ -27,7 +29,7 @@ import { instancesForDay, useTasks } from '../store/tasks';
 import { buildTelegramThreads, useTelegram } from '../store/telegramAccount';
 import type { DayKey } from '../types';
 import { computeFreeSlotsWithCalendar, formatSlotRange } from './availability';
-import { addDays, daysBetween, lastNDays, todayKey } from './dates';
+import { addDays, daysBetween, lastNDays, toDayKey, todayKey } from './dates';
 import {
   bookedClientKeys,
   needsFollowUp,
@@ -37,7 +39,7 @@ import {
 import type { ToolRunner, ToolSpec } from './gemini';
 import { clientProfiles, knownClients, meetingOccurrences } from './meetings';
 import { overdueRegulars } from './rebook';
-import { assertNoPii, type PseudonymMap } from './secretaryPrivacy';
+import { assertNoPii, redactText, type PseudonymMap } from './secretaryPrivacy';
 
 /** History window for rhythm math (matches src/lib/rebook.ts). */
 const RHYTHM_WINDOW_DAYS = 365;
@@ -48,6 +50,35 @@ const MAX_ROWS = 40;
 
 /** ISO day key shape, for validating a model-supplied date. */
 const DAY_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
+/** Longest message body a proposed draft may carry. */
+const MAX_DRAFT_CHARS = 600;
+/** Longest note text handed back for one client. */
+const MAX_NOTE_CHARS = 1200;
+
+// -------------------------------------------------------------- proposals
+
+/**
+ * Something the secretary wants done that only the USER may actually do.
+ *
+ * The model never sends a message and never books anything. The write tools
+ * push one of these into a per-request sink; the store maps the label back to
+ * a real name and the chat shows it as a card with a button. Nothing happens
+ * until the user taps it.
+ */
+export interface SecretaryAction {
+  kind: 'draft' | 'booking';
+  /** Pseudonymous label as the model gave it ("Client 3"). */
+  label: string;
+  /** Real name, filled in on-device by the store before display. */
+  client?: string;
+  /** kind 'draft': the suggested message body. */
+  text?: string;
+  /** kind 'booking': YYYY-MM-DD. */
+  date?: string;
+  /** kind 'booking': minutes from midnight, and length in minutes. */
+  startMinutes?: number;
+  durationMinutes?: number;
+}
 
 // ------------------------------------------------------------- declarations
 
@@ -55,7 +86,7 @@ const DAY_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
  * What the model is told it can call. Descriptions double as the model's
  * only documentation, so they say plainly that names are labels.
  */
-export const SECRETARY_TOOLS: ToolSpec[] = [
+const READ_TOOLS: ToolSpec[] = [
   {
     name: 'list_clients',
     description:
@@ -115,7 +146,127 @@ export const SECRETARY_TOOLS: ToolSpec[] = [
       required: ['date'],
     },
   },
+  {
+    name: 'get_call_history',
+    description:
+      'Recent phone calls and voicemails, newest first. Each row is one call: the client label (a number that belongs to nobody in the book still gets its own label), whether it came in or went out, whether it was missed, the local time it happened, and whether a voicemail was left. Recordings and transcripts are never available.',
+    parameters: {
+      type: 'object',
+      properties: {
+        days: {
+          type: 'integer',
+          description: 'How far back to look, 1 to 90. Defaults to 14.',
+        },
+      },
+    },
+  },
+  {
+    name: 'get_no_shows',
+    description:
+      'Clients who have failed to turn up for a booked meeting: their label, how many times it has happened and the most recent date. Only clients with at least one no-show appear, so an empty list means nobody has ever missed one. Worth checking before you suggest giving someone a prime slot.',
+  },
+  {
+    name: 'get_client_detail',
+    description:
+      'Everything the app knows about ONE client, by label: meetings completed, their own median gap between meetings, when they were last seen, their usual rate, lifetime earnings, what they still owe, no-shows, their next booking, and whether they are currently waiting on a reply. Use it before drafting a message so what you write actually fits them.',
+    parameters: {
+      type: 'object',
+      properties: {
+        client: {
+          type: 'string',
+          description: 'The client label exactly as another tool gave it, e.g. "Client 3".',
+        },
+      },
+      required: ['client'],
+    },
+  },
 ];
+
+/**
+ * Only offered when the user has switched notes on in Settings. A tool the
+ * model cannot see is a promise it cannot break — much stronger than a tool
+ * that is present and refuses.
+ */
+const NOTES_TOOL: ToolSpec = {
+  name: 'get_client_notes',
+  description:
+    "The user's own private notes about one client, by label. The user has explicitly allowed you to read these. Any name, phone number or email inside a note is still replaced with a label or hidden. Notes are personal and often blunt: use them to answer the question at hand, never quote them back wholesale.",
+  parameters: {
+    type: 'object',
+    properties: {
+      client: {
+        type: 'string',
+        description: 'The client label exactly as another tool gave it, e.g. "Client 3".',
+      },
+    },
+    required: ['client'],
+  },
+};
+
+/**
+ * The two tools that produce something rather than report something. Both
+ * only PREPARE: the user reviews and confirms on device. The descriptions say
+ * so plainly, because the model's own wording is what the user reads.
+ */
+const WRITE_TOOLS: ToolSpec[] = [
+  {
+    name: 'draft_message',
+    description:
+      'Prepare a message to a client FOR THE USER TO REVIEW. This does NOT send anything: it puts a draft on screen with a send button the user has to tap, and they can edit or discard it. Write the whole body yourself in the user\'s voice: short, warm, plain sentences, no emoji, no dashes for punctuation. Refer to the person by their label only. Never say the message was sent, only that a draft is waiting for them.',
+    parameters: {
+      type: 'object',
+      properties: {
+        client: {
+          type: 'string',
+          description: 'The client label exactly as another tool gave it, e.g. "Client 3".',
+        },
+        text: {
+          type: 'string',
+          description: 'The message body to propose, at most a few sentences.',
+        },
+      },
+      required: ['client', 'text'],
+    },
+  },
+  {
+    name: 'propose_booking',
+    description:
+      'Prepare a booking FOR THE USER TO CONFIRM. This does NOT put anything in the calendar: it offers a card the user has to tap to accept. Call get_availability first so the slot you name is genuinely free. Never say a meeting is booked or confirmed, only that you have suggested it.',
+    parameters: {
+      type: 'object',
+      properties: {
+        client: {
+          type: 'string',
+          description: 'The client label exactly as another tool gave it, e.g. "Client 3".',
+        },
+        date: {
+          type: 'string',
+          description: 'The day as YYYY-MM-DD.',
+        },
+        start_minutes: {
+          type: 'integer',
+          description: 'Start time as minutes from midnight (540 = 9:00 AM).',
+        },
+        duration_minutes: {
+          type: 'integer',
+          description: 'Length in minutes. Defaults to 60 when unsure.',
+        },
+      },
+      required: ['client', 'date', 'start_minutes', 'duration_minutes'],
+    },
+  },
+];
+
+/**
+ * The tool list for one request. `usesNotes` is
+ * `settings.secretaryUsesNotes` — when it is off the notes tool is ABSENT,
+ * not merely refusing.
+ */
+export function secretaryTools(usesNotes: boolean): ToolSpec[] {
+  return usesNotes
+    ? [...READ_TOOLS, NOTES_TOOL, ...WRITE_TOOLS]
+    : [...READ_TOOLS, ...WRITE_TOOLS];
+}
 
 // ----------------------------------------------------------------- helpers
 
@@ -448,14 +599,312 @@ function toolGetSchedule(
   return { date, meetings };
 }
 
+// -------------------------------------------------- calls, no-shows, detail
+
+/** Local wall-clock stamp, "YYYY-MM-DDTHH:mm" — the model has no timezone. */
+function localStamp(at: number): string {
+  const d = new Date(at);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${toDayKey(d)}T${hh}:${mm}`;
+}
+
+/** The client behind a phone number, or null when nothing is linked. */
+function clientForNumber(number: string): string | null {
+  const meta = useClientMeta.getState().meta;
+  const displayNames = knownClients(useTasks.getState().tasks);
+  return clientNameForPhone(meta, number, displayNames);
+}
+
+interface CallHistoryRow {
+  label: string;
+  direction: 'in' | 'out';
+  missed: boolean;
+  /** Local time, "YYYY-MM-DDTHH:mm". */
+  atISO: string;
+  hadVoicemail: boolean;
+}
+
+/**
+ * The call log, pseudonymized. Unlinked numbers get a label of their own
+ * rather than being dropped — "someone called three times and never booked"
+ * is exactly the kind of thing worth surfacing. The number itself never
+ * leaves: only its label does.
+ */
+function toolGetCallHistory(
+  map: PseudonymMap,
+  args: Record<string, unknown>
+): { days: number; calls: CallHistoryRow[] } {
+  const days = coerceDays(args.days, 14, 90);
+  const since = Date.now() - days * 24 * 60 * 60_000;
+  const calls = buildCallRows(useCalls.getState())
+    .filter((c) => c.startedAt >= since)
+    .slice(0, MAX_ROWS)
+    .map((c) => ({
+      label: map.toPseudo(clientForNumber(c.counterparty) ?? c.counterparty),
+      direction: c.direction,
+      missed: c.missed,
+      atISO: localStamp(c.startedAt),
+      hadVoicemail: !!c.voicemail,
+    }));
+  return { days, calls };
+}
+
+interface NoShowTally {
+  name: string;
+  count: number;
+  last: DayKey;
+}
+
+/**
+ * No-shows per client (keyed lowercase). Days are de-duplicated across tasks,
+ * so a client with two series that both missed the same day counts once.
+ */
+function noShowsByClient(): Map<string, NoShowTally> {
+  const tasks = useTasks.getState().tasks;
+  const collected = new Map<string, { name: string; days: Set<DayKey> }>();
+  for (const task of Object.values(tasks)) {
+    const meeting = task.meeting;
+    if (!meeting || !meeting.client.trim() || !meeting.noShows?.length) continue;
+    const name = meeting.client.trim();
+    const key = name.toLowerCase();
+    const entry = collected.get(key) ?? { name, days: new Set<DayKey>() };
+    for (const day of meeting.noShows) entry.days.add(day);
+    collected.set(key, entry);
+  }
+
+  const out = new Map<string, NoShowTally>();
+  for (const [key, entry] of collected) {
+    const sorted = [...entry.days].sort();
+    if (sorted.length === 0) continue;
+    out.set(key, { name: entry.name, count: sorted.length, last: sorted[sorted.length - 1] });
+  }
+  return out;
+}
+
+interface NoShowRow {
+  label: string;
+  noShows: number;
+  lastNoShowDate: DayKey;
+}
+
+function toolGetNoShows(map: PseudonymMap): { clients: NoShowRow[] } {
+  const clients = [...noShowsByClient().values()]
+    .sort((a, b) => b.count - a.count || (a.last < b.last ? 1 : -1))
+    .slice(0, MAX_ROWS)
+    .map((t) => ({
+      label: map.toPseudo(t.name),
+      noShows: t.count,
+      lastNoShowDate: t.last,
+    }));
+  return { clients };
+}
+
+/** An unanswered inbound message on either channel, longest wait first. */
+function unansweredForClient(
+  real: string
+): { channel: FollowUpChannel; hoursWaiting: number } | null {
+  const meta = useClientMeta.getState().meta;
+  const displayNames = knownClients(useTasks.getState().tasks);
+  const key = clientMetaKey(real);
+  const now = Date.now();
+  const hits: { channel: FollowUpChannel; hoursWaiting: number }[] = [];
+
+  const consider = (
+    channel: FollowUpChannel,
+    client: string | null,
+    lastMessage: { direction: 'in' | 'out'; sentAt: number }
+  ) => {
+    if (!client || clientMetaKey(client) !== key) return;
+    if (lastMessage.direction !== 'in') return;
+    hits.push({ channel, hoursWaiting: round1((now - lastMessage.sentAt) / 3_600_000) });
+  };
+
+  const messages = useMessages.getState();
+  for (const t of buildThreads(messages.messages, messages.lastReadAt)) {
+    consider('sms', clientNameForPhone(meta, t.counterparty, displayNames), t.lastMessage);
+  }
+  const telegram = useTelegram.getState();
+  for (const t of buildTelegramThreads(telegram)) {
+    consider(
+      'telegram',
+      clientNameForTelegram(meta, t.counterparty, displayNames),
+      t.lastMessage
+    );
+  }
+
+  hits.sort((a, b) => b.hoursWaiting - a.hoursWaiting);
+  return hits[0] ?? null;
+}
+
+interface ClientDetail {
+  label: string;
+  status: ClientStatus;
+  meetingsDone: number;
+  /** Their own rhythm; null when there isn't enough history to have one. */
+  medianGapDays: number | null;
+  lastSeen: DayKey | null;
+  lastSeenDaysAgo: number | null;
+  typicalRate: number;
+  earnedLifetime: number;
+  outstanding: number;
+  noShows: number;
+  lastNoShowDate: DayKey | null;
+  nextBooking: DayKey | null;
+  /** Set when they sent the last message and are owed a reply. */
+  unanswered: { channel: FollowUpChannel; hoursWaiting: number } | null;
+}
+
+/**
+ * One client's whole picture, by label. A label the map doesn't know is a
+ * hallucination — say so rather than guessing at a neighbour.
+ */
+function toolGetClientDetail(
+  map: PseudonymMap,
+  args: Record<string, unknown>
+): ClientDetail | { error: string } {
+  const label = typeof args.client === 'string' ? args.client.trim() : '';
+  const real = label ? map.toReal(label) : null;
+  if (!real) {
+    return {
+      error:
+        'That is not one of the client labels from the other tools. Call list_clients and use a label exactly as it appears there.',
+    };
+  }
+
+  const tasks = useTasks.getState().tasks;
+  const log = useMeetingSession.getState().log;
+  const meta = useClientMeta.getState().meta;
+  const today = todayKey();
+  const key = real.trim().toLowerCase();
+
+  const profile = clientProfiles(tasks, log).find((p) => p.name.trim().toLowerCase() === key);
+  const noShow = noShowsByClient().get(key) ?? null;
+  const meetingsDone = profile?.meetingsDone ?? 0;
+
+  return {
+    label: map.toPseudo(real),
+    status: effectiveStatus(meta, real, meetingsDone > 0),
+    meetingsDone,
+    medianGapDays: rhythmByClient().get(key) ?? null,
+    lastSeen: profile?.lastSeen ?? null,
+    lastSeenDaysAgo: profile?.lastSeen ? daysBetween(profile.lastSeen, today) : null,
+    typicalRate: profile?.rate ?? 0,
+    earnedLifetime: profile?.earned ?? 0,
+    outstanding: profile?.outstanding ?? 0,
+    noShows: noShow?.count ?? 0,
+    lastNoShowDate: noShow?.last ?? null,
+    nextBooking: profile?.nextMeeting ?? null,
+    unanswered: unansweredForClient(real),
+  };
+}
+
+/**
+ * The user's private notes on one client — only reachable when they switched
+ * it on (the tool isn't even declared otherwise, and the runner checks the
+ * setting again). The note is scrubbed on the way out: any real name in the
+ * session map becomes its label, numbers and emails are blanked.
+ */
+function toolGetClientNotes(
+  map: PseudonymMap,
+  args: Record<string, unknown>
+): { label: string; notes: string } | { error: string } {
+  if (!useSettings.getState().settings.secretaryUsesNotes) {
+    return { error: 'The user has not allowed notes to be read.' };
+  }
+  const label = typeof args.client === 'string' ? args.client.trim() : '';
+  const real = label ? map.toReal(label) : null;
+  if (!real) {
+    return {
+      error:
+        'That is not one of the client labels from the other tools. Call list_clients and use a label exactly as it appears there.',
+    };
+  }
+  const notes = useClientMeta.getState().meta[clientMetaKey(real)]?.notes ?? '';
+  return {
+    label: map.toPseudo(real),
+    notes: redactText(notes.trim(), map).slice(0, MAX_NOTE_CHARS),
+  };
+}
+
+// ------------------------------------------------------------- proposals
+
+/** What a write tool tells the model: prepared, never done. */
+interface ProposalResult {
+  proposed: boolean;
+  error?: string;
+}
+
+/** Minutes from midnight the model supplied, or null when unusable. */
+function coerceStartMinutes(value: unknown): number | null {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return null;
+  const rounded = Math.round(n);
+  return rounded >= 0 && rounded <= 1439 ? rounded : null;
+}
+
+/** A sane meeting length from whatever the model sent. */
+function coerceDuration(value: unknown): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return 60;
+  return Math.min(24 * 60, Math.max(5, Math.round(n)));
+}
+
+/**
+ * Queue a message for the user to read, edit and send. Nothing is sent here
+ * and nothing can be: this file has no messaging import at all.
+ */
+function toolDraftMessage(
+  sink: SecretaryAction[],
+  args: Record<string, unknown>
+): ProposalResult {
+  const label = typeof args.client === 'string' ? args.client.trim() : '';
+  const text = typeof args.text === 'string' ? args.text.trim() : '';
+  if (!label || !text) {
+    return { proposed: false, error: 'A draft needs both a client label and the message text.' };
+  }
+  sink.push({ kind: 'draft', label, text: text.slice(0, MAX_DRAFT_CHARS) });
+  return { proposed: true };
+}
+
+/** Queue a booking for the user to confirm. Nothing reaches the calendar. */
+function toolProposeBooking(
+  sink: SecretaryAction[],
+  args: Record<string, unknown>
+): ProposalResult {
+  const label = typeof args.client === 'string' ? args.client.trim() : '';
+  if (!label) {
+    return { proposed: false, error: 'A booking needs a client label.' };
+  }
+  const startMinutes = coerceStartMinutes(args.start_minutes ?? args.startMinutes);
+  if (startMinutes == null) {
+    return {
+      proposed: false,
+      error: 'start_minutes must be minutes from midnight, 0 to 1439 (540 = 9:00 AM).',
+    };
+  }
+  sink.push({
+    kind: 'booking',
+    label,
+    date: coerceDay(args.date),
+    startMinutes,
+    durationMinutes: coerceDuration(args.duration_minutes ?? args.durationMinutes),
+  });
+  return { proposed: true };
+}
+
 // ------------------------------------------------------------------ runner
 
 /**
- * Bind the tools to one session's pseudonym map. Every result is checked
- * with assertNoPii before it goes back to the model — in __DEV__ a leak is a
- * loud crash rather than a quiet privacy bug.
+ * Bind the tools to one session's pseudonym map and one request's proposal
+ * sink. Every result is checked with assertNoPii before it goes back to the
+ * model — in __DEV__ a leak is a loud crash rather than a quiet privacy bug.
+ *
+ * `sink` is a fresh array per request: the write tools push proposals into it
+ * and the store attaches them to the assistant's turn. The model only ever
+ * learns that something was prepared.
  */
-export function buildToolRunner(map: PseudonymMap): ToolRunner {
+export function buildToolRunner(map: PseudonymMap, sink: SecretaryAction[]): ToolRunner {
   return async (name: string, args: Record<string, unknown>): Promise<unknown> => {
     let result: unknown;
     switch (name) {
@@ -476,6 +925,24 @@ export function buildToolRunner(map: PseudonymMap): ToolRunner {
         break;
       case 'get_schedule':
         result = toolGetSchedule(map, args);
+        break;
+      case 'get_call_history':
+        result = toolGetCallHistory(map, args);
+        break;
+      case 'get_no_shows':
+        result = toolGetNoShows(map);
+        break;
+      case 'get_client_detail':
+        result = toolGetClientDetail(map, args);
+        break;
+      case 'get_client_notes':
+        result = toolGetClientNotes(map, args);
+        break;
+      case 'draft_message':
+        result = toolDraftMessage(sink, args);
+        break;
+      case 'propose_booking':
+        result = toolProposeBooking(sink, args);
         break;
       default:
         return { error: `Unknown tool "${name}".` };

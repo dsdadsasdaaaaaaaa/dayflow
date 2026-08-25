@@ -6,11 +6,12 @@ import {
   Linking,
   Pressable,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
 } from 'react-native';
-import { successHaptic, tapHaptic, warningHaptic } from '../../lib/haptics';
+import { selectionHaptic, successHaptic, tapHaptic, warningHaptic } from '../../lib/haptics';
 import { askSecretary } from '../../lib/gemini';
 import {
   clearGeminiCredentials,
@@ -18,6 +19,7 @@ import {
   saveGeminiCredentials,
 } from '../../lib/geminiCredentials';
 import { useSecretary } from '../../store/secretary';
+import { useSettings } from '../../store/settings';
 import { taskColor, useTheme } from '../../theme';
 import { SettingsRow } from './SettingsRow';
 import { SettingsSection } from './SettingsSection';
@@ -29,6 +31,35 @@ const CAPTION =
   'DayFlow, and the free tier covers ordinary use.';
 
 /**
+ * The honest disclosure. It changes with the notes setting, because a promise
+ * that stops being true the moment a switch is flipped is worse than no
+ * promise at all.
+ */
+function PrivacyNote({ usesNotes }: { usesNotes: boolean }) {
+  const theme = useTheme();
+  return (
+    <View style={[styles.privacy, { backgroundColor: theme.surface }]}>
+      <Text style={[styles.privacyTitle, { color: theme.text }]}>
+        What leaves your phone
+      </Text>
+      <Text style={[styles.privacyLine, { color: theme.textSecondary }]}>
+        Sent: booking rhythms, free slots, amounts owed, call times, and
+        clients as labels — “Client 3”, never a name.
+      </Text>
+      <Text style={[styles.privacyLine, { color: theme.textSecondary }]}>
+        {usesNotes
+          ? 'Also sent: your client notes, with any name, number or email inside them swapped for a label first.'
+          : 'Not sent: your client notes. With the switch off the assistant is not even given a way to ask for them.'}
+      </Text>
+      <Text style={[styles.privacyLine, { color: theme.textSecondary }]}>
+        Never sent: names, phone numbers, addresses, or the contents of any
+        message or voicemail.
+      </Text>
+    </View>
+  );
+}
+
+/**
  * Settings → AI secretary. The key lives in the keychain; the honest privacy
  * disclosure lives here, because the whole feature rests on the user trusting
  * what does and does not leave the phone.
@@ -37,6 +68,8 @@ export function SecretarySection() {
   const theme = useTheme();
   const setEnabled = useSecretary((s) => s.setEnabled);
   const clearChat = useSecretary((s) => s.clear);
+  const usesNotes = useSettings((s) => s.settings.secretaryUsesNotes);
+  const update = useSettings((s) => s.update);
 
   const [key, setKey] = useState('');
   const [busy, setBusy] = useState(false);
@@ -112,6 +145,33 @@ export function SecretarySection() {
           sublabel="Ask about clients, your week, or money"
           right={<Ionicons name="checkmark-circle" size={22} color={theme.success} />}
         />
+        <View style={styles.noteRow}>
+          <View style={[styles.iconCircle, { backgroundColor: taskColor('amber').solid }]}>
+            <Ionicons name="document-text" size={16} color="#fff" />
+          </View>
+          <View style={styles.noteLabels}>
+            <Text style={[styles.noteLabel, { color: theme.text }]}>
+              Let it read client notes
+            </Text>
+            <Text style={[styles.noteSub, { color: theme.textTertiary }]}>
+              Notes often hold the useful context, and they are the most
+              personal thing in the app.
+            </Text>
+          </View>
+          <Switch
+            value={usesNotes}
+            onValueChange={(on) => {
+              selectionHaptic();
+              update({ secretaryUsesNotes: on });
+            }}
+            trackColor={{ false: theme.surface, true: theme.accent }}
+            ios_backgroundColor={theme.surface}
+            accessibilityLabel="Let the secretary read client notes"
+          />
+        </View>
+        <View style={styles.privacyInset}>
+          <PrivacyNote usesNotes={usesNotes} />
+        </View>
         <SettingsRow
           icon="trash"
           tint={taskColor('slate').solid}
@@ -141,19 +201,7 @@ export function SecretarySection() {
           answer.
         </Text>
 
-        <View style={[styles.privacy, { backgroundColor: theme.surface }]}>
-          <Text style={[styles.privacyTitle, { color: theme.text }]}>
-            What leaves your phone
-          </Text>
-          <Text style={[styles.privacyLine, { color: theme.textSecondary }]}>
-            Sent: booking rhythms, free slots, amounts owed, and clients as
-            labels — “Client 3”, never a name.
-          </Text>
-          <Text style={[styles.privacyLine, { color: theme.textSecondary }]}>
-            Never sent: names, phone numbers, addresses, notes, or the contents
-            of any message.
-          </Text>
-        </View>
+        <PrivacyNote usesNotes={usesNotes} />
 
         <Pressable
           onPress={() => {
@@ -209,6 +257,25 @@ const styles = StyleSheet.create({
   form: { paddingHorizontal: 14, paddingVertical: 14, gap: 12 },
   blurb: { fontSize: 13, lineHeight: 19 },
   privacy: { borderRadius: 10, padding: 12, gap: 6 },
+  privacyInset: { paddingHorizontal: 14, paddingVertical: 12 },
+  noteRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    minHeight: 52,
+  },
+  iconCircle: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  noteLabels: { flex: 1, gap: 2 },
+  noteLabel: { fontSize: 15, fontWeight: '600' },
+  noteSub: { fontSize: 12.5, fontWeight: '500', lineHeight: 17 },
   privacyTitle: { fontSize: 13, fontWeight: '700' },
   privacyLine: { fontSize: 12.5, lineHeight: 18 },
   linkRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },

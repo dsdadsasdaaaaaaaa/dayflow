@@ -10,11 +10,13 @@ import {
   restoreText,
 } from '../lib/secretaryPrivacy';
 import {
-  SECRETARY_TOOLS,
   buildToolRunner,
   collectClientNames,
+  secretaryTools,
+  type SecretaryAction,
 } from '../lib/secretaryTools';
 import { PERSIST_VERSION, migrateStore } from './persistVersion';
+import { useSettings } from './settings';
 
 /**
  * The AI secretary's conversation.
@@ -29,12 +31,19 @@ import { PERSIST_VERSION, migrateStore } from './persistVersion';
  * only meaningful inside one exchange. The whole (trimmed) history is
  * re-redacted with that same map each time, which keeps the conversation
  * self-consistent for the model without ever storing a wire transcript.
+ *
+ * The model may also PROPOSE a message or a booking. Proposals are collected
+ * in a per-request sink, resolved to real names here, and attached to the
+ * assistant turn for the UI to offer. Nothing is ever sent or booked without
+ * the user confirming it on the screen that owns the action.
  */
 
 /** Turns kept on device (a turn is one user or one model message). */
 const MAX_TURNS = 40;
 /** Turns sent as context — enough for follow-ups, small enough to stay cheap. */
 const CONTEXT_TURNS = 20;
+/** Proposals shown under one answer. A wall of cards is not a suggestion. */
+const MAX_ACTIONS = 4;
 
 interface SecretaryState {
   /** Local transcript with REAL names, oldest first. */
@@ -91,19 +100,27 @@ export const useSecretary = create<SecretaryState>()(
 
         // Fresh map every request: real names in, labels out.
         const map = buildPseudonyms(collectClientNames());
-        const history = get()
+        // Rebuilt from the local text only: `mentions` and `actions` are
+        // on-device display state in REAL names and must never go back out.
+        const history: ChatTurn[] = get()
           .messages.slice(-CONTEXT_TURNS)
-          .map((t) => ({ ...t, text: redactText(t.text, map) }));
+          .map((t) => ({ role: t.role, at: t.at, text: redactText(t.text, map) }));
         assertNoPii(
           history.map((t) => t.text).join('\n'),
           map
         );
 
+        // A fresh sink per request. Write tools only PROPOSE into this — the
+        // model cannot send or book anything by itself.
+        const proposals: SecretaryAction[] = [];
+        // The notes tool is absent, not merely refused, when the user has not
+        // opted in — the model cannot call what it was never offered.
+        const usesNotes = useSettings.getState().settings.secretaryUsesNotes;
         const outcome = await askSecretary(
           creds.apiKey,
           history,
-          SECRETARY_TOOLS,
-          buildToolRunner(map)
+          secretaryTools(usesNotes),
+          buildToolRunner(map, proposals)
         );
         if (!outcome.ok) {
           set({ busy: false, lastError: outcome.error });
@@ -116,6 +133,24 @@ export const useSecretary = create<SecretaryState>()(
         const mentions = map.entries
           .filter((e) => reply.includes(e.real))
           .map((e) => e.real);
+
+        // Proposals come back labelled ("Client 3"); the real name is put on
+        // here, on device. A label the map cannot resolve is a hallucinated
+        // client — drop it rather than show a card for nobody. Draft bodies
+        // are written by the model and carry labels too, so they get the same
+        // restore pass as the answer text.
+        const actions: SecretaryAction[] = [];
+        for (const p of proposals) {
+          if (actions.length >= MAX_ACTIONS) break;
+          const client = map.toReal(p.label);
+          if (!client) continue;
+          actions.push({
+            ...p,
+            client,
+            ...(p.text != null ? { text: restoreText(p.text, map) } : {}),
+          });
+        }
+
         set((s) => ({
           messages: capTurns([
             ...s.messages,
@@ -124,6 +159,7 @@ export const useSecretary = create<SecretaryState>()(
               text: reply,
               at: Date.now(),
               ...(mentions.length > 0 ? { mentions } : {}),
+              ...(actions.length > 0 ? { actions } : {}),
             },
           ]),
           busy: false,

@@ -76,6 +76,7 @@ export default function TaskEditorScreen() {
     id?: string;
     date?: string;
     startMinutes?: string;
+    durationMinutes?: string;
     inbox?: string;
     title?: string;
     client?: string;
@@ -86,6 +87,8 @@ export default function TaskEditorScreen() {
   const paramTitle = param(params.title) ?? '';
   const paramStartRaw = param(params.startMinutes);
   const paramStart = paramStartRaw != null ? parseInt(paramStartRaw, 10) : NaN;
+  const paramDurationRaw = param(params.durationMinutes);
+  const paramDuration = paramDurationRaw != null ? parseInt(paramDurationRaw, 10) : NaN;
   const wantsInbox = param(params.inbox) === '1';
   const paramClient = param(params.client);
 
@@ -113,7 +116,7 @@ export default function TaskEditorScreen() {
     const d = useDrafts.getState().getDraft(draftKey);
     if (!d || !draftHasContent(d)) return null;
     if (initial) return d.savedAt > initial.updatedAt ? d : null;
-    if (paramStartRaw != null || paramClient || paramTitle) return null;
+    if (paramStartRaw != null || paramDurationRaw != null || paramClient || paramTitle) return null;
     return d;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draftKey]);
@@ -145,7 +148,12 @@ export default function TaskEditorScreen() {
       (Number.isFinite(paramStart) ? paramStart : nextHalfHour())
   );
   const [duration, setDuration] = useState(
-    restoredDraft?.duration ?? initial?.durationMinutes ?? settings.defaultDurationMinutes
+    restoredDraft?.duration ??
+      initial?.durationMinutes ??
+      // A booking card that says "1 h" must open an editor showing 1 h.
+      (Number.isFinite(paramDuration) && paramDuration > 0
+        ? paramDuration
+        : settings.defaultDurationMinutes)
   );
   const [recurrence, setRecurrence] = useState(
     restoredDraft ? restoredDraft.recurrence : (initial?.recurrence ?? null)

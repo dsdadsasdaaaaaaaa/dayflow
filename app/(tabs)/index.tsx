@@ -5,6 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { EmptyState } from '../../src/components/EmptyState';
 import { Fab } from '../../src/components/Fab';
 import { RAIL_CENTER_X } from '../../src/components/TaskCard';
+import { BriefingCard } from '../../src/components/today/BriefingCard';
 import { AllDayShelf } from '../../src/components/timeline/AllDayShelf';
 import { DraggableTaskBlock } from '../../src/components/timeline/DraggableTaskBlock';
 import { EventBlock } from '../../src/components/timeline/EventBlock';
@@ -464,6 +465,9 @@ export default function TodayScreen() {
       {replanTasks.length > 0 ? (
         <ReplanChip count={replanTasks.length} onPress={() => setReplanOpen(true)} />
       ) : null}
+      {/* Deterministic, on-device morning briefing — today only, dismissible,
+          and self-hiding when there is nothing worth saying. */}
+      {todaySelected ? <BriefingCard /> : null}
 
       <View style={[styles.scrollEdge, { borderBottomColor: theme.separator }]} />
       <ScrollView

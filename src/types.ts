@@ -240,5 +240,12 @@ export interface Settings {
   safetyGraceMinutes: number;
   /** Body of the safety alert SMS (user-editable). */
   safetyMessage: string;
+  /**
+   * Let the AI secretary read client notes. OFF by default: notes are the
+   * most personal thing in the app and the one place free text the user
+   * wrote about a person could reach the model. When off, the notes tool is
+   * not even offered to it.
+   */
+  secretaryUsesNotes: boolean;
   onboardingDone: boolean;
 }

@@ -11,6 +11,10 @@
  * repeat until it answers in words, capped at MAX_ROUNDS.
  */
 
+// Type-only: no runtime edge back to secretaryTools (which imports the tool
+// types from here), so the two files never form an import cycle at runtime.
+import type { SecretaryAction } from './secretaryTools';
+
 /**
  * The model id. Google renames these often and retires the old names; this
  * is the ONE place to change it. A rejected name surfaces as a plain-English
@@ -36,6 +40,13 @@ export interface ChatTurn {
    * anywhere, purely a local display aid.
    */
   mentions?: string[];
+  /**
+   * Things the model PROPOSED during this turn — a suggested message, a
+   * suggested booking. Nothing has happened: the user confirms each one on
+   * the screen it belongs to. Filled in on-device (labels mapped back to
+   * real names) and, like `mentions`, never sent back to the API.
+   */
+  actions?: SecretaryAction[];
 }
 
 /** OpenAPI-subset schema for a tool's arguments (Gemini's accepted shape). */
@@ -76,6 +87,7 @@ const SYSTEM_INSTRUCTION = [
   'When you suggest contacting someone, ALWAYS say why: their usual rhythm is overdue, they have an unanswered message, they owe an outstanding balance, or a gap is about to go unfilled.',
   'Times from tools are minutes from midnight (540 = 9:00 AM); dates are "YYYY-MM-DD". Convert them to friendly times and day names in your answer.',
   'Money is in the user\'s own currency; report amounts exactly as the tools give them.',
+  'draft_message and propose_booking do NOT send or book anything — they only prepare something for the user to review. Never say you have sent a message or booked a meeting; say a draft or a suggested time is waiting for them to confirm.',
 ].join(' ');
 
 /**
