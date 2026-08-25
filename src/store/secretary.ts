@@ -1,8 +1,8 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import { askSecretary, type ChatTurn } from '../lib/gemini';
-import { loadGeminiCredentials } from '../lib/geminiCredentials';
+import { ask as askBrain, loadBrain } from '../lib/secretaryBrain';
+import type { ChatTurn } from '../lib/secretaryPrompt';
 import {
   assertNoPii,
   buildPseudonyms,
@@ -89,11 +89,11 @@ export const useSecretary = create<SecretaryState>()(
           lastError: null,
         }));
 
-        const creds = await loadGeminiCredentials();
-        if (!creds) {
+        const brain = await loadBrain();
+        if (!brain) {
           set({
             busy: false,
-            lastError: 'Add your Gemini API key in Settings to use the assistant.',
+            lastError: 'Add your Anthropic API key in Settings to use the assistant.',
           });
           return;
         }
@@ -116,8 +116,8 @@ export const useSecretary = create<SecretaryState>()(
         // The notes tool is absent, not merely refused, when the user has not
         // opted in — the model cannot call what it was never offered.
         const usesNotes = useSettings.getState().settings.secretaryUsesNotes;
-        const outcome = await askSecretary(
-          creds.apiKey,
+        const outcome = await askBrain(
+          brain,
           history,
           secretaryTools(usesNotes),
           buildToolRunner(map, proposals)

@@ -12,23 +12,38 @@ import {
   View,
 } from 'react-native';
 import { selectionHaptic, successHaptic, tapHaptic, warningHaptic } from '../../lib/haptics';
-import { askSecretary } from '../../lib/gemini';
+import { askSecretary as askClaude } from '../../lib/claude';
+import {
+  clearClaudeCredentials,
+  saveClaudeCredentials,
+} from '../../lib/claudeCredentials';
+import { askSecretary as askGemini } from '../../lib/gemini';
 import {
   clearGeminiCredentials,
-  loadGeminiCredentials,
   saveGeminiCredentials,
 } from '../../lib/geminiCredentials';
+import { brainLabel, loadBrain, type BrainId } from '../../lib/secretaryBrain';
 import { useSecretary } from '../../store/secretary';
 import { useSettings } from '../../store/settings';
 import { taskColor, useTheme } from '../../theme';
 import { SettingsRow } from './SettingsRow';
 import { SettingsSection } from './SettingsSection';
 
-const KEY_URL = 'https://aistudio.google.com/apikey';
+const KEY_URL = 'https://console.anthropic.com/settings/keys';
 
 const CAPTION =
-  'Runs on your own free Google AI key. Usage is billed to that key, not to ' +
-  'DayFlow, and the free tier covers ordinary use.';
+  'Runs on Claude Sonnet, using your own Anthropic key. Usage is billed to ' +
+  'that key, not to DayFlow. A Google AI key still works if you have one.';
+
+/**
+ * Which service a pasted key belongs to, from its prefix. One field is kinder
+ * than a provider picker: the key already says what it is.
+ */
+function detectBrain(key: string): BrainId | null {
+  if (key.startsWith('sk-ant-')) return 'claude';
+  if (key.startsWith('AIza')) return 'gemini';
+  return null;
+}
 
 /**
  * The honest disclosure. It changes with the notes setting, because a promise
@@ -75,12 +90,16 @@ export function SecretarySection() {
   const [busy, setBusy] = useState(false);
   /** null while loading — avoids flashing the setup form for a set-up user. */
   const [configured, setConfigured] = useState<boolean | null>(null);
+  /** Which model is answering, for the connected row. */
+  const [brain, setBrain] = useState<BrainId | null>(null);
 
   useEffect(() => {
     let alive = true;
-    loadGeminiCredentials()
-      .then((c) => {
-        if (alive) setConfigured(c != null);
+    loadBrain()
+      .then((b) => {
+        if (!alive) return;
+        setConfigured(b != null);
+        setBrain(b?.id ?? null);
       })
       .catch(() => {
         if (alive) setConfigured(false);
@@ -96,19 +115,39 @@ export function SecretarySection() {
     tapHaptic();
     setBusy(true);
     try {
+      const which = detectBrain(apiKey);
+      if (!which) {
+        warningHaptic();
+        Alert.alert(
+          'Key not recognized',
+          'An Anthropic key starts with "sk-ant-" and a Google AI key with "AIza". Check you pasted the whole thing.'
+        );
+        return;
+      }
       // Verify before saving: a trivial round trip with no tools.
-      const probe = await askSecretary(apiKey, [{ role: 'user', text: 'Say OK.', at: Date.now() }], [], () => null);
+      const probeAsk = which === 'claude' ? askClaude : askGemini;
+      const probe = await probeAsk(
+        apiKey,
+        [{ role: 'user', text: 'Say OK.', at: Date.now() }],
+        [],
+        () => null
+      );
       if (!probe.ok) {
         warningHaptic();
         Alert.alert('Could not connect', probe.error);
         return;
       }
-      await saveGeminiCredentials({ apiKey });
+      if (which === 'claude') await saveClaudeCredentials({ apiKey });
+      else await saveGeminiCredentials({ apiKey });
       setEnabled(true);
       setConfigured(true);
+      setBrain(which);
       setKey('');
       successHaptic();
-      Alert.alert('Secretary connected', 'Ask it anything from the sparkle button on Today.');
+      Alert.alert(
+        'Secretary connected',
+        `Running on ${brainLabel(which)}. Ask it anything from the sparkle button on Today.`
+      );
     } finally {
       setBusy(false);
     }
@@ -125,10 +164,14 @@ export function SecretarySection() {
           style: 'destructive',
           onPress: async () => {
             warningHaptic();
+            // Clear both, so disconnecting never silently falls back to a
+            // key the user thought they had removed.
+            await clearClaudeCredentials();
             await clearGeminiCredentials();
             clearChat();
             setEnabled(false);
             setConfigured(false);
+            setBrain(null);
           },
         },
       ]
@@ -141,7 +184,7 @@ export function SecretarySection() {
         <SettingsRow
           icon="sparkles"
           tint={taskColor('indigo').solid}
-          label="Connected"
+          label={brain ? `Running on ${brainLabel(brain)}` : 'Connected'}
           sublabel="Ask about clients, your week, or money"
           right={<Ionicons name="checkmark-circle" size={22} color={theme.success} />}
         />
@@ -209,25 +252,25 @@ export function SecretarySection() {
             Linking.openURL(KEY_URL).catch(() => {});
           }}
           accessibilityRole="button"
-          accessibilityLabel="Get a free Google AI key"
+          accessibilityLabel="Get an Anthropic API key"
           style={({ pressed }) => [styles.linkRow, pressed && { opacity: 0.7 }]}
         >
           <Ionicons name="open-outline" size={15} color={theme.accent} />
           <Text style={[styles.linkLabel, { color: theme.accent }]}>
-            Get a free key at aistudio.google.com
+            Get a key at console.anthropic.com
           </Text>
         </Pressable>
 
         <TextInput
           value={key}
           onChangeText={setKey}
-          placeholder="Paste your API key"
+          placeholder="sk-ant-…"
           placeholderTextColor={theme.textTertiary}
           secureTextEntry
           autoCapitalize="none"
           autoCorrect={false}
           style={[styles.input, { backgroundColor: theme.surface, color: theme.text }]}
-          accessibilityLabel="Google AI API key"
+          accessibilityLabel="Anthropic API key"
         />
         <Pressable
           onPress={connect}
