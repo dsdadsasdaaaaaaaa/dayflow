@@ -13,6 +13,7 @@
 
 // Type-only: no runtime edge back to secretaryTools (which imports the tool
 // types from here), so the two files never form an import cycle at runtime.
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { SecretaryAction } from './secretaryTools';
 
 /**
@@ -20,7 +21,67 @@ import type { SecretaryAction } from './secretaryTools';
  * is the ONE place to change it. A rejected name surfaces as a plain-English
  * error telling the user exactly that.
  */
-export const GEMINI_MODEL = 'gemini-flash-latest';
+/**
+ * Models to try, best first.
+ *
+ * This is a list rather than a constant because of exactly how this feature
+ * broke: it was pinned to "gemini-flash-latest", which quietly resolved to
+ * gemini-2.0-flash, which Google shut down on 2026-06-01. The alias started
+ * 404ing and the secretary was dead from then until someone noticed. Google
+ * ships and retires Flash models every few weeks, so any single hardcoded id
+ * is a scheduled outage.
+ *
+ * On a "no such model" failure the client walks down this list and remembers
+ * whichever one answers, so a retirement costs one wasted request rather than
+ * the whole feature. Newest first; the older entries are the safety net.
+ */
+export const GEMINI_MODELS = [
+  'gemini-3.7-flash',
+  'gemini-3.6-flash',
+  'gemini-3.5-flash',
+  'gemini-2.5-flash',
+] as const;
+
+/** Preferred model — what a fresh install tries first. */
+export const GEMINI_MODEL = GEMINI_MODELS[0];
+
+/** Whichever model last answered, so we do not re-pay the 404 every call. */
+let resolvedModel: string | null = null;
+
+const MODEL_CACHE_KEY = 'dayflow-gemini-model';
+
+/** Restore the last known-good model; safe to call more than once. */
+async function loadResolvedModel(): Promise<void> {
+  if (resolvedModel) return;
+  try {
+    const saved = await AsyncStorage.getItem(MODEL_CACHE_KEY);
+    if (saved && (GEMINI_MODELS as readonly string[]).includes(saved)) {
+      resolvedModel = saved;
+    }
+  } catch {
+    // Cache unavailable — we just re-discover on first call.
+  }
+}
+
+async function rememberModel(model: string): Promise<void> {
+  resolvedModel = model;
+  try {
+    await AsyncStorage.setItem(MODEL_CACHE_KEY, model);
+  } catch {
+    // Not caching only costs a re-discovery next launch.
+  }
+}
+
+/** The order to try this call: last known-good first, then the rest. */
+function modelsToTry(): string[] {
+  const rest = GEMINI_MODELS.filter((m) => m !== resolvedModel);
+  return resolvedModel ? [resolvedModel, ...rest] : [...rest];
+}
+
+/** True when a failure means "this model id is not available to this key". */
+function isUnknownModel(status: number, body: string): boolean {
+  return (status === 404 || status === 400) && /model/i.test(body);
+}
 
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 /** Tool round trips per question before we stop and answer with what we have. */
@@ -147,7 +208,8 @@ function explainHttpFailure(status: number, body: string): string {
   const mentionsModel = /model/i.test(message) || /model/i.test(body);
 
   if ((status === 404 || status === 400) && mentionsModel) {
-    return `Gemini does not recognize the model "${GEMINI_MODEL}". Google renames models regularly — the model name needs updating in the app (GEMINI_MODEL in src/lib/gemini.ts).`;
+    // Only surfaced once every model in GEMINI_MODELS has been refused.
+    return `Gemini does not recognize any of the models this app knows about (${GEMINI_MODELS.join(', ')}). Google retires Flash models regularly — the list in src/lib/gemini.ts needs a newer one.`;
   }
   if (status === 400) {
     return message
@@ -189,36 +251,54 @@ async function postTurn(
     ];
   }
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-  try {
-    const res = await fetch(
-      `${ENDPOINT}/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      }
-    );
-    const text = await res.text();
-    if (!res.ok) return { ok: false, error: explainHttpFailure(res.status, text) };
+  await loadResolvedModel();
+  const candidates = modelsToTry();
+  // Keep the LAST model failure so that if every candidate is refused the
+  // user sees a model-shaped error rather than whatever the final one said.
+  let lastError = 'Gemini did not answer.';
+
+  for (const model of candidates) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
     try {
-      return { ok: true, data: JSON.parse(text) as GeminiResponse };
-    } catch {
-      return { ok: false, error: 'Gemini sent a reply the app could not read.' };
+      const res = await fetch(
+        `${ENDPOINT}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        }
+      );
+      const text = await res.text();
+      if (!res.ok) {
+        lastError = explainHttpFailure(res.status, text);
+        // A retired or unavailable model is the one failure worth retrying:
+        // try the next id. Anything else (bad key, rate limit, outage) would
+        // fail identically on every model, so stop and report it.
+        if (isUnknownModel(res.status, text)) continue;
+        return { ok: false, error: lastError };
+      }
+      try {
+        const data = JSON.parse(text) as GeminiResponse;
+        if (model !== resolvedModel) await rememberModel(model);
+        return { ok: true, data };
+      } catch {
+        return { ok: false, error: 'Gemini sent a reply the app could not read.' };
+      }
+    } catch (e) {
+      const aborted = e instanceof Error && e.name === 'AbortError';
+      return {
+        ok: false,
+        error: aborted
+          ? 'Gemini took too long to answer. Try again.'
+          : 'Could not reach Gemini. Check your connection.',
+      };
+    } finally {
+      clearTimeout(timer);
     }
-  } catch (e) {
-    const aborted = e instanceof Error && e.name === 'AbortError';
-    return {
-      ok: false,
-      error: aborted
-        ? 'Gemini took too long to answer. Try again.'
-        : 'Could not reach Gemini. Check your connection.',
-    };
-  } finally {
-    clearTimeout(timer);
   }
+  return { ok: false, error: lastError };
 }
 
 /**
