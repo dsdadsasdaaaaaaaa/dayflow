@@ -116,14 +116,16 @@ function confirmationDraft(occ: MeetingOccurrence): string {
 }
 
 /**
- * Preset for the first text to someone you already know, from a NEW work
- * number: they have your old one saved, so an unexplained number is easy to
- * ignore or block. Editable in the composer before sending.
+ * Preset for the first text to someone you already know, from a NEWLY rotated
+ * number. Framed as the deliberate practice it is: a rotating line is normal
+ * for discreet work and protects both sides. Reads far better than an
+ * apology, and it primes clients to expect the next rotation instead of being
+ * surprised by it. Editable in the composer before sending.
  */
 const NUMBER_CHANGE_NOTICE =
-  "Hey, it's Drew, I'm using this number for now, my old one is having " +
-  'carrier issues (again). Same me, everything else is unchanged. ' +
-  'Save this one and thanks for bearing with me!';
+  "Hey, it's Drew! I rotate my number every so often, it keeps things " +
+  'private for both of us. This is my current one, so save it and delete the ' +
+  'old one. Same me, nothing else changes.';
 
 /** One conversation: bubbles, day separators, CRM panel, pinned composer. */
 export default function ThreadScreen() {
@@ -152,6 +154,7 @@ export default function ThreadScreen() {
   const retryOutbox = useMessages((s) => s.retryOutbox);
   const discardOutbox = useMessages((s) => s.discardOutbox);
   const scheduleSend = useMessages((s) => s.scheduleSend);
+  const currentNumber = useMessages((s) => s.currentNumber);
   const followUpSnoozedUntil = useMessages((s) => s.followUpSnoozedUntil);
   const followUpDismissed = useMessages((s) => s.followUpDismissed);
   const snoozeFollowUp = useMessages((s) => s.snoozeFollowUp);
@@ -232,6 +235,26 @@ export default function ThreadScreen() {
     noticeSeeded.current = true;
     setDraft((d) => (d.trim() ? d : NUMBER_CHANGE_NOTICE));
   }, [isTelegram, number, messages]);
+
+  /**
+   * Footnote for a message that used a number we have since rotated away
+   * from. Inbound means the client still has an old number saved; outbound
+   * means it predates the current one. Only labelled once we actually have a
+   * current number to compare against, and never on Telegram.
+   */
+  const retiredLabelFor = useCallback(
+    (m: ThreadMsg): string | undefined => {
+      if (isTelegram || !currentNumber) return undefined;
+      const own = 'ownNumber' in m ? m.ownNumber : undefined;
+      if (!own || normalizePhone(own) === normalizePhone(currentNumber)) {
+        return undefined;
+      }
+      return m.direction === 'in'
+        ? `To your old ${formatPhoneDisplay(own)}`
+        : `From your old ${formatPhoneDisplay(own)}`;
+    },
+    [isTelegram, currentNumber]
+  );
 
   const draftRef = useRef(draft);
   draftRef.current = draft;
@@ -767,6 +790,7 @@ export default function ThreadScreen() {
                     : undefined
                 }
                 onPressPhoto={openPhoto}
+                retiredNumberLabel={retiredLabelFor(item.msg)}
               />
             )
           }

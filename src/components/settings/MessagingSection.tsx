@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
@@ -53,10 +54,12 @@ type Busy = 'connect' | 'test' | 'change' | null;
  */
 export function MessagingSection() {
   const theme = useTheme();
+  const router = useRouter();
 
   const configured = useMessages((s) => s.configured);
   const refreshConfigured = useMessages((s) => s.refreshConfigured);
   const clearAll = useMessages((s) => s.clearAll);
+  const previousNumbers = useMessages((s) => s.previousNumbers);
   const clearCalls = useCalls((s) => s.clearAll);
   const callingEnabled = useSettings((s) => s.settings.callingEnabled);
   const callForwardTo = useSettings((s) => s.settings.callForwardTo);
@@ -194,12 +197,19 @@ export function MessagingSection() {
       setNewNumber('');
       successHaptic();
       Alert.alert(
-        'Number switched',
+        'Rotated',
         `Texts now send from ${next}. Your history stays put, and texts to ${creds.fromNumber} keep arriving in the same threads.${
           stale > 0
             ? `\n\n${stale} scheduled message${stale === 1 ? '' : 's'} still queued on the old number — cancel them in the Twilio console if you no longer want them sent.`
             : ''
-        }`
+        }`,
+        [
+          { text: 'Later', style: 'cancel' },
+          {
+            text: 'Tell clients',
+            onPress: () => router.push('/rotation'),
+          },
+        ]
       );
     } finally {
       setBusy(null);
@@ -272,11 +282,25 @@ export function MessagingSection() {
             ) : undefined
           }
         />
+        {previousNumbers.length > 0 ? (
+          <SettingsRow
+            icon="albums"
+            tint={taskColor('violet').solid}
+            label="Tell clients your new number"
+            sublabel={`Still receiving on ${previousNumbers.length} old number${
+              previousNumbers.length === 1 ? '' : 's'
+            }: ${previousNumbers.join(', ')}`}
+            onPress={() => router.push('/rotation')}
+            right={
+              <Ionicons name="chevron-forward" size={16} color={theme.textTertiary} />
+            }
+          />
+        ) : null}
         <SettingsRow
           icon="swap-horizontal"
           tint={taskColor('indigo').solid}
-          label="Change number"
-          sublabel="Same account, new work number — keeps your history"
+          label="Rotate number"
+          sublabel="Move to a new number, keep every conversation"
           onPress={() => setChangingNumber((v) => !v)}
           right={
             busy === 'change' ? (
@@ -304,13 +328,14 @@ export function MessagingSection() {
             />
             <Text style={[styles.hint, { color: theme.textTertiary }]}>
               Messages, clients and call history stay exactly as they are.
-              Calling re-points itself at the new number.
+              Calling re-points itself, and texts to your previous numbers
+              keep arriving in the same threads.
             </Text>
             <Pressable
               onPress={changeNumber}
               disabled={busy !== null || normalizePhone(newNumber).length === 0}
               accessibilityRole="button"
-              accessibilityLabel="Switch to this number"
+              accessibilityLabel="Rotate to this number"
               style={({ pressed }) => [
                 styles.connectBtn,
                 {
@@ -327,7 +352,7 @@ export function MessagingSection() {
               {busy === 'change' ? (
                 <ActivityIndicator size="small" color="#fff" />
               ) : (
-                <Text style={styles.connectLabel}>Switch number</Text>
+                <Text style={styles.connectLabel}>Rotate to this number</Text>
               )}
             </Pressable>
           </View>

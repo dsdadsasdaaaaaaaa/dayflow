@@ -754,9 +754,11 @@ export const useMessages = create<MessagesState>()(
         set((s) => {
           const n = normalizePhone(number);
           if (!n || s.previousNumbers.includes(n)) return s;
-          // Newest first, capped — old numbers stop receiving eventually and
-          // each one costs two queries per sync.
-          return { previousNumbers: [n, ...s.previousNumbers].slice(0, 3) };
+          // Newest first. Rotation is routine here, so keep a deeper tail:
+          // a client who has not written in months may still only have a
+          // number from several rotations ago. Each retired number costs two
+          // queries per sync, which is why this is capped rather than endless.
+          return { previousNumbers: [n, ...s.previousNumbers].slice(0, 6) };
         }),
 
       clearAll: () =>

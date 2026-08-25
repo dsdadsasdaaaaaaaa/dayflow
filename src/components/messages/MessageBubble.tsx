@@ -31,6 +31,8 @@ export interface BubbleMessage {
   voiceDurationSec?: number;
   /** Telegram: TDLib reported the send failed after queuing. */
   failed?: boolean;
+  /** Which of our own numbers carried this message (SMS channel). */
+  ownNumber?: string;
 }
 
 interface Props {
@@ -45,6 +47,13 @@ interface Props {
   pending?: boolean;
   /** Open the full-screen viewer for a tapped photo (URL or local file uri). */
   onPressPhoto?: (url: string) => void;
+  /**
+   * Set when this message did NOT go through the number in use now, i.e. it
+   * reached a number we have since rotated away from. Rendered as a quiet
+   * footnote so the user can tell at a glance that a client is still texting
+   * an old line and has not saved the new one yet.
+   */
+  retiredNumberLabel?: string;
 }
 
 const FAILED = new Set(['failed', 'undelivered', 'canceled']);
@@ -69,7 +78,13 @@ const COPIED_MS = 1500;
  *   the message has a caption, copies it too. One consistent rule: tap is the
  *   primary action, long-press the secondary.
  */
-export function MessageBubble({ msg, showStatus = false, pending, onPressPhoto }: Props) {
+export function MessageBubble({
+  msg,
+  showStatus = false,
+  pending,
+  onPressPhoto,
+  retiredNumberLabel,
+}: Props) {
   const theme = useTheme();
   const out = msg.direction === 'out';
   const mediaUrls = msg.mediaUrls ?? [];
@@ -172,6 +187,11 @@ export function MessageBubble({ msg, showStatus = false, pending, onPressPhoto }
           accessibilityLiveRegion="polite"
         >
           {copied ? 'Copied' : timeLabel}
+        </Text>
+      ) : null}
+      {retiredNumberLabel ? (
+        <Text style={[styles.status, { color: theme.textTertiary }]}>
+          {retiredNumberLabel}
         </Text>
       ) : null}
       {showStatus && msg.status ? (
