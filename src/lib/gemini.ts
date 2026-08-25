@@ -72,6 +72,26 @@ const SYSTEM_INSTRUCTION = [
   'Money is in the user\'s own currency; report amounts exactly as the tools give them.',
 ].join(' ');
 
+/**
+ * The model has no clock. A scheduling assistant that does not know today's
+ * date cannot resolve "tomorrow evening" or pass a sensible date to
+ * get_schedule, so the current moment is stamped into the system instruction
+ * on every request (in the user's own timezone, not UTC).
+ */
+function systemInstructionNow(): string {
+  const now = new Date();
+  const weekday = now.toLocaleDateString('en-US', { weekday: 'long' });
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  const minutes = now.getHours() * 60 + now.getMinutes();
+  return [
+    SYSTEM_INSTRUCTION,
+    `Right now it is ${weekday}, ${y}-${m}-${d}, ${minutes} minutes past midnight local time.`,
+    'Resolve "today", "tomorrow", "this evening" and weekday names against that, and pass real YYYY-MM-DD dates to tools.',
+  ].join(' ');
+}
+
 interface GeminiFunctionCall {
   name?: string;
   args?: Record<string, unknown>;
@@ -135,7 +155,7 @@ async function postTurn(
   tools: ToolSpec[]
 ): Promise<{ ok: true; data: GeminiResponse } | { ok: false; error: string }> {
   const body: Record<string, unknown> = {
-    system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
+    system_instruction: { parts: [{ text: systemInstructionNow() }] },
     contents,
     generationConfig: { temperature: 0.4, maxOutputTokens: 800 },
   };
