@@ -3,15 +3,30 @@ import { useRouter } from 'expo-router';
 import { useMemo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { tapHaptic } from '../../lib/haptics';
+import { normalizePhone } from '../../lib/smsCredentials';
+import { formatPhoneDisplay } from '../messages/format';
 import { clientMetaKey, useClientMeta } from '../../store/clientMeta';
 import { SPACING, useTheme } from '../../theme';
 
 interface Props {
-  /** Real client names the answer referred to. */
+  /**
+   * What the answer referred to, with labels already restored. Usually a
+   * client name, but NOT always: threads and calls that belong to nobody in
+   * the book are labelled by their number, so a raw counterparty can arrive
+   * here too.
+   */
   names: string[];
 }
 
 type Route = { label: string; icon: 'chatbubble-outline' | 'paper-plane-outline' | 'person-outline'; href: string };
+
+/** Phone-shaped enough to be a counterparty rather than someone's name. */
+function looksLikePhone(value: string): boolean {
+  const digits = value.replace(/\D/g, '');
+  // Leading "(" allowed: a display name that is really a formatted number
+  // ("(365) 360-4153") should still open a conversation, not a profile.
+  return digits.length >= 7 && /^[+(\d][\d\s().+-]*$/.test(value.trim());
+}
 
 /**
  * One-tap follow-through under an answer: when the secretary suggests
@@ -27,6 +42,27 @@ export function ClientActions({ names }: Props) {
   const routes = useMemo<Route[]>(() => {
     const out: Route[] = [];
     for (const name of names.slice(0, 4)) {
+      // A Telegram counterparty is already a thread id.
+      if (name.startsWith('tgc:')) {
+        out.push({
+          label: name,
+          icon: 'paper-plane-outline',
+          href: `/thread?number=${encodeURIComponent(name)}`,
+        });
+        continue;
+      }
+      // A bare number is someone with no client record. Their conversation is
+      // the only thing to open — sending them to a profile that was never
+      // created is how this used to dead-end on "client not found".
+      const asPhone = looksLikePhone(name) ? normalizePhone(name) : '';
+      if (asPhone) {
+        out.push({
+          label: formatPhoneDisplay(asPhone),
+          icon: 'chatbubble-outline',
+          href: `/thread?number=${encodeURIComponent(asPhone)}`,
+        });
+        continue;
+      }
       const m = meta[clientMetaKey(name)];
       if (m?.phone) {
         out.push({
