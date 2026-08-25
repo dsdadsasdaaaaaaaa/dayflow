@@ -1,7 +1,7 @@
 import * as Clipboard from 'expo-clipboard';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import type { ChatTurn } from '../../lib/gemini';
+import type { ChatTurn } from '../../lib/secretaryPrompt';
 import { successHaptic } from '../../lib/haptics';
 import { useTheme } from '../../theme';
 import { ActionCards } from './ActionCard';

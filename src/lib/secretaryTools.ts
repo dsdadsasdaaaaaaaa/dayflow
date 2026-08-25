@@ -36,7 +36,7 @@ import {
   type FollowUpChannel,
   type FollowUpOptions,
 } from './followUps';
-import type { ToolRunner, ToolSpec } from './gemini';
+import type { ToolRunner, ToolSpec } from './secretaryPrompt';
 import { clientProfiles, knownClients, meetingOccurrences } from './meetings';
 import { overdueRegulars } from './rebook';
 import { assertNoPii, redactText, type PseudonymMap } from './secretaryPrivacy';

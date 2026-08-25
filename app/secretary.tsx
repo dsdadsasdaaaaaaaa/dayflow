@@ -17,8 +17,8 @@ import { SecretaryBubble } from '../src/components/secretary/SecretaryBubble';
 import { SecretaryPrompts } from '../src/components/secretary/SecretaryPrompts';
 import { TypingDots } from '../src/components/secretary/TypingDots';
 import { VoiceButton } from '../src/components/secretary/VoiceButton';
-import type { ChatTurn } from '../src/lib/gemini';
-import { loadGeminiCredentials } from '../src/lib/geminiCredentials';
+import { loadBrain } from '../src/lib/secretaryBrain';
+import type { ChatTurn } from '../src/lib/secretaryPrompt';
 import { tapHaptic } from '../src/lib/haptics';
 import { useSecretary } from '../src/store/secretary';
 import { SPACING, useTheme } from '../src/theme';
@@ -49,9 +49,9 @@ export default function SecretaryScreen() {
 
   useEffect(() => {
     let alive = true;
-    loadGeminiCredentials()
-      .then((c) => {
-        if (alive) setHasKey(c != null);
+    loadBrain()
+      .then((b) => {
+        if (alive) setHasKey(b != null);
       })
       .catch(() => {
         if (alive) setHasKey(false);
@@ -104,8 +104,8 @@ export default function SecretaryScreen() {
         <View style={styles.lockedWrap}>
           <Text style={[styles.lockedTitle, { color: theme.text }]}>Not connected yet</Text>
           <Text style={[styles.lockedBody, { color: theme.textSecondary }]}>
-            The secretary needs a free Google AI key. Set it up in Settings, then
-            ask it anything about your clients, your week, or your money.
+            The secretary needs an Anthropic API key. Set it up in Settings,
+            then ask it anything about your clients, your week, or your money.
           </Text>
           <Pressable
             onPress={() => {

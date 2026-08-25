@@ -25,7 +25,7 @@ import { useSettings } from './settings';
  * - the LOCAL one, with real client names, which is what gets persisted and
  *   shown on screen. It never leaves the device.
  * - the WIRE one, rebuilt from scratch on every request by running the local
- *   text through a fresh pseudonym map, which is all Gemini ever sees.
+ *   text through a fresh pseudonym map, which is all the model ever sees.
  *
  * The map is rebuilt per request from the current client list, so labels are
  * only meaningful inside one exchange. The whole (trimmed) history is

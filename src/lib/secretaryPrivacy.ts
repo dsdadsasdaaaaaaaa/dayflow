@@ -2,7 +2,7 @@
  * The privacy layer for the AI secretary.
  *
  * Nothing identifying ever leaves the device. Before a single byte reaches
- * Gemini, every real client name is swapped for a per-session pseudonym
+ * the model, every real client name is swapped for a per-session pseudonym
  * ("Client 1", "Client 2"…) and anything phone-shaped is blanked out. The
  * model reasons over structure only — counts, gaps, dates, amounts — and its
  * reply is put back into real names locally, on device, right before display.
