@@ -1,12 +1,18 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { selectionHaptic } from '../../lib/haptics';
 import { SPACING, useTheme } from '../../theme';
+import { LEAD_AMBER } from './status';
 
 export interface StatusFilterOption<T extends string> {
   value: T;
   label: string;
   /** Optional count shown after the label (e.g. leads waiting). */
   count?: number;
+  /**
+   * 'warn' tints an unselected chip's label amber while its count is above
+   * zero (follow-ups waiting). Selected chips always use the accent fill.
+   */
+  tone?: 'default' | 'warn';
 }
 
 interface Props<T extends string> {
@@ -16,8 +22,9 @@ interface Props<T extends string> {
 }
 
 /**
- * Flat filter chip row (All · Leads · Clients). Selected chip is a solid
- * accent fill with white text; the rest are plain cards with hairline borders.
+ * Flat filter chip row (All · Waiting · Leads · Clients). Selected chip is a
+ * solid accent fill with white text; the rest are plain cards with hairline
+ * borders, except a 'warn' chip with a live count, which reads amber.
  */
 export function StatusFilterChips<T extends string>({ options, value, onChange }: Props<T>) {
   const theme = useTheme();
@@ -26,8 +33,10 @@ export function StatusFilterChips<T extends string>({ options, value, onChange }
     <View style={styles.row}>
       {options.map((opt) => {
         const selected = value === opt.value;
-        const label =
-          opt.count != null && opt.count > 0 ? `${opt.label} · ${opt.count}` : opt.label;
+        const hasCount = opt.count != null && opt.count > 0;
+        const label = hasCount ? `${opt.label} · ${opt.count}` : opt.label;
+        const idleColor =
+          opt.tone === 'warn' && hasCount ? LEAD_AMBER : theme.textSecondary;
         return (
           <Pressable
             key={opt.value}
@@ -37,6 +46,7 @@ export function StatusFilterChips<T extends string>({ options, value, onChange }
             }}
             accessibilityRole="button"
             accessibilityState={{ selected }}
+            accessibilityLabel={label}
             style={({ pressed }) => [
               styles.chip,
               selected
@@ -48,7 +58,7 @@ export function StatusFilterChips<T extends string>({ options, value, onChange }
             <Text
               style={[
                 styles.label,
-                { color: selected ? '#FFFFFF' : theme.textSecondary },
+                { color: selected ? '#FFFFFF' : idleColor },
                 selected && styles.labelSelected,
               ]}
             >

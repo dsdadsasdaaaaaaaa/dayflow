@@ -39,6 +39,14 @@ import {
 import { ShareAvailability } from '../src/components/messages/ShareAvailability';
 import { formatPhoneDisplay } from '../src/components/messages/format';
 import {
+  bookedClientKeys,
+  buildFollowUpDraft,
+  buildFollowUps,
+  formatQuietShort,
+  FOLLOW_UP_SNOOZE_MS,
+  type FollowUp,
+} from '../src/lib/followUps';
+import {
   addDays,
   daysBetween,
   formatDayLong,
@@ -74,7 +82,7 @@ import {
 import { useSettings } from '../src/store/settings';
 import { useTasks } from '../src/store/tasks';
 import { telegramChatTitle, useTelegram } from '../src/store/telegramAccount';
-import { SPACING, useTheme } from '../src/theme';
+import { RADIUS, SPACING, useTheme } from '../src/theme';
 import type { DayKey } from '../src/types';
 
 /** A message from either channel — SMS/MMS (Twilio) or Telegram (TDLib). */
@@ -144,6 +152,11 @@ export default function ThreadScreen() {
   const retryOutbox = useMessages((s) => s.retryOutbox);
   const discardOutbox = useMessages((s) => s.discardOutbox);
   const scheduleSend = useMessages((s) => s.scheduleSend);
+  const followUpSnoozedUntil = useMessages((s) => s.followUpSnoozedUntil);
+  const followUpDismissed = useMessages((s) => s.followUpDismissed);
+  const snoozeFollowUp = useMessages((s) => s.snoozeFollowUp);
+  const dismissFollowUp = useMessages((s) => s.dismissFollowUp);
+  const clearFollowUp = useMessages((s) => s.clearFollowUp);
   const tgMessages = useTelegram((s) => s.messages);
   const tgChats = useTelegram((s) => s.chats);
   const typingUntil = useTelegram((s) => s.typingUntil);
@@ -173,6 +186,12 @@ export default function ThreadScreen() {
   const [shareOpen, setShareOpen] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
+  // The follow-up bar is clock-derived ("Quiet for 3 days") — re-tick slowly.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
 
   // Seed the composer from ?draft= (e.g. client-detail's "Request deposit").
   // Once only — never clobber what the user has typed since.
@@ -272,6 +291,8 @@ export default function ThreadScreen() {
   );
 
   const known = useMemo(() => knownClients(tasks), [tasks]);
+  /** Clients with a booking still ahead — no follow-up nudge for those. */
+  const bookedClients = useMemo(() => bookedClientKeys(tasks), [tasks]);
   const clientName = useMemo(
     () =>
       isTelegram
@@ -341,6 +362,49 @@ export default function ThreadScreen() {
     [isTelegram, outbox, number]
   );
 
+  /** Newest message in the thread, whichever channel it arrived on. */
+  const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+
+  // They replied → any snooze/dismiss on this thread is stale. Covers
+  // Telegram too, whose store has no SMS-style merge hook.
+  useEffect(() => {
+    if (!number || lastMsg == null || lastMsg.direction !== 'in') return;
+    clearFollowUp(number);
+  }, [number, lastMsg, clearFollowUp]);
+
+  /** This thread, when it is waiting on a reply (snooze/dismiss respected). */
+  const followUp = useMemo<FollowUp | null>(() => {
+    if (!number || lastMsg == null) return null;
+    const [first] = buildFollowUps({
+      threads: [
+        {
+          counterparty: number,
+          channel: isTelegram ? 'telegram' : 'sms',
+          lastMessage: { direction: lastMsg.direction, sentAt: lastMsg.sentAt },
+        },
+      ],
+      tasks,
+      meta,
+      snoozedUntil: followUpSnoozedUntil,
+      dismissed: followUpDismissed,
+      now: nowMs,
+      clientNames: known,
+      bookedClients,
+    });
+    return first ?? null;
+  }, [
+    number,
+    lastMsg,
+    isTelegram,
+    tasks,
+    meta,
+    followUpSnoozedUntil,
+    followUpDismissed,
+    nowMs,
+    known,
+    bookedClients,
+  ]);
+
   /** Chronological rows with day separators, reversed for the inverted list. */
   const rows = useMemo<Row[]>(() => {
     let lastOutKey: string | null = null;
@@ -407,10 +471,13 @@ export default function ThreadScreen() {
         // own clear lands must not resurrect sent text as a draft.
         draftRef.current = '';
         setThreadDraft(number, '');
+        // A fresh outbound starts its own quiet clock, so an old snooze or
+        // "not needed" must not suppress the next silence forever.
+        clearFollowUp(number);
       }
       return ok;
     },
-    [isTelegram, tgSend, send, number, setThreadDraft]
+    [isTelegram, tgSend, send, number, setThreadDraft, clearFollowUp]
   );
 
   // ── Scheduled sends (SMS only — Twilio holds the message, phone can be off)
@@ -465,6 +532,25 @@ export default function ThreadScreen() {
       })
     );
   }, [clientName, tasks, nextBooking, settings.currencySymbol, insertTemplate]);
+
+  // ── Follow-up nudge (never auto-sent: it only ever seeds the composer) ────
+  const handleFollowUpDraft = useCallback(() => {
+    if (!followUp) return;
+    tapHaptic();
+    insertTemplate(buildFollowUpDraft(followUp.clientName ?? clientName));
+  }, [followUp, clientName, insertTemplate]);
+
+  const handleFollowUpSnooze = useCallback(() => {
+    if (!number) return;
+    tapHaptic();
+    snoozeFollowUp(number, Date.now() + FOLLOW_UP_SNOOZE_MS);
+  }, [number, snoozeFollowUp]);
+
+  const handleFollowUpDismiss = useCallback(() => {
+    if (!number) return;
+    tapHaptic();
+    dismissFollowUp(number);
+  }, [number, dismissFollowUp]);
 
   const quickActions = useMemo<QuickAction[]>(() => {
     const actions: QuickAction[] = [
@@ -733,6 +819,51 @@ export default function ThreadScreen() {
           },
         ]}
       >
+        {/* Gone quiet: a nudge the user sends by hand, or waves off. */}
+        {followUp ? (
+          <View style={[styles.followUpBar, { backgroundColor: theme.surface }]}>
+            <View style={styles.followUpHeader}>
+              <Ionicons name="time-outline" size={14} color={LEAD_AMBER} />
+              <Text style={[styles.followUpTitle, { color: LEAD_AMBER }]} numberOfLines={1}>
+                Quiet for {formatQuietShort(followUp.quietMs)}
+              </Text>
+            </View>
+            <View style={styles.followUpActions}>
+              <Pressable
+                onPress={handleFollowUpDraft}
+                accessibilityRole="button"
+                accessibilityLabel={`Draft a follow up to ${displayTitle}`}
+                style={({ pressed }) => [
+                  styles.followUpPrimary,
+                  { backgroundColor: LEAD_AMBER },
+                  pressed && { opacity: 0.85 },
+                ]}
+              >
+                <Text style={styles.followUpPrimaryLabel}>Follow up</Text>
+              </Pressable>
+              <Pressable
+                onPress={handleFollowUpSnooze}
+                accessibilityRole="button"
+                accessibilityLabel="Snooze this follow up for 3 days"
+                style={({ pressed }) => [styles.followUpGhost, pressed && { opacity: 0.6 }]}
+              >
+                <Text style={[styles.followUpGhostLabel, { color: theme.textSecondary }]}>
+                  Snooze 3 days
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={handleFollowUpDismiss}
+                accessibilityRole="button"
+                accessibilityLabel="No follow up needed for this conversation"
+                style={({ pressed }) => [styles.followUpGhost, pressed && { opacity: 0.6 }]}
+              >
+                <Text style={[styles.followUpGhostLabel, { color: theme.textTertiary }]}>
+                  Not needed
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
         {/* Pending scheduled sends for this thread (renders nothing if none). */}
         {!isTelegram ? <ScheduledBanner counterparty={number} /> : null}
         {!clientName ? <LinkClientRow counterparty={number} /> : null}
@@ -932,6 +1063,25 @@ const styles = StyleSheet.create({
     maxWidth: 260,
     textAlign: 'right',
   },
+  followUpBar: {
+    marginHorizontal: SPACING.lg,
+    marginBottom: SPACING.sm,
+    borderRadius: RADIUS.md,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    gap: 7,
+  },
+  followUpHeader: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  followUpTitle: { flex: 1, fontSize: 12, fontWeight: '600' },
+  followUpActions: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm },
+  followUpPrimary: {
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+  },
+  followUpPrimaryLabel: { color: '#FFFFFF', fontSize: 13, fontWeight: '700' },
+  followUpGhost: { paddingHorizontal: 4, paddingVertical: 7 },
+  followUpGhostLabel: { fontSize: 13, fontWeight: '600' },
   photoProgress: {
     fontSize: 12,
     fontWeight: '500',

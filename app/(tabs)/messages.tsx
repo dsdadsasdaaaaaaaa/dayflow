@@ -15,10 +15,17 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { EmptyState } from '../../src/components/EmptyState';
 import { ScreenHeader } from '../../src/components/ScreenHeader';
 import { ClientThreadRow } from '../../src/components/clients/ClientThreadRow';
+import { LEAD_AMBER } from '../../src/components/clients/status';
 import { StatusFilterChips } from '../../src/components/clients/StatusFilterChips';
 import { ErrorBanner } from '../../src/components/messages/ErrorBanner';
 import { NewMessageSheet } from '../../src/components/messages/NewMessageSheet';
 import { SetupCard } from '../../src/components/messages/SetupCard';
+import {
+  bookedClientKeys,
+  buildFollowUps,
+  formatQuiet,
+  type FollowUp,
+} from '../../src/lib/followUps';
 import { tapHaptic } from '../../src/lib/haptics';
 import { knownClients } from '../../src/lib/meetings';
 import type { SmsMessage } from '../../src/lib/smsApi';
@@ -42,7 +49,10 @@ import {
 } from '../../src/store/telegramAccount';
 import { SPACING, useTheme } from '../../src/theme';
 
-type ThreadFilter = 'all' | 'lead' | 'client';
+type ThreadFilter = 'all' | 'waiting' | 'lead' | 'client';
+
+/** How often the quiet durations (and the Waiting count) re-tick. */
+const QUIET_TICK_MS = 60_000;
 
 /** One row in the unified list — an SMS thread or an imported Telegram chat. */
 interface UnifiedThread {
@@ -73,6 +83,8 @@ export default function MessagesScreen() {
   const configured = useMessages((s) => s.configured);
   const refreshConfigured = useMessages((s) => s.refreshConfigured);
   const sync = useMessages((s) => s.sync);
+  const followUpSnoozedUntil = useMessages((s) => s.followUpSnoozedUntil);
+  const followUpDismissed = useMessages((s) => s.followUpDismissed);
   const tgMessages = useTelegram((s) => s.messages);
   const tgLastReadAt = useTelegram((s) => s.lastReadAt);
   const tgImportedChatIds = useTelegram((s) => s.importedChatIds);
@@ -91,6 +103,9 @@ export default function MessagesScreen() {
     [voicemails, heardAt, meta]
   );
 
+  // Quiet stretches are clock-derived, so the list re-ticks on its own.
+  const [now, setNow] = useState(() => Date.now());
+
   const [sheetOpen, setSheetOpen] = useState(false);
   const [dismissedError, setDismissedError] = useState<string | null>(null);
   const [filter, setFilter] = useState<ThreadFilter>('all');
@@ -107,8 +122,13 @@ export default function MessagesScreen() {
     useCallback(() => {
       void refreshConfigured().then(() => sync());
       if (tgConfigured) void connectAndSync();
+      setNow(Date.now());
       const id = setInterval(() => void sync(), 15000);
-      return () => clearInterval(id);
+      const tick = setInterval(() => setNow(Date.now()), QUIET_TICK_MS);
+      return () => {
+        clearInterval(id);
+        clearInterval(tick);
+      };
     }, [refreshConfigured, sync, tgConfigured, connectAndSync])
   );
 
@@ -126,6 +146,8 @@ export default function MessagesScreen() {
     return [...sms, ...tg].sort((a, b) => b.lastMessage.sentAt - a.lastMessage.sentAt);
   }, [messages, lastReadAt, tgMessages, tgLastReadAt, tgImportedChatIds]);
   const clientNames = useMemo(() => knownClients(tasks), [tasks]);
+  /** Clients with a booking still ahead — they are not loose ends. */
+  const bookedClients = useMemo(() => bookedClientKeys(tasks), [tasks]);
 
   /** counterparty → linked name + CRM status (null status = unknown contact). */
   const infoByNumber = useMemo(() => {
@@ -166,9 +188,50 @@ export default function MessagesScreen() {
     () => activeThreads.filter((t) => statusOf(t) === 'lead').length,
     [activeThreads, statusOf]
   );
+  /** Threads where OUR last message went unanswered, longest-quiet first. */
+  const followUps = useMemo<FollowUp[]>(
+    () =>
+      buildFollowUps({
+        threads: activeThreads,
+        tasks,
+        meta,
+        snoozedUntil: followUpSnoozedUntil,
+        dismissed: followUpDismissed,
+        now,
+        clientNames,
+        bookedClients,
+      }),
+    [
+      activeThreads,
+      tasks,
+      meta,
+      followUpSnoozedUntil,
+      followUpDismissed,
+      now,
+      clientNames,
+      bookedClients,
+    ]
+  );
+  const quietByCounterparty = useMemo(
+    () => new Map(followUps.map((f) => [f.counterparty, f.quietMs] as const)),
+    [followUps]
+  );
+  /** Same order as followUps: the longest silence sits at the top. */
+  const waitingThreads = useMemo(() => {
+    const byId = new Map(activeThreads.map((t) => [t.counterparty, t] as const));
+    return followUps
+      .map((f) => byId.get(f.counterparty))
+      .filter((t): t is UnifiedThread => t != null);
+  }, [followUps, activeThreads]);
+
   const visibleThreads = useMemo(
-    () => (filter === 'all' ? activeThreads : activeThreads.filter((t) => statusOf(t) === filter)),
-    [filter, activeThreads, statusOf]
+    () =>
+      filter === 'all'
+        ? activeThreads
+        : filter === 'waiting'
+          ? waitingThreads
+          : activeThreads.filter((t) => statusOf(t) === filter),
+    [filter, activeThreads, waitingThreads, statusOf]
   );
   /** Unread for the subtitle — blocked threads never count. */
   const unread = useMemo(
@@ -212,6 +275,24 @@ export default function MessagesScreen() {
         dimmed={dimmed}
         onPress={() => openThread(item.counterparty)}
       />
+    );
+  };
+
+  /** Row + the amber "how long they have been quiet" line under it. */
+  const renderWaiting = (item: UnifiedThread) => {
+    const quietMs = quietByCounterparty.get(item.counterparty);
+    return (
+      <View>
+        {renderThread(item)}
+        {quietMs != null ? (
+          <View style={styles.quietRow}>
+            <Ionicons name="time-outline" size={12} color={LEAD_AMBER} />
+            <Text style={[styles.quietText, { color: LEAD_AMBER }]} numberOfLines={1}>
+              {formatQuiet(quietMs)}
+            </Text>
+          </View>
+        ) : null}
+      </View>
     );
   };
 
@@ -381,6 +462,12 @@ export default function MessagesScreen() {
           <StatusFilterChips<ThreadFilter>
             options={[
               { value: 'all', label: 'All' },
+              {
+                value: 'waiting',
+                label: 'Waiting',
+                count: followUps.length,
+                tone: 'warn',
+              },
               { value: 'lead', label: 'Leads', count: leadCount },
               { value: 'client', label: 'Clients' },
             ]}
@@ -390,12 +477,20 @@ export default function MessagesScreen() {
           <FlatList
             data={visibleThreads}
             keyExtractor={(t: UnifiedThread) => t.counterparty}
-            renderItem={({ item }) => renderThread(item)}
+            renderItem={({ item }) =>
+              filter === 'waiting' ? renderWaiting(item) : renderThread(item)
+            }
             ItemSeparatorComponent={() => (
               <View style={[styles.separator, { backgroundColor: theme.separator }]} />
             )}
             ListEmptyComponent={
-              filter !== 'all' ? (
+              filter === 'waiting' ? (
+                <EmptyState
+                  icon="checkmark-done-outline"
+                  title="Nobody is waiting"
+                  subtitle="Threads where your last message went unanswered show up here."
+                />
+              ) : filter !== 'all' ? (
                 <EmptyState
                   icon={filter === 'lead' ? 'sparkles-outline' : 'people-outline'}
                   title={filter === 'lead' ? 'No leads right now' : 'No client threads'}
@@ -466,6 +561,16 @@ const styles = StyleSheet.create({
     height: StyleSheet.hairlineWidth,
     marginLeft: SPACING.lg + 46 + SPACING.md,
   },
+  quietRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: -SPACING.sm,
+    paddingBottom: SPACING.sm + 2,
+    paddingLeft: SPACING.lg + 46 + SPACING.md,
+    paddingRight: SPACING.lg,
+  },
+  quietText: { fontSize: 12, fontWeight: '600', flexShrink: 1 },
   blockedSection: {
     marginTop: SPACING.lg,
   },

@@ -123,6 +123,13 @@ interface MessagesState {
   /** Unsent composer drafts per thread (SMS E.164 or 'tgc:…' keys). */
   threadDrafts: Record<string, string>;
   /**
+   * Follow-up nudges the user pushed out: counterparty → epoch ms until which
+   * the thread stays off the "Waiting" list. Both channels share the map.
+   */
+  followUpSnoozedUntil: Record<string, number>;
+  /** Counterparties the user marked as needing no follow-up. */
+  followUpDismissed: Record<string, true>;
+  /**
    * Work numbers retired by "Change number", newest first. Their history
    * stays in the same threads and clients who still have an old number keep
    * reaching us — every fetch covers them alongside the current number.
@@ -161,6 +168,12 @@ interface MessagesState {
   /** Persist an unsent composer draft per thread ('' clears). Works for
    * Telegram counterparties ('tgc:…') too — one map for both channels. */
   setThreadDraft: (counterparty: string, text: string) => void;
+  /** Hide this thread's follow-up until `untilMs` (epoch ms). */
+  snoozeFollowUp: (counterparty: string, untilMs: number) => void;
+  /** "Not needed" — drop this thread off the follow-up list for good. */
+  dismissFollowUp: (counterparty: string) => void;
+  /** Forget any snooze/dismiss — called when they finally reply. */
+  clearFollowUp: (counterparty: string) => void;
   /** Record a retired work number so its traffic keeps syncing. */
   addPreviousNumber: (number: string) => void;
   clearAll: () => void;
@@ -183,6 +196,43 @@ export function mergeMessage(messages: Record<string, SmsMessage>, m: SmsMessage
     messages[m.sid] = { ...m, mediaUrls: prev.mediaUrls };
   } else {
     messages[m.sid] = m;
+  }
+}
+
+/** Canonical per-thread map key: 'tgc:…' as-is, phone numbers normalized. */
+function threadKey(counterparty: string): string {
+  return counterparty.startsWith('tgc:') ? counterparty : normalizePhone(counterparty);
+}
+
+/**
+ * They replied → any follow-up snooze/dismiss for that thread is stale.
+ * Only counts an inbound message that is now the NEWEST in its thread, so
+ * back-filled history can never resurrect a follow-up the user dismissed.
+ */
+function clearRepliedFollowUps(fetched: SmsMessage[]): void {
+  const newestIn = new Map<string, number>();
+  for (const m of fetched) {
+    if (m.direction !== 'in') continue;
+    const key = normalizePhone(m.counterparty);
+    if (m.sentAt > (newestIn.get(key) ?? 0)) newestIn.set(key, m.sentAt);
+  }
+  if (newestIn.size === 0) return;
+  const state = useMessages.getState();
+  // Almost every sync carries inbound traffic; only pay for the scan below
+  // when one of those threads actually has something to clear.
+  let pending = false;
+  for (const key of newestIn.keys()) {
+    if (key in state.followUpSnoozedUntil || state.followUpDismissed[key]) pending = true;
+  }
+  if (!pending) return;
+  const newestAny = new Map<string, number>();
+  for (const m of Object.values(state.messages)) {
+    if (m.sentAt > (newestAny.get(m.counterparty) ?? 0)) {
+      newestAny.set(m.counterparty, m.sentAt);
+    }
+  }
+  for (const [key, at] of newestIn) {
+    if ((newestAny.get(key) ?? 0) <= at) state.clearFollowUp(key);
   }
 }
 
@@ -219,6 +269,8 @@ export const useMessages = create<MessagesState>()(
       configured: false,
       currentNumber: null,
       threadDrafts: {},
+      followUpSnoozedUntil: {},
+      followUpDismissed: {},
       previousNumbers: [],
       generation: 0,
 
@@ -316,6 +368,8 @@ export const useMessages = create<MessagesState>()(
                 : Math.max(s.highWaterMark ?? 0, newestFetched) || Date.now(),
             };
           });
+          // A reply landed → that thread is answered, not a loose end.
+          if (get().generation === gen) clearRepliedFollowUps(fetched);
         } catch (e) {
           set({ lastError: e instanceof Error ? e.message : 'Sync failed' });
         } finally {
@@ -607,6 +661,7 @@ export const useMessages = create<MessagesState>()(
             // just-arrived message doesn't linger as "unread" while visible.
             return { messages, scheduled, lastSyncAt: Date.now() };
           });
+          if (get().generation === gen) clearRepliedFollowUps(fetched);
         } catch {
           // Poll misses are fine — the next tick (or full sync) catches up.
         }
@@ -662,6 +717,39 @@ export const useMessages = create<MessagesState>()(
           return { threadDrafts };
         }),
 
+      snoozeFollowUp: (counterparty, untilMs) =>
+        set((s) => {
+          const key = threadKey(counterparty);
+          if (!key) return s;
+          return {
+            followUpSnoozedUntil: { ...s.followUpSnoozedUntil, [key]: untilMs },
+          };
+        }),
+
+      dismissFollowUp: (counterparty) =>
+        set((s) => {
+          const key = threadKey(counterparty);
+          if (!key || s.followUpDismissed[key]) return s;
+          return {
+            followUpDismissed: { ...s.followUpDismissed, [key]: true as const },
+          };
+        }),
+
+      clearFollowUp: (counterparty) =>
+        set((s) => {
+          const key = threadKey(counterparty);
+          // No-op when nothing is stored — this runs on every sync that
+          // carries a reply, and must not churn subscribers for nothing.
+          if (!key || (!(key in s.followUpSnoozedUntil) && !s.followUpDismissed[key])) {
+            return s;
+          }
+          const followUpSnoozedUntil = { ...s.followUpSnoozedUntil };
+          const followUpDismissed = { ...s.followUpDismissed };
+          delete followUpSnoozedUntil[key];
+          delete followUpDismissed[key];
+          return { followUpSnoozedUntil, followUpDismissed };
+        }),
+
       addPreviousNumber: (number) =>
         set((s) => {
           const n = normalizePhone(number);
@@ -683,6 +771,8 @@ export const useMessages = create<MessagesState>()(
           lastSyncAt: null,
           lastError: null,
           threadDrafts: {},
+          followUpSnoozedUntil: {},
+          followUpDismissed: {},
           previousNumbers: [],
           currentNumber: null,
           generation: s.generation + 1,
@@ -704,6 +794,8 @@ export const useMessages = create<MessagesState>()(
         scheduled: s.scheduled,
         hiddenSids: s.hiddenSids,
         threadDrafts: s.threadDrafts,
+        followUpSnoozedUntil: s.followUpSnoozedUntil,
+        followUpDismissed: s.followUpDismissed,
         previousNumbers: s.previousNumbers,
       }) as Partial<MessagesState>,
     }

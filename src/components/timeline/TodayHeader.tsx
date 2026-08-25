@@ -117,6 +117,16 @@ export function TodayHeader({
           theme={theme}
           onPress={() => {
             tapHaptic();
+            router.push('/secretary');
+          }}
+          accessibilityLabel="AI secretary"
+        >
+          <Ionicons name="sparkles-outline" size={18} color={theme.accent} />
+        </CircleButton>
+        <CircleButton
+          theme={theme}
+          onPress={() => {
+            tapHaptic();
             router.push('/search');
           }}
           accessibilityLabel="Search everything"
