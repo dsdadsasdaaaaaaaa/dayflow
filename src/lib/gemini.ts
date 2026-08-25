@@ -30,6 +30,12 @@ export interface ChatTurn {
   text: string;
   /** Epoch ms. */
   at: number;
+  /**
+   * Real client names this answer referred to, resolved on-device after the
+   * labels are mapped back. Powers the one-tap "Message X" chips — never sent
+   * anywhere, purely a local display aid.
+   */
+  mentions?: string[];
 }
 
 /** OpenAPI-subset schema for a tool's arguments (Gemini's accepted shape). */

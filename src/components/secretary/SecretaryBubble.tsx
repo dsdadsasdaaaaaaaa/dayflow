@@ -4,6 +4,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import type { ChatTurn } from '../../lib/gemini';
 import { successHaptic } from '../../lib/haptics';
 import { useTheme } from '../../theme';
+import { ClientActions } from './ClientActions';
 
 /** How long the "Copied" confirmation caption stays visible. */
 const COPIED_MS = 1500;
@@ -64,6 +65,9 @@ export function SecretaryBubble({ turn }: Props) {
       </Pressable>
       {copied ? (
         <Text style={[styles.caption, { color: theme.textTertiary }]}>Copied</Text>
+      ) : null}
+      {!mine && turn.mentions && turn.mentions.length > 0 ? (
+        <ClientActions names={turn.mentions} />
       ) : null}
     </View>
   );

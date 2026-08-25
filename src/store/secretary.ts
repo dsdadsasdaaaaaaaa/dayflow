@@ -112,10 +112,19 @@ export const useSecretary = create<SecretaryState>()(
 
         // Labels become real names again on device, right before display.
         const reply = restoreText(outcome.text, map);
+        // Which clients did it actually name? Those get one-tap chips.
+        const mentions = map.entries
+          .filter((e) => reply.includes(e.real))
+          .map((e) => e.real);
         set((s) => ({
           messages: capTurns([
             ...s.messages,
-            { role: 'model', text: reply, at: Date.now() },
+            {
+              role: 'model',
+              text: reply,
+              at: Date.now(),
+              ...(mentions.length > 0 ? { mentions } : {}),
+            },
           ]),
           busy: false,
           lastError: null,
