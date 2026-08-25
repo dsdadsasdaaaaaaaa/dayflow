@@ -23,7 +23,7 @@ import {
   type ClientStatus,
 } from '../store/clientMeta';
 import { useMeetingSession } from '../store/meetingSession';
-import { buildThreads, useMessages } from '../store/messages';
+import { buildThreads, threadMessages, useMessages } from '../store/messages';
 import { useSettings } from '../store/settings';
 import { instancesForDay, useTasks } from '../store/tasks';
 import { buildTelegramThreads, useTelegram } from '../store/telegramAccount';
@@ -54,6 +54,18 @@ const DAY_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_DRAFT_CHARS = 600;
 /** Longest note text handed back for one client. */
 const MAX_NOTE_CHARS = 1200;
+/** Per-message cap when the assistant is allowed to read conversations. */
+const MAX_BODY_CHARS = 400;
+
+/** One message as the assistant sees it: who, how long ago, what it said. */
+interface ConversationRow {
+  from: 'client' | 'you';
+  hoursAgo: number;
+  text: string;
+}
+/** Messages returned per get_conversation call. */
+const DEFAULT_CONVERSATION_LIMIT = 20;
+const MAX_CONVERSATION_LIMIT = 50;
 
 // -------------------------------------------------------------- proposals
 
@@ -204,6 +216,31 @@ const NOTES_TOOL: ToolSpec = {
 };
 
 /**
+ * Only offered when the user has switched message reading on. Same principle
+ * as the notes tool: a tool the model cannot see is a promise it cannot
+ * break, which is stronger than a tool that is present and refuses.
+ */
+const CONVERSATION_TOOL: ToolSpec = {
+  name: 'get_conversation',
+  description:
+    "The actual back-and-forth with one client, newest last, by label. The user has explicitly allowed you to read their messages. Names, phone numbers and emails inside the text are still replaced with labels or hidden. Use this to understand what was actually said — what they asked for, what they agreed to, why they went quiet — instead of guessing from timing alone. Quote at most a short phrase back; summarize rather than reciting.",
+  parameters: {
+    type: 'object',
+    properties: {
+      client: {
+        type: 'string',
+        description: 'The client label exactly as another tool gave it, e.g. "Client 3".',
+      },
+      limit: {
+        type: 'integer',
+        description: `How many recent messages to read (default ${DEFAULT_CONVERSATION_LIMIT}, max ${MAX_CONVERSATION_LIMIT}).`,
+      },
+    },
+    required: ['client'],
+  },
+};
+
+/**
  * The two tools that produce something rather than report something. Both
  * only PREPARE: the user reviews and confirms on device. The descriptions say
  * so plainly, because the model's own wording is what the user reads.
@@ -258,14 +295,19 @@ const WRITE_TOOLS: ToolSpec[] = [
 ];
 
 /**
- * The tool list for one request. `usesNotes` is
- * `settings.secretaryUsesNotes` — when it is off the notes tool is ABSENT,
- * not merely refusing.
+ * The tool list for one request. Both extras are ABSENT rather than refusing
+ * when their setting is off — the model cannot call what it was never shown.
  */
-export function secretaryTools(usesNotes: boolean): ToolSpec[] {
-  return usesNotes
-    ? [...READ_TOOLS, NOTES_TOOL, ...WRITE_TOOLS]
-    : [...READ_TOOLS, ...WRITE_TOOLS];
+export function secretaryTools(
+  usesNotes: boolean,
+  readsMessages = false
+): ToolSpec[] {
+  return [
+    ...READ_TOOLS,
+    ...(usesNotes ? [NOTES_TOOL] : []),
+    ...(readsMessages ? [CONVERSATION_TOOL] : []),
+    ...WRITE_TOOLS,
+  ];
 }
 
 // ----------------------------------------------------------------- helpers
@@ -827,6 +869,79 @@ function toolGetClientNotes(
   };
 }
 
+/**
+ * The real conversation with one client, scrubbed on the way out.
+ *
+ * Only reachable when the user switched message reading on: the tool is not
+ * declared otherwise, and this checks the setting again so a stale tool
+ * definition in an in-flight request cannot slip through.
+ *
+ * A label may stand for a named client OR for a bare counterparty we never
+ * linked, so both are resolved. Bodies keep their real wording — that is the
+ * point of the feature — but every name in the session map becomes its label
+ * and phone numbers and emails are blanked, so the model reads what was said
+ * without learning who said it.
+ */
+function toolGetConversation(
+  map: PseudonymMap,
+  args: Record<string, unknown>
+):
+  | { label: string; channel: FollowUpChannel; messages: ConversationRow[] }
+  | { error: string } {
+  if (!useSettings.getState().settings.secretaryReadsMessages) {
+    return { error: 'The user has not allowed messages to be read.' };
+  }
+  const label = typeof args.client === 'string' ? args.client.trim() : '';
+  const real = label ? map.toReal(label) : null;
+  if (!real) {
+    return {
+      error:
+        'That is not one of the client labels from the other tools. Call list_clients or get_unanswered and use a label exactly as it appears there.',
+    };
+  }
+  const rawLimit = typeof args.limit === 'number' ? args.limit : DEFAULT_CONVERSATION_LIMIT;
+  const limit = Math.min(Math.max(Math.floor(rawLimit) || DEFAULT_CONVERSATION_LIMIT, 1), MAX_CONVERSATION_LIMIT);
+
+  const meta = useClientMeta.getState().meta;
+  const displayNames = knownClients(useTasks.getState().tasks);
+  const now = Date.now();
+
+  const row = (direction: 'in' | 'out', sentAt: number, body: string): ConversationRow => ({
+    from: direction === 'in' ? 'client' : 'you',
+    hoursAgo: round1((now - sentAt) / 3_600_000),
+    text: redactText(body.trim(), map).slice(0, MAX_BODY_CHARS),
+  });
+
+  // SMS first: match the thread whose counterparty resolves to this client,
+  // or whose bare number IS the label when they were never linked.
+  const messagesState = useMessages.getState();
+  for (const t of buildThreads(messagesState.messages, messagesState.lastReadAt)) {
+    const named = clientNameForPhone(meta, t.counterparty, displayNames);
+    if (named !== real && t.counterparty !== real) continue;
+    const rows = threadMessages(messagesState.messages, t.counterparty, messagesState.hiddenSids)
+      .slice(-limit)
+      .map((m) => row(m.direction, m.sentAt, m.body ?? ''))
+      .filter((r) => r.text.length > 0);
+    return { label: map.toPseudo(real), channel: 'sms', messages: rows };
+  }
+
+  // Then Telegram, keyed by chat id rather than a number.
+  const tg = useTelegram.getState();
+  for (const t of buildTelegramThreads(tg)) {
+    const named = clientNameForTelegram(meta, t.counterparty, displayNames);
+    if (named !== real && t.counterparty !== real) continue;
+    const rows = Object.values(tg.messages)
+      .filter((m) => m.counterparty === t.counterparty)
+      .sort((a, b) => a.sentAt - b.sentAt)
+      .slice(-limit)
+      .map((m) => row(m.direction, m.sentAt, m.body ?? ''))
+      .filter((r) => r.text.length > 0);
+    return { label: map.toPseudo(real), channel: 'telegram', messages: rows };
+  }
+
+  return { error: 'No conversation on this phone for that label.' };
+}
+
 // ------------------------------------------------------------- proposals
 
 /** What a write tool tells the model: prepared, never done. */
@@ -937,6 +1052,9 @@ export function buildToolRunner(map: PseudonymMap, sink: SecretaryAction[]): Too
         break;
       case 'get_client_notes':
         result = toolGetClientNotes(map, args);
+        break;
+      case 'get_conversation':
+        result = toolGetConversation(map, args);
         break;
       case 'draft_message':
         result = toolDraftMessage(sink, args);

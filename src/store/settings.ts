@@ -42,6 +42,7 @@ export const DEFAULT_SETTINGS: Settings = {
   safetyMessage:
     "Automated safety alert: I haven't checked in after a meeting. Please check on me.",
   secretaryUsesNotes: false,
+  secretaryReadsMessages: false,
   onboardingDone: false,
 };
 

@@ -247,5 +247,11 @@ export interface Settings {
    * not even offered to it.
    */
   secretaryUsesNotes: boolean;
+  /**
+   * Let the assistant read what messages actually SAY, not just when they
+   * arrived. Off by default: message bodies are the most sensitive thing on
+   * this phone, so reading them is a deliberate choice and never a default.
+   */
+  secretaryReadsMessages: boolean;
   onboardingDone: boolean;
 }

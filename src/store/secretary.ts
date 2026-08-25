@@ -115,11 +115,12 @@ export const useSecretary = create<SecretaryState>()(
         const proposals: SecretaryAction[] = [];
         // The notes tool is absent, not merely refused, when the user has not
         // opted in — the model cannot call what it was never offered.
-        const usesNotes = useSettings.getState().settings.secretaryUsesNotes;
+        const { secretaryUsesNotes: usesNotes, secretaryReadsMessages: readsMessages } =
+          useSettings.getState().settings;
         const outcome = await askBrain(
           brain,
           history,
-          secretaryTools(usesNotes),
+          secretaryTools(usesNotes, readsMessages),
           buildToolRunner(map, proposals)
         );
         if (!outcome.ok) {

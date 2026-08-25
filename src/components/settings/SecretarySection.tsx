@@ -50,7 +50,13 @@ function detectBrain(key: string): BrainId | null {
  * that stops being true the moment a switch is flipped is worse than no
  * promise at all.
  */
-function PrivacyNote({ usesNotes }: { usesNotes: boolean }) {
+function PrivacyNote({
+  usesNotes,
+  readsMessages,
+}: {
+  usesNotes: boolean;
+  readsMessages: boolean;
+}) {
   const theme = useTheme();
   return (
     <View style={[styles.privacy, { backgroundColor: theme.surface }]}>
@@ -67,8 +73,12 @@ function PrivacyNote({ usesNotes }: { usesNotes: boolean }) {
           : 'Not sent: your client notes. With the switch off the assistant is not even given a way to ask for them.'}
       </Text>
       <Text style={[styles.privacyLine, { color: theme.textSecondary }]}>
-        Never sent: names, phone numbers, addresses, or the contents of any
-        message or voicemail.
+        {readsMessages
+          ? 'Also sent: what your messages actually say, for the clients it looks up. Names, numbers and emails inside them are swapped for labels first, but the wording itself goes as written.'
+          : 'Not sent: the contents of your messages. With the switch off the assistant can see when someone wrote, never what they said.'}
+      </Text>
+      <Text style={[styles.privacyLine, { color: theme.textSecondary }]}>
+        Never sent: names, phone numbers, addresses, or voicemail audio.
       </Text>
     </View>
   );
@@ -84,6 +94,7 @@ export function SecretarySection() {
   const setEnabled = useSecretary((s) => s.setEnabled);
   const clearChat = useSecretary((s) => s.clear);
   const usesNotes = useSettings((s) => s.settings.secretaryUsesNotes);
+  const readsMessages = useSettings((s) => s.settings.secretaryReadsMessages);
   const update = useSettings((s) => s.update);
 
   const [key, setKey] = useState('');
@@ -212,8 +223,32 @@ export function SecretarySection() {
             accessibilityLabel="Let the secretary read client notes"
           />
         </View>
+        <View style={styles.noteRow}>
+          <View style={[styles.iconCircle, { backgroundColor: taskColor('rose').solid }]}>
+            <Ionicons name="chatbubbles" size={16} color="#fff" />
+          </View>
+          <View style={styles.noteLabels}>
+            <Text style={[styles.noteLabel, { color: theme.text }]}>
+              Let it read your messages
+            </Text>
+            <Text style={[styles.noteSub, { color: theme.textTertiary }]}>
+              It can answer from what was actually said, not just who went
+              quiet. This is the most it ever sends.
+            </Text>
+          </View>
+          <Switch
+            value={readsMessages}
+            onValueChange={(on) => {
+              selectionHaptic();
+              update({ secretaryReadsMessages: on });
+            }}
+            trackColor={{ false: theme.surface, true: theme.accent }}
+            ios_backgroundColor={theme.surface}
+            accessibilityLabel="Let the secretary read message contents"
+          />
+        </View>
         <View style={styles.privacyInset}>
-          <PrivacyNote usesNotes={usesNotes} />
+          <PrivacyNote usesNotes={usesNotes} readsMessages={readsMessages} />
         </View>
         <SettingsRow
           icon="trash"
@@ -244,7 +279,7 @@ export function SecretarySection() {
           answer.
         </Text>
 
-        <PrivacyNote usesNotes={usesNotes} />
+        <PrivacyNote usesNotes={usesNotes} readsMessages={readsMessages} />
 
         <Pressable
           onPress={() => {

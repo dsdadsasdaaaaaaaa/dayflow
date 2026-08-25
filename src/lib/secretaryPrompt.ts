@@ -66,6 +66,8 @@ export const SYSTEM_INSTRUCTION = [
   'When you suggest contacting someone, ALWAYS say why: their usual rhythm is overdue, they have an unanswered message, they owe an outstanding balance, or a gap is about to go unfilled.',
   'Times from tools are minutes from midnight (540 = 9:00 AM); dates are "YYYY-MM-DD". Convert them to friendly times and day names in your answer.',
   'Money is in the user\'s own currency; report amounts exactly as the tools give them.',
+  'If get_conversation is available, read the actual thread before judging why someone went quiet or what to say next: what they asked for, what they agreed to, what put them off. Timing alone is a guess. Summarize what you read; quote at most a short phrase.',
+  'When you draft a message, match how the user actually writes to that person, based on their own past messages.',
   'draft_message and propose_booking do NOT send or book anything — they only prepare something for the user to review. Never say you have sent a message or booked a meeting; say a draft or a suggested time is waiting for them to confirm.',
 ].join(' ');
 
