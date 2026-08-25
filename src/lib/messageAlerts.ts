@@ -6,8 +6,7 @@ import { useClientMeta, isPhoneBlocked } from '../store/clientMeta';
 import { mergeMessage, useMessages } from '../store/messages';
 import { isPushRelayActive } from './push';
 import { maybeEscalate } from './safety';
-import { listRecentSms } from './smsApi';
-import { loadSmsCredentials } from './smsCredentials';
+import { listRecent, loadMessagingCredentials } from './messaging';
 
 /**
  * Inbound-message alerting without a server:
@@ -35,7 +34,7 @@ async function awaitMessagesHydration(): Promise<void> {
 
 /** Fire local notifications for inbound messages newer than the last check. */
 async function notifyNewInbound(): Promise<void> {
-  const creds = await loadSmsCredentials();
+  const creds = await loadMessagingCredentials();
   if (!creds) return;
 
   // A cold-started background task can run before persist rehydrates — an
@@ -50,7 +49,7 @@ async function notifyNewInbound(): Promise<void> {
       .filter((m) => m.mediaUrls && m.mediaUrls.length > 0)
       .map((m) => m.sid)
   );
-  const fetched = await listRecentSms(creds, 50, knownMediaSids);
+  const fetched = await listRecent(creds, 50, knownMediaSids);
 
   const metaNow = useClientMeta.getState().meta;
   const fresh = fetched.filter(

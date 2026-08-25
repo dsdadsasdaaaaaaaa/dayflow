@@ -5,17 +5,23 @@ import { uid } from '../lib/id';
 import {
   cancelScheduledSms,
   explainSmsFailure,
-  fetchMediaUrls,
-  fetchSmsStatus,
-  listOlderSms,
-  listRecentSms,
-  listThreadToday,
   SmsSendError,
   scheduleSms,
-  sendSms,
   type SmsMessage,
 } from '../lib/smsApi';
 import { primeMediaCache } from '../lib/mediaCache';
+import {
+  fetchMedia,
+  fetchStatus,
+  listOlder,
+  listRecent,
+  listThread,
+  loadMessagingCredentials,
+  ownNumberOf,
+  sendMessage,
+  supportsScheduling,
+  SCHEDULING_UNSUPPORTED,
+} from '../lib/messaging';
 import { loadSmsCredentials, normalizePhone } from '../lib/smsCredentials';
 import { uploadPhotoAsset } from '../lib/twilioAssets';
 import { PERSIST_VERSION, migrateStore } from './persistVersion';
@@ -275,16 +281,16 @@ export const useMessages = create<MessagesState>()(
       generation: 0,
 
       refreshConfigured: async () => {
-        const creds = await loadSmsCredentials();
+        const creds = await loadMessagingCredentials();
         set({
           configured: creds != null,
-          currentNumber: creds ? normalizePhone(creds.fromNumber) : null,
+          currentNumber: creds ? normalizePhone(ownNumberOf(creds)) : null,
         });
       },
 
       sync: async () => {
         if (get().syncing) return;
-        const creds = await loadSmsCredentials();
+        const creds = await loadMessagingCredentials();
         if (!creds) {
           set({ configured: false });
           return;
@@ -310,8 +316,8 @@ export const useMessages = create<MessagesState>()(
           const previousNumbers = get().previousNumbers;
           const fetched =
             mark == null
-              ? await listRecentSms(creds, PAGE_SIZE, knownMediaSids, { previousNumbers })
-              : await listRecentSms(creds, PAGE_SIZE, knownMediaSids, {
+              ? await listRecent(creds, PAGE_SIZE, knownMediaSids, { previousNumbers })
+              : await listRecent(creds, PAGE_SIZE, knownMediaSids, {
                   sentAfterMs: mark - CLOCK_SKEW_MS,
                   maxPagesPerDirection: SYNC_PAGES_PER_DIRECTION,
                   previousNumbers,
@@ -378,7 +384,7 @@ export const useMessages = create<MessagesState>()(
       },
 
       send: async (to, body, mediaUrls) => {
-        const creds = await loadSmsCredentials();
+        const creds = await loadMessagingCredentials();
         const target = normalizePhone(to);
         if (!creds) {
           // Still file it in the outbox — the text isn't lost, and retry
@@ -393,7 +399,7 @@ export const useMessages = create<MessagesState>()(
         set({ sendingTo: target, lastError: null });
         const gen = get().generation;
         try {
-          const sent = await sendSms(creds, target, body, mediaUrls);
+          const sent = await sendMessage(creds, target, body, mediaUrls);
           set((s) => {
             if (s.generation !== gen) return s;
             const messages = { ...s.messages };
@@ -406,7 +412,7 @@ export const useMessages = create<MessagesState>()(
           for (const delay of [4000, 15000]) {
             setTimeout(async () => {
               if (get().generation !== gen) return;
-              const updated = await fetchSmsStatus(creds, sent.sid);
+              const updated = await fetchStatus(creds, sent.sid);
               if (!updated) return;
               if (FAILED_SEND.has(updated.status)) {
                 // The carrier rejected it after the fact — move the message
@@ -458,9 +464,15 @@ export const useMessages = create<MessagesState>()(
       },
 
       sendPhoto: async (to, localUri) => {
+        // Photo hosting stays on Twilio Assets whichever route sends the
+        // message: it is static file hosting, not messaging, so none of the
+        // carrier filtering that drove us off Twilio applies to it.
         const creds = await loadSmsCredentials();
         if (!creds) {
-          set({ configured: false, lastError: 'Messaging is not set up yet.' });
+          set({
+            configured: false,
+            lastError: 'Sending photos needs your Twilio account connected for image hosting.',
+          });
           return false;
         }
         set({ photoSending: 'uploading', lastError: null });
@@ -502,7 +514,7 @@ export const useMessages = create<MessagesState>()(
       loadOlder: async (counterparty) => {
         const key = normalizePhone(counterparty);
         if (get().loadingOlder != null) return;
-        const creds = await loadSmsCredentials();
+        const creds = await loadMessagingCredentials();
         if (!creds) {
           set({ configured: false });
           return;
@@ -517,7 +529,7 @@ export const useMessages = create<MessagesState>()(
               .filter((m) => m.mediaUrls && m.mediaUrls.length > 0)
               .map((m) => m.sid)
           );
-          const fetched = await listOlderSms(
+          const fetched = await listOlder(
             creds,
             key,
             oldest.sentAt,
@@ -546,7 +558,7 @@ export const useMessages = create<MessagesState>()(
       },
 
       scheduleSend: async (to, body, sendAtMs) => {
-        const creds = await loadSmsCredentials();
+        const creds = await loadMessagingCredentials();
         if (!creds) {
           set({ configured: false, lastError: 'Messaging is not set up yet.' });
           return false;
@@ -554,7 +566,11 @@ export const useMessages = create<MessagesState>()(
         const target = normalizePhone(to);
         set({ lastError: null });
         try {
-          const msg = await scheduleSms(creds, target, body, sendAtMs);
+          if (!supportsScheduling(creds)) {
+            set({ lastError: SCHEDULING_UNSUPPORTED });
+            return false;
+          }
+          const msg = await scheduleSms(creds.twilio, target, body, sendAtMs);
           set((s) => ({
             scheduled: { ...s.scheduled, [msg.sid]: { to: target, body, sendAtMs } },
           }));
@@ -566,14 +582,18 @@ export const useMessages = create<MessagesState>()(
       },
 
       cancelScheduled: async (sid) => {
-        const creds = await loadSmsCredentials();
+        const creds = await loadMessagingCredentials();
         if (!creds) {
           set({ configured: false, lastError: 'Messaging is not set up yet.' });
           return false;
         }
         set({ lastError: null });
         try {
-          await cancelScheduledSms(creds, sid);
+          if (!supportsScheduling(creds)) {
+            set({ lastError: SCHEDULING_UNSUPPORTED });
+            return false;
+          }
+          await cancelScheduledSms(creds.twilio, sid);
           set((s) => {
             const scheduled = { ...s.scheduled };
             delete scheduled[sid];
@@ -616,7 +636,7 @@ export const useMessages = create<MessagesState>()(
         })),
 
       pollThread: async (counterparty) => {
-        const creds = await loadSmsCredentials();
+        const creds = await loadMessagingCredentials();
         if (!creds) return;
         const gen = get().generation;
         try {
@@ -625,7 +645,7 @@ export const useMessages = create<MessagesState>()(
               .filter((m) => m.mediaUrls && m.mediaUrls.length > 0)
               .map((m) => m.sid)
           );
-          const fetched = await listThreadToday(
+          const fetched = await listThread(
             creds,
             counterparty,
             20,
@@ -671,7 +691,7 @@ export const useMessages = create<MessagesState>()(
         // Photos whose Media.json was never resolved (over the per-sync cap,
         // or a transient failure) get one bounded retry when their thread is
         // actually being looked at — newest first.
-        const creds = await loadSmsCredentials();
+        const creds = await loadMessagingCredentials();
         if (!creds) return;
         const gen = get().generation;
         const key = normalizePhone(counterparty);
@@ -686,7 +706,7 @@ export const useMessages = create<MessagesState>()(
           .slice(0, 10);
         if (missing.length === 0) return;
         const resolved = await Promise.all(
-          missing.map(async (m) => ({ sid: m.sid, urls: await fetchMediaUrls(creds, m.sid) }))
+          missing.map(async (m) => ({ sid: m.sid, urls: await fetchMedia(creds, m.sid) }))
         );
         set((s) => {
           if (s.generation !== gen) return s;

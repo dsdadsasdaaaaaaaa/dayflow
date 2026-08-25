@@ -11,6 +11,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BackButton } from '../src/components/clients/BackButton';
 import { CallingSection } from '../src/components/settings/CallingSection';
 import { MessagingSection } from '../src/components/settings/MessagingSection';
+import { SimRouteSection } from '../src/components/settings/SimRouteSection';
 import { SafetySection } from '../src/components/settings/SafetySection';
 import { TelegramSection } from '../src/components/settings/TelegramSection';
 import { SPACING, useTheme } from '../src/theme';
@@ -44,6 +45,7 @@ export default function SettingsMessagingScreen() {
           ]}
         >
           <MessagingSection />
+          <SimRouteSection />
           <TelegramSection />
           <CallingSection />
           <SafetySection />

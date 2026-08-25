@@ -143,16 +143,33 @@ function looksLikeMedia(res: Response): boolean {
  * the signed URL). So: try authed first; on a non-media result, retry bare
  * (Twilio media URLs are fetchable without auth by default).
  */
-async function fetchMediaResponse(creds: SmsCredentials, mediaUrl: string): Promise<Response> {
-  const auth = 'Basic ' + btoa(`${creds.accountSid}:${creds.authToken}`);
-  let lastStatus = 0;
+/** Twilio's media subresource is the only host our Basic auth belongs to. */
+function isTwilioMedia(url: string): boolean {
   try {
-    const res = await fetch(mediaUrl, { headers: { Authorization: auth } });
-    lastStatus = res.status;
-    if (looksLikeMedia(res)) return res;
-    console.warn(`[mediaCache] authed fetch not media (${res.status}); retrying without auth`);
-  } catch (e) {
-    console.warn('[mediaCache] authed fetch failed; retrying without auth', e);
+    return new URL(url).hostname.endsWith('.twilio.com');
+  } catch {
+    return false;
+  }
+}
+
+async function fetchMediaResponse(
+  creds: SmsCredentials | null,
+  mediaUrl: string
+): Promise<Response> {
+  let lastStatus = 0;
+  // Never offer credentials to a host that is not Twilio: other routes (e.g.
+  // Telerivet) serve attachments from their own public URLs, and an
+  // Authorization header aimed at them would leak the account token.
+  if (creds && isTwilioMedia(mediaUrl)) {
+    const auth = 'Basic ' + btoa(`${creds.accountSid}:${creds.authToken}`);
+    try {
+      const res = await fetch(mediaUrl, { headers: { Authorization: auth } });
+      lastStatus = res.status;
+      if (looksLikeMedia(res)) return res;
+      console.warn(`[mediaCache] authed fetch not media (${res.status}); retrying without auth`);
+    } catch (e) {
+      console.warn('[mediaCache] authed fetch failed; retrying without auth', e);
+    }
   }
   const bare = await fetch(mediaUrl);
   if (looksLikeMedia(bare)) return bare;
@@ -165,7 +182,7 @@ async function fetchMediaResponse(creds: SmsCredentials, mediaUrl: string): Prom
  * Returns null on failure (safe to retry later).
  */
 export async function getMediaDataUri(
-  creds: SmsCredentials,
+  creds: SmsCredentials | null,
   mediaUrl: string
 ): Promise<string | null> {
   if (!mediaUrl) return null;
@@ -270,10 +287,6 @@ export function useMediaDataUri(mediaUrl: string | undefined): MediaLoadState {
     (async () => {
       try {
         const creds = await loadSmsCredentials();
-        if (!creds) {
-          if (alive) setState({ uri: null, loading: false, error: 'Messaging is not set up.' });
-          return;
-        }
         const uri = await getMediaDataUri(creds, mediaUrl);
         if (!alive) return;
         setState(

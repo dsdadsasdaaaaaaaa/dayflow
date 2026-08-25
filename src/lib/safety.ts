@@ -5,8 +5,8 @@ import { useSyncExternalStore } from 'react';
 import { DEFAULT_SETTINGS, useSettings } from '../store/settings';
 import { useTasks } from '../store/tasks';
 import { ensureNotificationPermission } from './notifications';
-import { sendSms } from './smsApi';
-import { loadSmsCredentials, normalizePhone } from './smsCredentials';
+import { loadMessagingCredentials, sendMessage, type MessagingCreds } from './messaging';
+import { normalizePhone } from './smsCredentials';
 import type { SmsCredentials } from './smsCredentials';
 
 /**
@@ -316,7 +316,7 @@ function buildAlertBody(template: string, location: string): string {
 interface DueEscalation {
   armed: SafetyEscalation;
   to: string;
-  creds: SmsCredentials;
+  creds: MessagingCreds;
   body: string;
 }
 
@@ -345,7 +345,7 @@ async function checkDue(): Promise<DueEscalation | null> {
     return null;
   }
   const to = normalizePhone(trustedContactPhone);
-  const creds = await loadSmsCredentials();
+  const creds = await loadMessagingCredentials();
   if (!to || !creds) {
     await disarmSafetyEscalation();
     return null;
@@ -362,7 +362,7 @@ async function checkDue(): Promise<DueEscalation | null> {
  */
 async function sendEscalation(due: DueEscalation): Promise<void> {
   if (current !== due.armed) return; // disarmed since the check
-  await sendSms(due.creds, due.to, due.body);
+  await sendMessage(due.creds, due.to, due.body);
   await disarmSafetyEscalation();
   await Notifications.scheduleNotificationAsync({
     content: { title: 'DayFlow', body: 'Trusted contact alerted.', sound: true },
