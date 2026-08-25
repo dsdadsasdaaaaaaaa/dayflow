@@ -511,6 +511,55 @@ async function findPhoneNumberSid(creds: SmsCredentials): Promise<string | null>
   return json?.incoming_phone_numbers?.[0]?.sid ?? null;
 }
 
+/** What the account actually knows about a number we are about to send from. */
+export interface NumberCheck {
+  /** The number exists on this Twilio account. */
+  found: boolean;
+  /** Carrier capabilities Twilio reports for it. */
+  sms: boolean;
+  mms: boolean;
+}
+
+/**
+ * Confirm a number is really on the account before we start sending from it.
+ *
+ * verifySmsCredentials only proves the account SID and token are good — it
+ * says nothing about the number, so a typo or a number that was never bought
+ * would report success and then fail on every single send (21606). Rotating
+ * numbers is routine here, which makes that a trap worth closing at the point
+ * of the switch rather than discovering it on the first client text.
+ *
+ * The same lookup reports capabilities, so a number that cannot do MMS is
+ * caught before photos start failing.
+ */
+export async function checkNumberOnAccount(
+  creds: SmsCredentials
+): Promise<NumberCheck> {
+  const own = encodeURIComponent(normalizePhone(creds.fromNumber));
+  try {
+    const res = await fetch(
+      `${baseUrl(creds)}/IncomingPhoneNumbers.json?PhoneNumber=${own}`,
+      { headers: { Authorization: authHeader(creds) } }
+    );
+    if (!res.ok) return { found: false, sms: false, mms: false };
+    const json = (await res.json().catch(() => null)) as {
+      incoming_phone_numbers?: {
+        sid?: string;
+        capabilities?: { sms?: boolean; mms?: boolean };
+      }[];
+    } | null;
+    const hit = json?.incoming_phone_numbers?.[0];
+    if (!hit?.sid) return { found: false, sms: false, mms: false };
+    return {
+      found: true,
+      sms: hit.capabilities?.sms !== false,
+      mms: hit.capabilities?.mms !== false,
+    };
+  } catch {
+    return { found: false, sms: false, mms: false };
+  }
+}
+
 /** Whether the service already has the user's number attached. */
 async function serviceHasNumber(creds: SmsCredentials, serviceSid: string): Promise<boolean> {
   const res = await fetch(

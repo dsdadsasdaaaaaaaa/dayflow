@@ -12,6 +12,7 @@ import {
 import { successHaptic, tapHaptic, warningHaptic } from '../../lib/haptics';
 import {
   cancelScheduledSms,
+  checkNumberOnAccount,
   clearMessagingServiceState,
   verifySmsCredentials,
 } from '../../lib/smsApi';
@@ -166,6 +167,26 @@ export function MessagingSection() {
         Alert.alert('Could not verify', 'Twilio rejected those credentials.');
         return;
       }
+      // Credentials being valid says nothing about the number. Catch a typo
+      // or a number that was never bought here, rather than on the first
+      // client text — every send from a number Twilio does not own fails.
+      const check = await checkNumberOnAccount(updated);
+      if (!check.found) {
+        warningHaptic();
+        Alert.alert(
+          'Number not on your account',
+          `${next} is not one of your Twilio numbers. Buy it in the Twilio console first, then switch to it here.`
+        );
+        return;
+      }
+      if (!check.sms) {
+        warningHaptic();
+        Alert.alert(
+          'Not a texting number',
+          `${next} is on your account but Twilio does not list it as SMS capable. Pick a number with texting enabled.`
+        );
+        return;
+      }
       await saveSmsCredentials(updated);
       // Remember the retired number: its history stays in the same threads,
       // and clients who never got the new number keep reaching us there.
@@ -196,7 +217,7 @@ export function MessagingSection() {
       successHaptic();
       Alert.alert(
         'Rotated',
-        `Texts now send from ${next}. Your history stays put, and texts to ${creds.fromNumber} keep arriving in the same threads.${
+        `${check.mms ? '' : 'Heads up: Twilio does not list this number as MMS capable, so photos will not send from it.\n\n'}Texts now send from ${next}. Your history stays put, and texts to ${creds.fromNumber} keep arriving in the same threads.${
           stale > 0
             ? `\n\n${stale} scheduled message${stale === 1 ? '' : 's'} still queued on the old number — cancel them in the Twilio console if you no longer want them sent.`
             : ''
