@@ -57,6 +57,7 @@ import {
   todayKey,
 } from '../src/lib/dates';
 import { tapHaptic } from '../src/lib/haptics';
+import { rotationNotice } from '../src/lib/rotation';
 import {
   knownClients,
   lastMeetingFor,
@@ -114,18 +115,6 @@ function confirmationDraft(occ: MeetingOccurrence): string {
       : '';
   return `Confirmed for ${dayLabel}${time}. See you then!`;
 }
-
-/**
- * Preset for the first text to someone you already know, from a NEWLY rotated
- * number. Framed as the deliberate practice it is: a rotating line is normal
- * for discreet work and protects both sides. Reads far better than an
- * apology, and it primes clients to expect the next rotation instead of being
- * surprised by it. Editable in the composer before sending.
- */
-const NUMBER_CHANGE_NOTICE =
-  "Hey, it's Drew! I rotate my number every so often, it keeps things " +
-  'private for both of us. This is my current one, so save it and delete the ' +
-  'old one. Same me, nothing else changes.';
 
 /** One conversation: bubbles, day separators, CRM panel, pinned composer. */
 export default function ThreadScreen() {
@@ -224,16 +213,20 @@ export default function ThreadScreen() {
     if (noticeSeeded.current || isTelegram || !number) return;
     const state = useMessages.getState();
     if (state.previousNumbers.length === 0) return;
-    const mine = state.currentNumber;
+    const mine = normalizePhone(state.currentNumber ?? '');
     if (!mine) return;
     const history = threadMessages(state.messages, number, state.hiddenSids);
     if (history.length === 0) return;
     const sentFromCurrent = history.some(
-      (m) => m.direction === 'out' && m.ownNumber === mine
+      (m) => m.direction === 'out' && normalizePhone(m.ownNumber ?? '') === mine
     );
     if (sentFromCurrent) return;
     noticeSeeded.current = true;
-    setDraft((d) => (d.trim() ? d : NUMBER_CHANGE_NOTICE));
+    // If their message is the last one in the thread we owe them a reply, and
+    // the explainer should acknowledge that before anything else.
+    const last = history[history.length - 1];
+    const owedReplySince = last?.direction === 'in' ? last.sentAt : undefined;
+    setDraft((d) => (d.trim() ? d : rotationNotice(number, { owedReplySince })));
   }, [isTelegram, number, messages]);
 
   /**

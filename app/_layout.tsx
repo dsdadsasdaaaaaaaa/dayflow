@@ -313,7 +313,6 @@ export default function RootLayout() {
           <Stack.Screen name="calls" options={{ animation: 'slide_from_right' }} />
           <Stack.Screen name="search" options={{ animation: 'slide_from_right' }} />
           <Stack.Screen name="secretary" options={{ animation: 'slide_from_right' }} />
-          <Stack.Screen name="rotation" options={{ animation: 'slide_from_right' }} />
           <Stack.Screen name="settings-messaging" options={{ animation: 'slide_from_right' }} />
           <Stack.Screen name="telegram-login" options={{ animation: 'slide_from_right' }} />
           <Stack.Screen name="telegram-chats" options={{ animation: 'slide_from_right' }} />
