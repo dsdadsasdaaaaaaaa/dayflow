@@ -247,6 +247,44 @@ const CONVERSATION_TOOL: ToolSpec = {
 };
 
 /**
+ * The whole-inbox pair, offered alongside get_conversation whenever message
+ * reading is on. get_conversation answers about one person; these answer
+ * across everyone, which is the difference between "why did Client 3 go
+ * quiet" and "who is asking about this weekend".
+ */
+const INBOX_TOOLS: ToolSpec[] = [
+  {
+    name: 'search_messages',
+    description:
+      'Search every conversation on the phone for a word or phrase, across SMS and Telegram, both directions. Returns the matching messages newest first, each with the client label, their status (a blocked person can still appear in results, so check before suggesting anything), the speaker (the client label, or the word you for messages the user sent) and how long ago it was. Use this for questions about who said something rather than about one person: who asked about a particular day, who mentioned a price, who never got an answer to a question. Much cheaper and sharper than reading whole threads.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Word or phrase to look for. Case insensitive, matched as a substring.',
+        },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'scan_conversations',
+    description:
+      'Recent messages from EVERY conversation at once, newest threads first, each row naming its speaker. Use it to build a picture across all clients at the same time: who is mid-negotiation, who is waiting on something, what people are asking for lately, which enquiries were never closed. Prefer search_messages when you already know the phrase you are looking for. The result reports how many conversations it had to leave out; if it left any out, say so rather than implying you saw everything.',
+    parameters: {
+      type: 'object',
+      properties: {
+        days: {
+          type: 'integer',
+          description: 'How far back to look, in days. Defaults to 30, maximum 365.',
+        },
+      },
+    },
+  },
+];
+
+/**
  * The two tools that produce something rather than report something. Both
  * only PREPARE: the user reviews and confirms on device. The descriptions say
  * so plainly, because the model's own wording is what the user reads.
@@ -311,7 +349,7 @@ export function secretaryTools(
   return [
     ...READ_TOOLS,
     ...(usesNotes ? [NOTES_TOOL] : []),
-    ...(readsMessages ? [CONVERSATION_TOOL] : []),
+    ...(readsMessages ? [CONVERSATION_TOOL, ...INBOX_TOOLS] : []),
     ...WRITE_TOOLS,
   ];
 }
@@ -973,6 +1011,208 @@ function toolGetConversation(
   return { error: 'No conversation on this phone for that label.' };
 }
 
+/** Caps for the whole-inbox tools. Bulk reading is useful; unbounded is not. */
+const MAX_SCAN_THREADS = 40;
+const MAX_SCAN_PER_THREAD = 8;
+const MAX_SEARCH_HITS = 40;
+const SCAN_DEFAULT_DAYS = 30;
+
+/** One conversation, flattened, with everything the tools need to describe it. */
+interface WalkedThread {
+  counterparty: string;
+  label: string;
+  channel: FollowUpChannel;
+  status: ClientStatus | 'unknown';
+  /** Oldest first. */
+  messages: { direction: 'in' | 'out'; sentAt: number; body: string }[];
+}
+
+/**
+ * Every conversation on the phone, both channels, in one shape.
+ *
+ * Threads are keyed by counterparty — a phone number for SMS, a chat id for
+ * Telegram — so a conversation with nobody in the client book is walked the
+ * same as an established regular. The label is the client's when we know it
+ * and a minted label over the raw number when we do not, which is what lets
+ * the model talk about a stranger without ever being handed the number.
+ */
+function walkAllThreads(map: PseudonymMap): WalkedThread[] {
+  const meta = useClientMeta.getState().meta;
+  const displayNames = knownClients(useTasks.getState().tasks);
+  const out: WalkedThread[] = [];
+
+  const sms = useMessages.getState();
+  for (const t of buildThreads(sms.messages, sms.lastReadAt)) {
+    const client = clientNameForPhone(meta, t.counterparty, displayNames);
+    out.push({
+      counterparty: t.counterparty,
+      label: map.toPseudo(client ?? t.counterparty),
+      channel: 'sms',
+      status: client ? effectiveStatus(meta, client, true) : 'unknown',
+      messages: threadMessages(sms.messages, t.counterparty, sms.hiddenSids).map((m) => ({
+        direction: m.direction,
+        sentAt: m.sentAt,
+        body: m.body ?? '',
+      })),
+    });
+  }
+
+  const tg = useTelegram.getState();
+  const tgByThread = new Map<string, { direction: 'in' | 'out'; sentAt: number; body: string }[]>();
+  for (const m of Object.values(tg.messages)) {
+    const list = tgByThread.get(m.counterparty);
+    const row = { direction: m.direction, sentAt: m.sentAt, body: m.body ?? '' };
+    if (list) list.push(row);
+    else tgByThread.set(m.counterparty, [row]);
+  }
+  for (const t of buildTelegramThreads(tg)) {
+    const client = clientNameForTelegram(meta, t.counterparty, displayNames);
+    out.push({
+      counterparty: t.counterparty,
+      label: map.toPseudo(client ?? t.counterparty),
+      channel: 'telegram',
+      status: client ? effectiveStatus(meta, client, true) : 'unknown',
+      messages: (tgByThread.get(t.counterparty) ?? []).sort((a, b) => a.sentAt - b.sentAt),
+    });
+  }
+
+  // Busiest-recent first, so a hard cap keeps the conversations that matter.
+  return out.sort((a, b) => {
+    const aLast = a.messages[a.messages.length - 1]?.sentAt ?? 0;
+    const bLast = b.messages[b.messages.length - 1]?.sentAt ?? 0;
+    return bLast - aLast;
+  });
+}
+
+/**
+ * Recent traffic across EVERY conversation at once, so the model can answer
+ * questions that span clients ("who is asking about this weekend", "is anyone
+ * still waiting on a price") instead of only ones aimed at a single thread.
+ *
+ * Deliberately capped on three axes — age, threads, messages per thread —
+ * and it reports what it dropped. A tool that silently truncates reads as
+ * "this is everything" and produces confidently incomplete answers.
+ */
+function toolScanConversations(
+  map: PseudonymMap,
+  args: Record<string, unknown>
+):
+  | {
+      threads: {
+        label: string;
+        channel: FollowUpChannel;
+        status: ClientStatus | 'unknown';
+        messages: ConversationRow[];
+      }[];
+      threadsShown: number;
+      threadsTotal: number;
+      note?: string;
+    }
+  | { error: string } {
+  if (!useSettings.getState().settings.secretaryReadsMessages) {
+    return { error: 'The user has not allowed messages to be read.' };
+  }
+  const days =
+    typeof args.days === 'number' && args.days > 0
+      ? Math.min(Math.floor(args.days), 365)
+      : SCAN_DEFAULT_DAYS;
+  const now = Date.now();
+  const floor = now - days * 24 * 3_600_000;
+
+  const all = walkAllThreads(map);
+  const threads = [];
+  for (const t of all) {
+    const recent = t.messages.filter((m) => m.sentAt >= floor);
+    if (recent.length === 0) continue;
+    threads.push({
+      label: t.label,
+      channel: t.channel,
+      status: t.status,
+      messages: recent.slice(-MAX_SCAN_PER_THREAD).map((m) => ({
+        speaker: m.direction === 'in' ? t.label : 'you',
+        hoursAgo: round1((now - m.sentAt) / 3_600_000),
+        text: redactText(m.body.trim(), map).slice(0, MAX_BODY_CHARS),
+      })),
+    });
+    if (threads.length >= MAX_SCAN_THREADS) break;
+  }
+
+  const total = all.filter((t) => t.messages.some((m) => m.sentAt >= floor)).length;
+  return {
+    threads,
+    threadsShown: threads.length,
+    threadsTotal: total,
+    ...(total > threads.length
+      ? {
+          note: `Only the ${threads.length} most recently active of ${total} conversations are shown, and at most ${MAX_SCAN_PER_THREAD} messages each. Say so if the answer might depend on the rest.`,
+        }
+      : {}),
+  };
+}
+
+/**
+ * Find a phrase across every conversation. Cheaper and sharper than scanning
+ * when the question is "who mentioned X" — the model gets only the matching
+ * lines, with enough around them to know who said it and when.
+ */
+function toolSearchMessages(
+  map: PseudonymMap,
+  args: Record<string, unknown>
+):
+  | {
+      query: string;
+      hits: (ConversationRow & { label: string; status: ClientStatus | 'unknown' })[];
+      note?: string;
+    }
+  | { error: string } {
+  if (!useSettings.getState().settings.secretaryReadsMessages) {
+    return { error: 'The user has not allowed messages to be read.' };
+  }
+  const query = typeof args.query === 'string' ? args.query.trim() : '';
+  if (query.length < 2) {
+    return { error: 'Give a word or phrase of at least two characters to search for.' };
+  }
+  const needle = query.toLowerCase();
+  const now = Date.now();
+
+  // Collect everything first, THEN rank and cut. Capping during the walk let
+  // whichever thread came first spend the whole budget, so a search across
+  // the inbox could return one chatty client and silently omit the rest —
+  // the opposite of what searching every conversation is for.
+  const found: (ConversationRow & {
+    label: string;
+    status: ClientStatus | 'unknown';
+    at: number;
+  })[] = [];
+  for (const t of walkAllThreads(map)) {
+    for (const m of t.messages) {
+      if (!m.body.toLowerCase().includes(needle)) continue;
+      found.push({
+        label: t.label,
+        // Carried so a hit on someone blocked cannot be read as a lead to
+        // chase: search answers "who said this", including people the user
+        // has cut off, and the model has to be able to tell them apart.
+        status: t.status,
+        speaker: m.direction === 'in' ? t.label : 'you',
+        hoursAgo: round1((now - m.sentAt) / 3_600_000),
+        text: redactText(m.body.trim(), map).slice(0, MAX_BODY_CHARS),
+        at: m.sentAt,
+      });
+    }
+  }
+  found.sort((a, b) => b.at - a.at);
+  const more = Math.max(0, found.length - MAX_SEARCH_HITS);
+  const hits = found.slice(0, MAX_SEARCH_HITS).map(({ at: _at, ...row }) => row);
+
+  return {
+    query,
+    hits,
+    ...(more > 0
+      ? { note: `${more} further matches were not returned. Narrow the search if that matters.` }
+      : {}),
+  };
+}
+
 // ------------------------------------------------------------- proposals
 
 /** What a write tool tells the model: prepared, never done. */
@@ -1086,6 +1326,12 @@ export function buildToolRunner(map: PseudonymMap, sink: SecretaryAction[]): Too
         break;
       case 'get_conversation':
         result = toolGetConversation(map, args);
+        break;
+      case 'search_messages':
+        result = toolSearchMessages(map, args);
+        break;
+      case 'scan_conversations':
+        result = toolScanConversations(map, args);
         break;
       case 'draft_message':
         result = toolDraftMessage(sink, args);
