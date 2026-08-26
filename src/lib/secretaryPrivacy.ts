@@ -109,22 +109,22 @@ export function buildPseudonyms(clientNames: string[]): PseudonymMap {
 export function redactText(text: string, map: PseudonymMap): string {
   let out = text;
 
-  // Contacts FIRST. Running names first would chew the local part of an
-  // address ("dana.k@..." -> "Client 2.k@...") and leave a mangled fragment
-  // that the email pattern no longer matches cleanly.
+  // Order matters, and all three steps below fought each other at some point.
+  //
+  // Emails go first: running names first chewed the local part of an address
+  // ("dana.k@..." -> "Client 2.k@...") into a fragment the email pattern no
+  // longer matched cleanly.
   out = out.replace(EMAIL_RE, HIDDEN_EMAIL);
-  out = out.replace(PHONE_RE, (match) => {
-    const trimmed = match.trim();
-    if (ISO_DATE_RE.test(trimmed)) return match;
-    const digits = trimmed.replace(/\D/g, '');
-    return digits.length >= PHONE_MIN_DIGITS ? HIDDEN_NUMBER : match;
-  });
-  out = out.replace(STREET_RE, HIDDEN_ADDRESS);
 
+  // Known subjects next — and this includes bare phone numbers, because a
+  // contact with no client record IS their number. Blanking phone-shaped
+  // text before this ran meant a number we could perfectly well label became
+  // "(number hidden)" instead, so the assistant lost that person from its own
+  // history one turn later and could no longer refer to them at all.
+  //
   // Longest first, so "Marcus J" is matched before the bare "Marcus" that
   // nameFragments derives from it.
-  const targets = expandNameTargets(map);
-  for (const t of targets) {
+  for (const t of expandNameTargets(map)) {
     // Word-ish boundaries only — no lookbehind (Hermes), so the leading
     // separator is captured and put back.
     const re = new RegExp(
@@ -133,6 +133,16 @@ export function redactText(text: string, map: PseudonymMap): string {
     );
     out = out.replace(re, `$1${t.pseudo}`);
   }
+
+  // Whatever is still phone-shaped is a number we have no label for — a
+  // number quoted inside a message, say — and that one really is hidden.
+  out = out.replace(PHONE_RE, (match) => {
+    const trimmed = match.trim();
+    if (ISO_DATE_RE.test(trimmed)) return match;
+    const digits = trimmed.replace(/\D/g, '');
+    return digits.length >= PHONE_MIN_DIGITS ? HIDDEN_NUMBER : match;
+  });
+  out = out.replace(STREET_RE, HIDDEN_ADDRESS);
   return out;
 }
 

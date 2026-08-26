@@ -386,8 +386,32 @@ export function collectClientNames(): string[] {
     seen.add(key);
     names.push(trimmed);
   };
-  for (const name of knownClients(tasks)) push(name);
-  for (const [key, m] of Object.entries(meta)) push(m.displayName ?? key);
+
+  // Named clients first, sorted, so their labels do not renumber every time
+  // a new conversation arrives. The map is rebuilt on every request and the
+  // whole history is re-redacted through it, so an unstable order would mean
+  // "Client 3" quietly becoming a different person mid-conversation.
+  for (const name of [...knownClients(tasks)].sort()) push(name);
+  for (const key of Object.keys(meta).sort()) push(meta[key].displayName ?? key);
+
+  // Then every counterparty we have ever exchanged messages with, including
+  // people with no client record at all. Without these, a prospect who is
+  // only a phone number has no label: the redactor falls back to blanking
+  // anything phone-shaped, so on the next turn the assistant sees its own
+  // earlier answer with "(number hidden)" where the person used to be, and
+  // loses track of exactly the people it was asked to suggest.
+  const sms = useMessages.getState();
+  for (const t of buildThreads(sms.messages, sms.lastReadAt)
+    .map((t) => t.counterparty)
+    .sort()) {
+    push(t);
+  }
+  const tg = useTelegram.getState();
+  for (const t of buildTelegramThreads(tg)
+    .map((t) => t.counterparty)
+    .sort()) {
+    push(t);
+  }
   return names;
 }
 
