@@ -59,7 +59,13 @@ const MAX_BODY_CHARS = 400;
 
 /** One message as the assistant sees it: who, how long ago, what it said. */
 interface ConversationRow {
-  from: 'client' | 'you';
+  /**
+   * Who wrote this one: the client's label, or "you" for the user. Spelled
+   * out rather than a direction flag, because a flag is easy to lose while
+   * summarizing and the result is the user's own words quoted back at them
+   * as though the client had said them.
+   */
+  speaker: string;
   hoursAgo: number;
   text: string;
 }
@@ -102,7 +108,7 @@ const READ_TOOLS: ToolSpec[] = [
   {
     name: 'list_clients',
     description:
-      'List every client with their booking rhythm and money position. Clients are identified by pseudonymous labels only. Returns meetings completed, days since last seen, median gap between meetings, typical rate, outstanding balance and pipeline status.',
+      'List every client with their booking rhythm and money position. Clients are identified by pseudonymous labels only. Returns meetings completed, days since last seen, median gap between meetings, typical rate, outstanding balance, and status. Status is one of: "client" (an established regular), "lead" (enquired, never booked), or "blocked" (the user deliberately cut this person off). NEVER suggest contacting, drafting to, or booking anyone whose status is "blocked", and do not include them in lists of people to reach out to. If the user asks about them directly, answer, but say plainly that they are blocked.',
   },
   {
     name: 'find_rebook_candidates',
@@ -136,7 +142,7 @@ const READ_TOOLS: ToolSpec[] = [
   {
     name: 'get_unanswered',
     description:
-      'Loose ends in the inbox. "waitingOnYou" = the client sent the last message and is owed a reply. "goneQuiet" = the user sent the last message over a day ago and got nothing back, and the client has nothing booked. Each row has a label, the channel and hours waiting. When the user allows message reading, each row also carries "lastText": what that last message actually said. Use it — it is usually the whole reason the thread stalled.',
+      'Loose ends in the inbox. "waitingOnYou" = the client sent the last message and is owed a reply. "goneQuiet" = the user sent the last message over a day ago and got nothing back, and the client has nothing booked. Each row has a label, the channel, hours waiting, and status ("client", "lead", or "blocked" — never suggest contacting a blocked person). When the user allows message reading, each row also carries "lastText" (what that last message said) and "lastFrom" (who wrote it: the client label, or "you"). Check lastFrom before describing a message — attributing the user\'s own words to the client makes the suggestion nonsense.',
   },
   {
     name: 'get_money_summary',
@@ -180,7 +186,7 @@ const READ_TOOLS: ToolSpec[] = [
   {
     name: 'get_client_detail',
     description:
-      'Everything the app knows about ONE client, by label: meetings completed, their own median gap between meetings, when they were last seen, their usual rate, lifetime earnings, what they still owe, no-shows, their next booking, and whether they are currently waiting on a reply. Use it before drafting a message so what you write actually fits them.',
+      'Everything the app knows about ONE client, by label: meetings completed, their own median gap between meetings, when they were last seen, their usual rate, lifetime earnings, what they still owe, no-shows, their next booking, their status, and whether they are currently waiting on a reply. Status is \"client\", \"lead\", or \"blocked\"; a blocked person was cut off deliberately, so never draft to them or suggest booking them. Use it before drafting a message so what you write actually fits them.',
     parameters: {
       type: 'object',
       properties: {
@@ -223,7 +229,7 @@ const NOTES_TOOL: ToolSpec = {
 const CONVERSATION_TOOL: ToolSpec = {
   name: 'get_conversation',
   description:
-    "The actual back-and-forth with one client, newest last, by label. The user has explicitly allowed you to read their messages. Names, phone numbers and emails inside the text are still replaced with labels or hidden. Use this to understand what was actually said — what they asked for, what they agreed to, why they went quiet — instead of guessing from timing alone. Quote at most a short phrase back; summarize rather than reciting.",
+    "The actual back-and-forth with one client, newest last, by label. The user has explicitly allowed you to read their messages. Names, phone numbers and emails inside the text are still replaced with labels or hidden. Every row names its speaker: the client label for their messages, or the word you for the ones the user sent. Check it on every row. Half of any thread was written by the user, so crediting the client with what the user wrote, or the reverse, produces confident nonsense. Use this to understand what was actually said — what they asked for, what they agreed to, why they went quiet — instead of guessing from timing alone. Quote at most a short phrase back; summarize rather than reciting.",
   parameters: {
     type: 'object',
     properties: {
@@ -511,6 +517,12 @@ interface UnansweredRow {
    * handed only labels and hours will answer from labels and hours.
    */
   lastText?: string;
+  /**
+   * Who wrote lastText — the client's label, or "you". Without this the model
+   * has a quote and no author, and attributing the user's own words to the
+   * client turns a follow-up suggestion into nonsense.
+   */
+  lastFrom?: string;
 }
 
 interface UnansweredResult {
@@ -561,7 +573,13 @@ function toolGetUnanswered(map: PseudonymMap): UnansweredResult {
       channel,
       hoursWaiting: round1((now - lastMessage.sentAt) / 3_600_000),
       status: client ? effectiveStatus(meta, client, true) : 'unknown',
-      ...(body ? { lastText: redactText(body, map).slice(0, MAX_BODY_CHARS) } : {}),
+      ...(body
+        ? {
+            lastText: redactText(body, map).slice(0, MAX_BODY_CHARS),
+            lastFrom:
+              lastMessage.direction === 'in' ? map.toPseudo(client ?? counterparty) : 'you',
+          }
+        : {}),
     };
     if (lastMessage.direction === 'in') {
       if (!blocked) waitingOnYou.push(row);
@@ -817,8 +835,8 @@ function toolGetClientDetail(
   map: PseudonymMap,
   args: Record<string, unknown>
 ): ClientDetail | { error: string } {
-  const label = typeof args.client === 'string' ? args.client.trim() : '';
-  const real = label ? map.toReal(label) : null;
+  const asked = typeof args.client === 'string' ? args.client.trim() : '';
+  const real = asked ? map.toReal(asked) : null;
   if (!real) {
     return {
       error:
@@ -866,8 +884,8 @@ function toolGetClientNotes(
   if (!useSettings.getState().settings.secretaryUsesNotes) {
     return { error: 'The user has not allowed notes to be read.' };
   }
-  const label = typeof args.client === 'string' ? args.client.trim() : '';
-  const real = label ? map.toReal(label) : null;
+  const asked = typeof args.client === 'string' ? args.client.trim() : '';
+  const real = asked ? map.toReal(asked) : null;
   if (!real) {
     return {
       error:
@@ -903,8 +921,8 @@ function toolGetConversation(
   if (!useSettings.getState().settings.secretaryReadsMessages) {
     return { error: 'The user has not allowed messages to be read.' };
   }
-  const label = typeof args.client === 'string' ? args.client.trim() : '';
-  const real = label ? map.toReal(label) : null;
+  const asked = typeof args.client === 'string' ? args.client.trim() : '';
+  const real = asked ? map.toReal(asked) : null;
   if (!real) {
     return {
       error:
@@ -918,8 +936,9 @@ function toolGetConversation(
   const displayNames = knownClients(useTasks.getState().tasks);
   const now = Date.now();
 
+  const label = map.toPseudo(real);
   const row = (direction: 'in' | 'out', sentAt: number, body: string): ConversationRow => ({
-    from: direction === 'in' ? 'client' : 'you',
+    speaker: direction === 'in' ? label : 'you',
     hoursAgo: round1((now - sentAt) / 3_600_000),
     text: redactText(body.trim(), map).slice(0, MAX_BODY_CHARS),
   });
@@ -934,7 +953,7 @@ function toolGetConversation(
       .slice(-limit)
       .map((m) => row(m.direction, m.sentAt, m.body ?? ''))
       .filter((r) => r.text.length > 0);
-    return { label: map.toPseudo(real), channel: 'sms', messages: rows };
+    return { label, channel: 'sms', messages: rows };
   }
 
   // Then Telegram, keyed by chat id rather than a number.
@@ -948,7 +967,7 @@ function toolGetConversation(
       .slice(-limit)
       .map((m) => row(m.direction, m.sentAt, m.body ?? ''))
       .filter((r) => r.text.length > 0);
-    return { label: map.toPseudo(real), channel: 'telegram', messages: rows };
+    return { label, channel: 'telegram', messages: rows };
   }
 
   return { error: 'No conversation on this phone for that label.' };
