@@ -24,15 +24,15 @@ import { SettingsRow } from './SettingsRow';
 import { SettingsSection } from './SettingsSection';
 
 const CAPTION_SETUP =
-  'Send from a real SIM in an Android phone instead of a Twilio number. ' +
+  'Add a real SIM in an Android phone as a second line alongside Twilio. ' +
   'Carriers filter Twilio numbers as automated traffic no matter how ' +
   'ordinary the conversation is, which is what keeps burning numbers. A ' +
   'consumer SIM travels the normal person-to-person path, so there is no ' +
   'campaign to register and nothing to be rejected from.';
 
 const CAPTION_CONNECTED =
-  'Messages now leave through your own SIM. Twilio stays connected for ' +
-  'photo hosting and calling.';
+  'Both lines are live. Each conversation picks which one it sends from, in ' +
+  'the chat itself. New conversations start on Twilio.';
 
 /**
  * Settings → Own SIM: connect a Telerivet project whose Android gateway holds
@@ -96,8 +96,8 @@ export function SimRouteSection() {
       setFromNumber('');
       successHaptic();
       Alert.alert(
-        'Sending from your SIM',
-        `Texts now go out through ${creds.fromNumber} on your own SIM. Scheduled sending is the one thing that stays on Twilio.`
+        'Second line added',
+        `${creds.fromNumber} is now available alongside Twilio. Open any chat and pick which line it sends from — useful for the people who stopped receiving. Scheduled sending stays on Twilio.`
       );
     } finally {
       setBusy(false);
@@ -106,8 +106,8 @@ export function SimRouteSection() {
 
   const disconnect = () => {
     Alert.alert(
-      'Stop using your SIM?',
-      'Messaging goes back to your Twilio number. Nothing in your history is removed.',
+      'Remove your SIM line?',
+      'Every conversation goes back to Twilio, including any you moved onto the SIM. Nothing in your history is removed.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -132,7 +132,7 @@ export function SimRouteSection() {
         <SettingsRow
           icon="hardware-chip"
           tint={taskColor('green').solid}
-          label="Sending from your SIM"
+          label="Second line ready"
           sublabel={connected.fromNumber}
           right={<Ionicons name="checkmark-circle" size={22} color={theme.success} />}
         />
@@ -140,7 +140,7 @@ export function SimRouteSection() {
           icon="close-circle"
           tint={taskColor('red').solid}
           label="Disconnect"
-          sublabel="Go back to sending from Twilio"
+          sublabel="Put every conversation back on Twilio"
           onPress={disconnect}
         />
       </SettingsSection>

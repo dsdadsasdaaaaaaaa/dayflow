@@ -23,6 +23,7 @@ import {
 } from '../src/components/messages/ClientPanel';
 import { Composer } from '../src/components/messages/Composer';
 import { ErrorBanner } from '../src/components/messages/ErrorBanner';
+import { RoutePicker } from '../src/components/messages/RoutePicker';
 import { LinkClientRow } from '../src/components/messages/LinkClientRow';
 import { MessageBubble } from '../src/components/messages/MessageBubble';
 import { PhotoViewer } from '../src/components/messages/PhotoViewer';
@@ -65,6 +66,13 @@ import {
   type MeetingOccurrence,
 } from '../src/lib/meetings';
 import type { SmsMessage } from '../src/lib/smsApi';
+import {
+  availableRoutes,
+  defaultRoute,
+  loadRoutes,
+  type ProviderId,
+  type Routes,
+} from '../src/lib/messaging';
 import { normalizePhone } from '../src/lib/smsCredentials';
 import type { TgMessage } from '../src/lib/tdlib';
 import {
@@ -144,6 +152,36 @@ export default function ThreadScreen() {
   const discardOutbox = useMessages((s) => s.discardOutbox);
   const scheduleSend = useMessages((s) => s.scheduleSend);
   const currentNumber = useMessages((s) => s.currentNumber);
+  const activeNumbers = useMessages((s) => s.activeNumbers);
+  const threadRoute = useMessages((s) => s.threadRoute);
+  const setThreadRoute = useMessages((s) => s.setThreadRoute);
+
+  /**
+   * Which lines exist, read from the keychain rather than the store — the
+   * credentials themselves never touch app storage.
+   */
+  const [routes, setRoutes] = useState<Routes | null>(null);
+  useEffect(() => {
+    let alive = true;
+    loadRoutes().then((r) => {
+      if (alive) setRoutes(r);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const routeIds = useMemo(() => (routes ? availableRoutes(routes) : []), [routes]);
+  const activeRoute: ProviderId | null = useMemo(() => {
+    if (!routes) return null;
+    return defaultRoute(routes, threadRoute[number]);
+  }, [routes, threadRoute, number]);
+  const routeNumbers = useMemo<Partial<Record<ProviderId, string>>>(
+    () => ({
+      twilio: routes?.twilio?.fromNumber,
+      telerivet: routes?.telerivet?.fromNumber,
+    }),
+    [routes]
+  );
   const followUpSnoozedUntil = useMessages((s) => s.followUpSnoozedUntil);
   const followUpDismissed = useMessages((s) => s.followUpDismissed);
   const snoozeFollowUp = useMessages((s) => s.snoozeFollowUp);
@@ -213,12 +251,12 @@ export default function ThreadScreen() {
     if (noticeSeeded.current || isTelegram || !number) return;
     const state = useMessages.getState();
     if (state.previousNumbers.length === 0) return;
-    const mine = normalizePhone(state.currentNumber ?? '');
-    if (!mine) return;
+    const live = state.activeNumbers.map(normalizePhone).filter(Boolean);
+    if (live.length === 0) return;
     const history = threadMessages(state.messages, number, state.hiddenSids);
     if (history.length === 0) return;
     const sentFromCurrent = history.some(
-      (m) => m.direction === 'out' && normalizePhone(m.ownNumber ?? '') === mine
+      (m) => m.direction === 'out' && live.includes(normalizePhone(m.ownNumber ?? ''))
     );
     if (sentFromCurrent) return;
     noticeSeeded.current = true;
@@ -237,16 +275,19 @@ export default function ThreadScreen() {
    */
   const retiredLabelFor = useCallback(
     (m: ThreadMsg): string | undefined => {
-      if (isTelegram || !currentNumber) return undefined;
+      if (isTelegram || activeNumbers.length === 0) return undefined;
       const own = 'ownNumber' in m ? m.ownNumber : undefined;
-      if (!own || normalizePhone(own) === normalizePhone(currentNumber)) {
-        return undefined;
-      }
+      if (!own) return undefined;
+      // Checked against EVERY live line, not just the default one. With two
+      // routes connected, matching only the primary would label everything
+      // sent from the SIM as coming from a number we had rotated away from.
+      const mine = normalizePhone(own);
+      if (activeNumbers.some((n) => normalizePhone(n) === mine)) return undefined;
       return m.direction === 'in'
         ? `To your old ${formatPhoneDisplay(own)}`
         : `From your old ${formatPhoneDisplay(own)}`;
     },
-    [isTelegram, currentNumber]
+    [isTelegram, activeNumbers]
   );
 
   const draftRef = useRef(draft);
@@ -882,6 +923,14 @@ export default function ThreadScreen() {
           </View>
         ) : null}
         {/* Pending scheduled sends for this thread (renders nothing if none). */}
+        {!isTelegram && activeRoute ? (
+          <RoutePicker
+            routes={routeIds}
+            active={activeRoute}
+            numbers={routeNumbers}
+            onSelect={(r) => setThreadRoute(number, r)}
+          />
+        ) : null}
         {!isTelegram ? <ScheduledBanner counterparty={number} /> : null}
         {!clientName ? <LinkClientRow counterparty={number} /> : null}
         {showError ? (

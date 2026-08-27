@@ -31,9 +31,11 @@ import {
  * travel the carrier's ordinary person-to-person path with no campaign to
  * register and nothing to be rejected from.
  *
- * Selection is deliberately implicit: connecting Telerivet IS the switch, and
- * disconnecting it falls straight back to Twilio. One concept instead of a
- * credential set plus a separate toggle that can disagree with it.
+ * Both can be connected at once and each conversation picks a line. That is
+ * the shape the problem actually has: carriers filter per recipient, so some
+ * people stop receiving on the A2P long code while everyone else is fine.
+ * Switching wholesale would move the ones who were never having trouble onto
+ * a number they have never seen, for no reason.
  *
  * Both routes produce the same SmsMessage shape, so threads, dedup,
  * follow-ups and the number-rotation UI never learn which one was used.
@@ -46,15 +48,73 @@ export type MessagingCreds =
   | { provider: 'telerivet'; telerivet: TelerivetCredentials };
 
 /**
- * Telerivet when it is connected, else Twilio, else nothing. Callers treat
- * null exactly as they treated missing Twilio credentials before.
+ * Both routes at once. Connecting the SIM used to mean switching to it, but
+ * deliverability is per recipient, not per account: some people stop
+ * receiving on the A2P long code while others are fine, so the useful setup
+ * is both lines live with the choice made per conversation.
  */
-export async function loadMessagingCredentials(): Promise<MessagingCreds | null> {
-  const tr = await loadTelerivetCredentials();
-  if (tr) return { provider: 'telerivet', telerivet: tr };
-  const tw = await loadSmsCredentials();
-  if (tw) return { provider: 'twilio', twilio: tw };
-  return null;
+export interface Routes {
+  twilio: SmsCredentials | null;
+  telerivet: TelerivetCredentials | null;
+}
+
+export async function loadRoutes(): Promise<Routes> {
+  const [twilio, telerivet] = await Promise.all([
+    loadSmsCredentials(),
+    loadTelerivetCredentials(),
+  ]);
+  return { twilio, telerivet };
+}
+
+/** Which routes can actually send right now, preferred order first. */
+export function availableRoutes(routes: Routes): ProviderId[] {
+  const out: ProviderId[] = [];
+  if (routes.twilio) out.push('twilio');
+  if (routes.telerivet) out.push('telerivet');
+  return out;
+}
+
+/** Credentials for one route, or null when that route is not connected. */
+export function credsFor(routes: Routes, id: ProviderId): MessagingCreds | null {
+  if (id === 'twilio') {
+    return routes.twilio ? { provider: 'twilio', twilio: routes.twilio } : null;
+  }
+  return routes.telerivet ? { provider: 'telerivet', telerivet: routes.telerivet } : null;
+}
+
+/** Every number we can currently send from, for telling ours from a retired one. */
+export function activeNumbersOf(routes: Routes): string[] {
+  const out: string[] = [];
+  if (routes.twilio?.fromNumber) out.push(routes.twilio.fromNumber);
+  if (routes.telerivet?.fromNumber) out.push(routes.telerivet.fromNumber);
+  return out;
+}
+
+/**
+ * The route to use when a conversation has no explicit choice. Twilio stays
+ * the default: it is the number clients already have, and the SIM is the
+ * fallback for the ones it no longer reaches.
+ */
+export function defaultRoute(routes: Routes, preferred?: ProviderId): ProviderId | null {
+  if (preferred && credsFor(routes, preferred)) return preferred;
+  return availableRoutes(routes)[0] ?? null;
+}
+
+/** Human label for pickers and status lines. */
+export function routeLabel(id: ProviderId): string {
+  return id === 'twilio' ? 'Twilio' : 'Own SIM';
+}
+
+/**
+ * Back-compat single-route load, resolving to `preferred` when it is
+ * connected. Callers that do not care which line carries a read still use it.
+ */
+export async function loadMessagingCredentials(
+  preferred?: ProviderId
+): Promise<MessagingCreds | null> {
+  const routes = await loadRoutes();
+  const id = defaultRoute(routes, preferred);
+  return id ? credsFor(routes, id) : null;
 }
 
 /** The number we send from on the active route. */

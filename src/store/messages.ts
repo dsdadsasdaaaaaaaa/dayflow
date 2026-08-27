@@ -11,16 +11,21 @@ import {
 } from '../lib/smsApi';
 import { primeMediaCache } from '../lib/mediaCache';
 import {
+  activeNumbersOf,
+  availableRoutes,
+  credsFor,
+  defaultRoute,
   fetchMedia,
   fetchStatus,
   listOlder,
   listRecent,
   listThread,
   loadMessagingCredentials,
-  ownNumberOf,
+  loadRoutes,
   sendMessage,
   supportsScheduling,
   SCHEDULING_UNSUPPORTED,
+  type ProviderId,
 } from '../lib/messaging';
 import { loadSmsCredentials, normalizePhone } from '../lib/smsCredentials';
 import { uploadPhotoAsset } from '../lib/twilioAssets';
@@ -126,6 +131,18 @@ interface MessagesState {
    * can compare it against a message's ownNumber without an async read).
    */
   currentNumber: string | null;
+  /**
+   * Every number we can send from right now, across both routes. Plural
+   * because both lines can be live at once, and a message from the second one
+   * must not be mistaken for a number we rotated away from.
+   */
+  activeNumbers: string[];
+  /**
+   * Which line a given conversation sends on. Sticky per counterparty and
+   * deliberately not global: carriers filter per recipient, so the point is
+   * to move the people who stopped receiving without disturbing anyone else.
+   */
+  threadRoute: Record<string, ProviderId>;
   /** Unsent composer drafts per thread (SMS E.164 or 'tgc:…' keys). */
   threadDrafts: Record<string, string>;
   /**
@@ -182,6 +199,8 @@ interface MessagesState {
   clearFollowUp: (counterparty: string) => void;
   /** Record a retired work number so its traffic keeps syncing. */
   addPreviousNumber: (number: string) => void;
+  /** Pin one conversation to a line; persists until changed. */
+  setThreadRoute: (counterparty: string, route: ProviderId) => void;
   clearAll: () => void;
 }
 
@@ -278,20 +297,33 @@ export const useMessages = create<MessagesState>()(
       followUpSnoozedUntil: {},
       followUpDismissed: {},
       previousNumbers: [],
+      activeNumbers: [],
+      threadRoute: {},
       generation: 0,
 
       refreshConfigured: async () => {
-        const creds = await loadMessagingCredentials();
+        const routes = await loadRoutes();
+        const ids = availableRoutes(routes);
+        const active = activeNumbersOf(routes).map(normalizePhone).filter(Boolean);
         set({
-          configured: creds != null,
-          currentNumber: creds ? normalizePhone(ownNumberOf(creds)) : null,
+          configured: ids.length > 0,
+          // The default route's number is still "the" number for anything
+          // that can only show one, e.g. the rotation screen's header.
+          currentNumber: active[0] ?? null,
+          activeNumbers: active,
         });
       },
 
+      setThreadRoute: (counterparty, route) =>
+        set((s) => ({
+          threadRoute: { ...s.threadRoute, [normalizePhone(counterparty)]: route },
+        })),
+
       sync: async () => {
         if (get().syncing) return;
-        const creds = await loadMessagingCredentials();
-        if (!creds) {
+        const routes = await loadRoutes();
+        const ids = availableRoutes(routes);
+        if (ids.length === 0) {
           set({ configured: false });
           return;
         }
@@ -314,14 +346,29 @@ export const useMessages = create<MessagesState>()(
           // First-ever sync keeps the classic newest-window behavior and
           // just plants the mark.
           const previousNumbers = get().previousNumbers;
-          const fetched =
-            mark == null
-              ? await listRecent(creds, PAGE_SIZE, knownMediaSids, { previousNumbers })
-              : await listRecent(creds, PAGE_SIZE, knownMediaSids, {
-                  sentAfterMs: mark - CLOCK_SKEW_MS,
-                  maxPagesPerDirection: SYNC_PAGES_PER_DIRECTION,
-                  previousNumbers,
-                });
+          // Poll EVERY connected line. Replies come back to whichever number
+          // sent, so reading only the default route would silently lose every
+          // answer to a conversation that was moved to the other one.
+          const perRoute = await Promise.all(
+            ids.map(async (id) => {
+              const routeCreds = credsFor(routes, id);
+              if (!routeCreds) return [];
+              try {
+                return mark == null
+                  ? await listRecent(routeCreds, PAGE_SIZE, knownMediaSids, { previousNumbers })
+                  : await listRecent(routeCreds, PAGE_SIZE, knownMediaSids, {
+                      sentAfterMs: mark - CLOCK_SKEW_MS,
+                      maxPagesPerDirection: SYNC_PAGES_PER_DIRECTION,
+                      previousNumbers,
+                    });
+              } catch {
+                // One line being unreachable must not stop the other from
+                // syncing; the next tick retries it.
+                return [];
+              }
+            })
+          );
+          const fetched = perRoute.flat();
           // Advance the mark from message timestamps (Twilio's clock), never
           // the device clock — skew-proof by construction.
           // Ignore future-dated scheduled records when advancing the mark.
@@ -384,7 +431,10 @@ export const useMessages = create<MessagesState>()(
       },
 
       send: async (to, body, mediaUrls) => {
-        const creds = await loadMessagingCredentials();
+        const routes = await loadRoutes();
+        const chosen = get().threadRoute[normalizePhone(to)];
+        const id = defaultRoute(routes, chosen);
+        const creds = id ? credsFor(routes, id) : null;
         const target = normalizePhone(to);
         if (!creds) {
           // Still file it in the outbox — the text isn't lost, and retry
@@ -514,8 +564,9 @@ export const useMessages = create<MessagesState>()(
       loadOlder: async (counterparty) => {
         const key = normalizePhone(counterparty);
         if (get().loadingOlder != null) return;
-        const creds = await loadMessagingCredentials();
-        if (!creds) {
+        const routes = await loadRoutes();
+        const ids = availableRoutes(routes);
+        if (ids.length === 0) {
           set({ configured: false });
           return;
         }
@@ -529,14 +580,26 @@ export const useMessages = create<MessagesState>()(
               .filter((m) => m.mediaUrls && m.mediaUrls.length > 0)
               .map((m) => m.sid)
           );
-          const fetched = await listOlder(
-            creds,
-            key,
-            oldest.sentAt,
-            PAGE_SIZE,
-            knownMediaSids,
-            get().previousNumbers
-          );
+          const fetched = (
+            await Promise.all(
+              ids.map(async (id) => {
+                const routeCreds = credsFor(routes, id);
+                if (!routeCreds) return [];
+                try {
+                  return await listOlder(
+                    routeCreds,
+                    key,
+                    oldest.sentAt,
+                    PAGE_SIZE,
+                    knownMediaSids,
+                    get().previousNumbers
+                  );
+                } catch {
+                  return [];
+                }
+              })
+            )
+          ).flat();
           // "More history?" keys on RAW returned volume, not new-SID count —
           // the day-granular overlap means most records re-fetch the cached
           // day, and counting only fresh sids latched this false while whole
@@ -636,8 +699,9 @@ export const useMessages = create<MessagesState>()(
         })),
 
       pollThread: async (counterparty) => {
-        const creds = await loadMessagingCredentials();
-        if (!creds) return;
+        const routes = await loadRoutes();
+        const ids = availableRoutes(routes);
+        if (ids.length === 0) return;
         const gen = get().generation;
         try {
           const knownMediaSids = new Set(
@@ -645,13 +709,27 @@ export const useMessages = create<MessagesState>()(
               .filter((m) => m.mediaUrls && m.mediaUrls.length > 0)
               .map((m) => m.sid)
           );
-          const fetched = await listThread(
-            creds,
-            counterparty,
-            20,
-            knownMediaSids,
-            get().previousNumbers
-          );
+          // Both lines: an open conversation may have been moved to the SIM
+          // while its earlier half still sits on Twilio.
+          const fetched = (
+            await Promise.all(
+              ids.map(async (id) => {
+                const routeCreds = credsFor(routes, id);
+                if (!routeCreds) return [];
+                try {
+                  return await listThread(
+                    routeCreds,
+                    counterparty,
+                    20,
+                    knownMediaSids,
+                    get().previousNumbers
+                  );
+                } catch {
+                  return [];
+                }
+              })
+            )
+          ).flat();
           // "Changed" must count RESOLVED MEDIA and settled statuses, not
           // just unseen SIDs — an MMS often lists before its media exists,
           // and the first version of this gate threw the photo away on every
@@ -819,6 +897,7 @@ export const useMessages = create<MessagesState>()(
         followUpSnoozedUntil: s.followUpSnoozedUntil,
         followUpDismissed: s.followUpDismissed,
         previousNumbers: s.previousNumbers,
+        threadRoute: s.threadRoute,
       }) as Partial<MessagesState>,
     }
   )
