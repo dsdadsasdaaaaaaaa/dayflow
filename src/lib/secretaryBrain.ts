@@ -1,6 +1,6 @@
-import { askSecretary as askClaude } from './claude';
+import { askSecretary as askClaude, CLAUDE_MODEL, resolvedClaudeModel } from './claude';
 import { loadClaudeCredentials } from './claudeCredentials';
-import { askSecretary as askGemini } from './gemini';
+import { askSecretary as askGemini, GEMINI_MODEL, resolvedGeminiModel } from './gemini';
 import { loadGeminiCredentials } from './geminiCredentials';
 import { useSettings } from '../store/settings';
 import type { ChatTurn, SecretaryOutcome, ToolRunner, ToolSpec } from './secretaryPrompt';
@@ -55,6 +55,19 @@ export async function connectedBrains(): Promise<BrainId[]> {
 /** Human label for the settings screen. */
 export function brainLabel(id: BrainId): string {
   return id === 'claude' ? 'Claude Sonnet' : 'Gemini';
+}
+
+/**
+ * The exact model id in use, for showing in settings.
+ *
+ * Worth surfacing because it is not a constant: both clients settle on an id
+ * by trying, and Gemini can discover one this app has never heard of. "It is
+ * using Gemini" stopped being a complete answer the moment retirements
+ * started moving it around underneath.
+ */
+export async function activeModelId(id: BrainId): Promise<string> {
+  if (id === 'claude') return resolvedClaudeModel() ?? CLAUDE_MODEL;
+  return (await resolvedGeminiModel()) ?? GEMINI_MODEL;
 }
 
 export async function ask(

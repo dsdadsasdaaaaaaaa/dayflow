@@ -73,12 +73,22 @@ async function loadResolvedModel(): Promise<void> {
   if (resolvedModel) return;
   try {
     const saved = await AsyncStorage.getItem(MODEL_CACHE_KEY);
-    if (saved && (GEMINI_MODELS as readonly string[]).includes(saved)) {
-      resolvedModel = saved;
-    }
+    // Any saved id is trusted, not just ones from GEMINI_MODELS: discovery
+    // can settle on a model this list has never heard of, and rejecting it
+    // here would mean rediscovering on every launch.
+    if (saved) resolvedModel = saved;
   } catch {
     // Cache unavailable — we just re-discover on first call.
   }
+}
+
+/**
+ * Which model actually answered, once one has. Null before the first request
+ * of a session, since the id is settled by trying rather than by config.
+ */
+export async function resolvedGeminiModel(): Promise<string | null> {
+  await loadResolvedModel();
+  return resolvedModel;
 }
 
 async function rememberModel(model: string): Promise<void> {

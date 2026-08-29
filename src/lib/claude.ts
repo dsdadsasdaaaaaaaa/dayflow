@@ -106,6 +106,11 @@ function isUnknownModel(status: number, body: string): boolean {
 
 let resolvedModel: string | null = null;
 
+/** Which model actually answered, or null before the first request. */
+export function resolvedClaudeModel(): string | null {
+  return resolvedModel;
+}
+
 function modelsToTry(): string[] {
   const rest = CLAUDE_MODELS.filter((m) => m !== resolvedModel);
   return resolvedModel ? [resolvedModel, ...rest] : [...rest];

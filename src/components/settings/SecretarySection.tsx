@@ -23,6 +23,7 @@ import {
   saveGeminiCredentials,
 } from '../../lib/geminiCredentials';
 import {
+  activeModelId,
   brainLabel,
   connectedBrains,
   loadBrain,
@@ -111,6 +112,8 @@ export function SecretarySection() {
   const [brain, setBrain] = useState<BrainId | null>(null);
   /** Every brain with a key saved — a picker only makes sense with two. */
   const [available, setAvailable] = useState<BrainId[]>([]);
+  /** The exact model id answering — settled by trying, so worth showing. */
+  const [modelId, setModelId] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -120,6 +123,7 @@ export function SecretarySection() {
         setConfigured(b != null);
         setBrain(b?.id ?? null);
         setAvailable(list);
+        if (b) void activeModelId(b.id).then((m) => alive && setModelId(m));
       })
       .catch(() => {
         if (alive) setConfigured(false);
@@ -163,6 +167,7 @@ export function SecretarySection() {
       setConfigured(true);
       setBrain(which);
       setAvailable((a) => (a.includes(which) ? a : [...a, which]));
+      void activeModelId(which).then(setModelId);
       setKey('');
       successHaptic();
       Alert.alert(
@@ -207,7 +212,7 @@ export function SecretarySection() {
           icon="sparkles"
           tint={taskColor('indigo').solid}
           label={brain ? `Running on ${brainLabel(brain)}` : 'Connected'}
-          sublabel="Ask about clients, your week, or money"
+          sublabel={modelId ?? 'Ask about clients, your week, or money'}
           right={<Ionicons name="checkmark-circle" size={22} color={theme.success} />}
         />
         {available.length > 1 ? (
@@ -232,6 +237,7 @@ export function SecretarySection() {
                       selectionHaptic();
                       update({ secretaryBrain: b });
                       setBrain(b);
+                      void activeModelId(b).then(setModelId);
                     }}
                     accessibilityRole="button"
                     accessibilityState={{ selected: on }}
