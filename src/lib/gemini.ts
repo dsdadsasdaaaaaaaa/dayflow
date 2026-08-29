@@ -63,6 +63,8 @@ export const GEMINI_MODEL = GEMINI_MODELS[0];
 
 /** Whichever model last answered, so we do not re-pay the 404 every call. */
 let resolvedModel: string | null = null;
+/** Set once every known name has been refused, so discovery runs only once. */
+let exhausted = false;
 
 const MODEL_CACHE_KEY = 'dayflow-gemini-model';
 
@@ -94,9 +96,47 @@ function modelsToTry(): string[] {
   return resolvedModel ? [resolvedModel, ...rest] : [...rest];
 }
 
-/** True when a failure means "this model id is not available to this key". */
+/**
+ * True when a failure means "this model id is not available to this key".
+ *
+ * 5xx is included deliberately. A model id this API version cannot serve does
+ * not always come back as a clean 404 — an unknown or wrong-version name can
+ * surface as a server error, which then read to the user as "Gemini is having
+ * trouble" forever instead of moving on to a name that works.
+ */
 function isUnknownModel(status: number, body: string): boolean {
+  if (status >= 500) return true;
   return (status === 404 || status === 400) && /model/i.test(body);
+}
+
+/**
+ * Ask the API which models this key can actually use.
+ *
+ * Hardcoded lists are how this broke the first time: an id is guessed from
+ * documentation, Google renames or retires it, and the feature dies silently.
+ * The endpoint knows the answer, so when every known name fails we ask rather
+ * than guess again, and prefer the newest flash-class model offered.
+ */
+async function discoverModels(apiKey: string): Promise<string[]> {
+  try {
+    const res = await fetch(`${ENDPOINT}?key=${encodeURIComponent(apiKey)}&pageSize=100`);
+    if (!res.ok) return [];
+    const json = (await res.json()) as {
+      models?: { name?: string; supportedGenerationMethods?: string[] }[];
+    };
+    const usable = (json.models ?? [])
+      .filter((m) => m.supportedGenerationMethods?.includes('generateContent'))
+      .map((m) => (m.name ?? '').replace(/^models\//, ''))
+      .filter(Boolean)
+      // Skip previews and specialist variants; we want the plain chat models.
+      .filter((n) => !/embedding|aqa|vision|image|tts|live|preview/i.test(n));
+    // Flash first (cheap, fast, tool-capable), newest-looking first.
+    const flash = usable.filter((n) => /flash/i.test(n)).sort().reverse();
+    const rest = usable.filter((n) => !/flash/i.test(n)).sort().reverse();
+    return [...flash, ...rest];
+  } catch {
+    return [];
+  }
 }
 
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -172,6 +212,58 @@ function explainHttpFailure(status: number, body: string): string {
 }
 
 /** One generateContent call. Resolves to the parsed body or a typed failure. */
+/** One request against one model id. Never throws. */
+async function attempt(
+  apiKey: string,
+  body: Record<string, unknown>,
+  model: string
+): Promise<
+  | { ok: true; data: GeminiResponse }
+  | { ok: false; error: string; unknownModel: boolean }
+> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(
+      `${ENDPOINT}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      }
+    );
+    const text = await res.text();
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: explainHttpFailure(res.status, text),
+        unknownModel: isUnknownModel(res.status, text),
+      };
+    }
+    try {
+      return { ok: true, data: JSON.parse(text) as GeminiResponse };
+    } catch {
+      return {
+        ok: false,
+        error: 'Gemini sent a reply the app could not read.',
+        unknownModel: false,
+      };
+    }
+  } catch (e) {
+    const aborted = e instanceof Error && e.name === 'AbortError';
+    return {
+      ok: false,
+      error: aborted
+        ? 'Gemini took too long to answer. Try again.'
+        : 'Could not reach Gemini. Check your connection.',
+      unknownModel: false,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function postTurn(
   apiKey: string,
   contents: GeminiContent[],
@@ -195,50 +287,44 @@ async function postTurn(
   }
 
   await loadResolvedModel();
-  const candidates = modelsToTry();
+  let candidates = modelsToTry();
+  // If every name we know has already been refused this session, ask the API
+  // what it actually has before giving up.
+  if (exhausted) {
+    const found = await discoverModels(apiKey);
+    if (found.length > 0) candidates = found;
+  }
   // Keep the LAST model failure so that if every candidate is refused the
   // user sees a model-shaped error rather than whatever the final one said.
   let lastError = 'Gemini did not answer.';
 
   for (const model of candidates) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-    try {
-      const res = await fetch(
-        `${ENDPOINT}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-          signal: controller.signal,
-        }
-      );
-      const text = await res.text();
-      if (!res.ok) {
-        lastError = explainHttpFailure(res.status, text);
-        // A retired or unavailable model is the one failure worth retrying:
-        // try the next id. Anything else (bad key, rate limit, outage) would
-        // fail identically on every model, so stop and report it.
-        if (isUnknownModel(res.status, text)) continue;
-        return { ok: false, error: lastError };
+    const res = await attempt(apiKey, body, model);
+    if (res.ok) {
+      if (model !== resolvedModel) await rememberModel(model);
+      return res;
+    }
+    lastError = res.error;
+    // A retired or unavailable model is the one failure worth retrying: try
+    // the next id. Anything else (bad key, rate limit, network) would fail
+    // identically on every model, so stop and report it.
+    if (!res.unknownModel) return { ok: false, error: lastError };
+  }
+  // Everything we knew about was refused. Ask the API for a real list and try
+  // once more before reporting failure, so a rename costs one retry, not the
+  // feature.
+  if (!exhausted) {
+    exhausted = true;
+    const found = await discoverModels(apiKey);
+    const fresh = found.filter((m) => !candidates.includes(m));
+    for (const model of fresh) {
+      const res = await attempt(apiKey, body, model);
+      if (res.ok) {
+        await rememberModel(model);
+        return res;
       }
-      try {
-        const data = JSON.parse(text) as GeminiResponse;
-        if (model !== resolvedModel) await rememberModel(model);
-        return { ok: true, data };
-      } catch {
-        return { ok: false, error: 'Gemini sent a reply the app could not read.' };
-      }
-    } catch (e) {
-      const aborted = e instanceof Error && e.name === 'AbortError';
-      return {
-        ok: false,
-        error: aborted
-          ? 'Gemini took too long to answer. Try again.'
-          : 'Could not reach Gemini. Check your connection.',
-      };
-    } finally {
-      clearTimeout(timer);
+      lastError = res.error;
+      if (!res.unknownModel) return { ok: false, error: lastError };
     }
   }
   return { ok: false, error: lastError };
