@@ -185,7 +185,12 @@ interface MessagesState {
    * Live-thread poll: one cheap query for this counterparty's inbound today.
    * Runs every few seconds while their conversation is open on screen.
    */
-  pollThread: (counterparty: string) => Promise<void>;
+  /**
+   * Poll one open conversation. Resolves true when something actually
+   * changed, so the caller can slow down when nothing is happening instead
+   * of asking at full speed for as long as the screen is open.
+   */
+  pollThread: (counterparty: string) => Promise<boolean>;
   /** Bounded retry of unresolved photo attachments for one open thread. */
   backfillThreadMedia: (counterparty: string) => Promise<void>;
   /** Persist an unsent composer draft per thread ('' clears). Works for
@@ -701,7 +706,7 @@ export const useMessages = create<MessagesState>()(
       pollThread: async (counterparty) => {
         const routes = await loadRoutes();
         const ids = availableRoutes(routes);
-        if (ids.length === 0) return;
+        if (ids.length === 0) return false;
         const gen = get().generation;
         try {
           const knownMediaSids = new Set(
@@ -741,7 +746,7 @@ export const useMessages = create<MessagesState>()(
             if (m.mediaUrls?.length && !prev.mediaUrls?.length) return true;
             return m.status !== prev.status;
           });
-          if (!changed) return;
+          if (!changed) return false;
           set((s) => {
             if (s.generation !== gen) return s;
             const messages = { ...s.messages };
@@ -760,8 +765,10 @@ export const useMessages = create<MessagesState>()(
             return { messages, scheduled, lastSyncAt: Date.now() };
           });
           if (get().generation === gen) clearRepliedFollowUps(fetched);
+          return true;
         } catch {
           // Poll misses are fine — the next tick (or full sync) catches up.
+          return false;
         }
       },
 

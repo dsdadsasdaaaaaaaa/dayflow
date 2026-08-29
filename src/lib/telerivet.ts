@@ -191,6 +191,7 @@ export async function sendTelerivet(
     body: payload,
   })) as TelerivetMessageRecord | null;
 
+  invalidateTelerivetCache();
   const mapped = rec ? toSmsMessage(rec, creds) : null;
   if (mapped) return mapped;
   // Accepted but unparseable: synthesize enough for the thread to render.
@@ -215,6 +216,28 @@ export interface TelerivetListOptions {
   counterparty?: string;
   /** Continue a previous page. */
   marker?: string;
+}
+
+/**
+ * Shortest gap between two identical list requests.
+ *
+ * Twilio is the user's own account and a wasted poll costs nothing, so the UI
+ * polls an open conversation every 2.5s. Telerivet bills per API call, and
+ * with both lines live that same screen was making around 48 calls a minute
+ * while the user simply sat reading. This collapses repeats of the same query
+ * inside the window onto one real request, so a chatty UI cannot drain the
+ * account no matter how often it asks.
+ */
+const LIST_CACHE_MS = 6_000;
+
+const listCache = new Map<string, { at: number; value: TelerivetPageResult }>();
+
+/**
+ * Drop the cache after we change something ourselves. Waiting out the window
+ * to see a message we just sent would be a strange kind of thrift.
+ */
+export function invalidateTelerivetCache(): void {
+  listCache.clear();
 }
 
 export interface TelerivetPageResult {
@@ -249,6 +272,11 @@ export async function listTelerivet(
   }
   if (opts.marker) query.marker = opts.marker;
 
+  const cacheKey = `${creds.projectId}:${JSON.stringify(query)}`;
+  const now = Date.now();
+  const hit = listCache.get(cacheKey);
+  if (hit && now - hit.at < LIST_CACHE_MS) return hit.value;
+
   const page = (await call(
     creds,
     `/projects/${encodeURIComponent(creds.projectId)}/messages`,
@@ -259,10 +287,20 @@ export async function listTelerivet(
     .map((r) => toSmsMessage(r, creds))
     .filter((m): m is SmsMessage => m != null);
 
-  return {
+  const result: TelerivetPageResult = {
     messages,
     ...(page?.next_marker ? { nextMarker: page.next_marker } : {}),
   };
+  listCache.set(cacheKey, { at: now, value: result });
+  // Bounded: a long session with many distinct queries should not grow this
+  // without limit, and anything evicted simply costs one more request.
+  if (listCache.size > 64) {
+    for (const k of listCache.keys()) {
+      listCache.delete(k);
+      if (listCache.size <= 32) break;
+    }
+  }
+  return result;
 }
 
 /** Cheap credential check: ask for the project by id. */

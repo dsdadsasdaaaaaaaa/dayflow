@@ -94,6 +94,10 @@ import { telegramChatTitle, useTelegram } from '../src/store/telegramAccount';
 import { RADIUS, SPACING, useTheme } from '../src/theme';
 import type { DayKey } from '../src/types';
 
+/** Open-thread polling: snappy while a conversation is live, then backing off. */
+const POLL_FAST_MS = 3000;
+const POLL_SLOW_MS = 30_000;
+
 /** A message from either channel — SMS/MMS (Twilio) or Telegram (TDLib). */
 type ThreadMsg = SmsMessage | TgMessage;
 
@@ -273,19 +277,25 @@ export default function ThreadScreen() {
    * means it predates the current one. Only labelled once we actually have a
    * current number to compare against, and never on Telegram.
    */
-  const retiredLabelFor = useCallback(
+  /**
+   * Which of our numbers carried this message, on EVERY message rather than
+   * only retired ones. With two lines live and conversations moving between
+   * them, "which number did this go out on" is a question about the current
+   * setup, not only about history — and answering it only for dead numbers
+   * left the interesting half unanswered.
+   */
+  const lineLabelFor = useCallback(
     (m: ThreadMsg): string | undefined => {
-      if (isTelegram || activeNumbers.length === 0) return undefined;
+      if (isTelegram) return undefined;
       const own = 'ownNumber' in m ? m.ownNumber : undefined;
       if (!own) return undefined;
-      // Checked against EVERY live line, not just the default one. With two
-      // routes connected, matching only the primary would label everything
-      // sent from the SIM as coming from a number we had rotated away from.
       const mine = normalizePhone(own);
-      if (activeNumbers.some((n) => normalizePhone(n) === mine)) return undefined;
-      return m.direction === 'in'
-        ? `To your old ${formatPhoneDisplay(own)}`
-        : `From your old ${formatPhoneDisplay(own)}`;
+      const live = activeNumbers.some((n) => normalizePhone(n) === mine);
+      const shown = formatPhoneDisplay(own);
+      if (live) {
+        return m.direction === 'in' ? `To ${shown}` : `From ${shown}`;
+      }
+      return m.direction === 'in' ? `To your old ${shown}` : `From your old ${shown}`;
     },
     [isTelegram, activeNumbers]
   );
@@ -342,8 +352,25 @@ export default function ThreadScreen() {
       // One bounded pass for any photos whose URLs never resolved (over the
       // per-sync cap or a transient failure) — placeholders become photos.
       void backfillThreadMedia(number);
-      const id = setInterval(() => void pollThread(number), 2500);
-      return () => clearInterval(id);
+
+      // Poll quickly while something is happening, then ease off. A flat
+      // 2.5s tick meant an open chat kept asking at full speed for as long
+      // as it was on screen, which on a metered line is real money spent on
+      // learning nothing. Any change resets it to fast.
+      let delay = POLL_FAST_MS;
+      let timer: ReturnType<typeof setTimeout>;
+      let stopped = false;
+      const tick = async () => {
+        const changed = await pollThread(number);
+        if (stopped) return;
+        delay = changed ? POLL_FAST_MS : Math.min(delay * 2, POLL_SLOW_MS);
+        timer = setTimeout(tick, delay);
+      };
+      timer = setTimeout(tick, delay);
+      return () => {
+        stopped = true;
+        clearTimeout(timer);
+      };
     }, [isTelegram, number, pollThread, backfillThreadMedia])
   );
 
@@ -824,7 +851,7 @@ export default function ThreadScreen() {
                     : undefined
                 }
                 onPressPhoto={openPhoto}
-                retiredNumberLabel={retiredLabelFor(item.msg)}
+                retiredNumberLabel={lineLabelFor(item.msg)}
               />
             )
           }

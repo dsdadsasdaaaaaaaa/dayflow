@@ -48,10 +48,11 @@ interface Props {
   /** Open the full-screen viewer for a tapped photo (URL or local file uri). */
   onPressPhoto?: (url: string) => void;
   /**
-   * Set when this message did NOT go through the number in use now, i.e. it
-   * reached a number we have since rotated away from. Rendered as a quiet
-   * footnote so the user can tell at a glance that a client is still texting
-   * an old line and has not saved the new one yet.
+   * Which of our own numbers carried this message, as a quiet footnote —
+   * "From (416) 555-0111" for a live line, "From your old (365) 360-7152"
+   * for one we have rotated away from. Shown on every message: with two
+   * lines running at once, which one a message went out on is a live
+   * question, not just a historical one.
    */
   retiredNumberLabel?: string;
 }
