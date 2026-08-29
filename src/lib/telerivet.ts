@@ -358,3 +358,37 @@ export async function listTelerivetPaged(
   }
   return out;
 }
+
+/** One contact as Telerivet stores it. */
+interface TelerivetContact {
+  id?: string;
+  name?: string | null;
+  phone_number?: string | null;
+}
+
+/**
+ * Create or update one contact. Telerivet keys contacts by phone number
+ * within a project, so sending the same number twice updates rather than
+ * duplicating — which makes this safe to re-run.
+ */
+export async function upsertTelerivetContact(
+  creds: TelerivetCredentials,
+  phoneNumber: string,
+  name?: string
+): Promise<boolean> {
+  const number = normalizePhone(phoneNumber);
+  if (!number) return false;
+  try {
+    const rec = (await call(
+      creds,
+      `/projects/${encodeURIComponent(creds.projectId)}/contacts`,
+      {
+        method: 'POST',
+        body: { phone_number: number, ...(name ? { name } : {}) },
+      }
+    )) as TelerivetContact | null;
+    return !!rec?.id;
+  } catch {
+    return false;
+  }
+}

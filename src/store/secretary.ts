@@ -12,6 +12,7 @@ import {
 import {
   buildToolRunner,
   collectClientNames,
+  buildInboxDigest,
   secretaryTools,
   type SecretaryAction,
 } from '../lib/secretaryTools';
@@ -105,6 +106,23 @@ export const useSecretary = create<SecretaryState>()(
         const history: ChatTurn[] = get()
           .messages.slice(-CONTEXT_TURNS)
           .map((t) => ({ role: t.role, at: t.at, text: redactText(t.text, map) }));
+
+        // The inbox picture rides in FRONT of the conversation, as its own
+        // turn, so it reads as background the assistant was handed rather
+        // than as something the user said. Rebuilt every request: a snapshot
+        // from ten minutes ago is worse than none, because it looks current.
+        const { secretaryPreloadChats } = useSettings.getState().settings;
+        if (secretaryPreloadChats) {
+          const digest = buildInboxDigest(map);
+          if (digest) {
+            history.unshift({ role: 'user', at: Date.now(), text: digest });
+            history.splice(1, 0, {
+              role: 'model',
+              at: Date.now(),
+              text: 'Understood, I have the current inbox in mind.',
+            });
+          }
+        }
         assertNoPii(
           history.map((t) => t.text).join('\n'),
           map

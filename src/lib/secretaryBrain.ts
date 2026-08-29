@@ -2,6 +2,7 @@ import { askSecretary as askClaude } from './claude';
 import { loadClaudeCredentials } from './claudeCredentials';
 import { askSecretary as askGemini } from './gemini';
 import { loadGeminiCredentials } from './geminiCredentials';
+import { useSettings } from '../store/settings';
 import type { ChatTurn, SecretaryOutcome, ToolRunner, ToolSpec } from './secretaryPrompt';
 
 /**
@@ -20,13 +21,35 @@ export interface BrainChoice {
   apiKey: string;
 }
 
-/** Claude when a key is saved, else Gemini, else nothing configured. */
+/**
+ * The model that answers: whichever the user picked, when a key for it is
+ * saved, otherwise whatever is available. Keeping both keys and switching
+ * between them beats deleting one to move, since the other has to be pasted
+ * back in to return.
+ */
 export async function loadBrain(): Promise<BrainChoice | null> {
-  const claude = await loadClaudeCredentials();
+  const [claude, gemini] = await Promise.all([
+    loadClaudeCredentials(),
+    loadGeminiCredentials(),
+  ]);
+  const preferred = useSettings.getState().settings.secretaryBrain;
+  if (preferred === 'gemini' && gemini) return { id: 'gemini', apiKey: gemini.apiKey };
+  if (preferred === 'claude' && claude) return { id: 'claude', apiKey: claude.apiKey };
   if (claude) return { id: 'claude', apiKey: claude.apiKey };
-  const gemini = await loadGeminiCredentials();
   if (gemini) return { id: 'gemini', apiKey: gemini.apiKey };
   return null;
+}
+
+/** Which brains have a key saved, for offering a choice. */
+export async function connectedBrains(): Promise<BrainId[]> {
+  const [claude, gemini] = await Promise.all([
+    loadClaudeCredentials(),
+    loadGeminiCredentials(),
+  ]);
+  const out: BrainId[] = [];
+  if (claude) out.push('claude');
+  if (gemini) out.push('gemini');
+  return out;
 }
 
 /** Human label for the settings screen. */

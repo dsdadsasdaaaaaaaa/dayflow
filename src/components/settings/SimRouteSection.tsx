@@ -12,6 +12,7 @@ import {
 import { successHaptic, tapHaptic, warningHaptic } from '../../lib/haptics';
 import { normalizePhone } from '../../lib/smsCredentials';
 import { verifyTelerivetCredentials } from '../../lib/telerivet';
+import { exportContacts, planContactExport } from '../../lib/telerivetContacts';
 import {
   clearTelerivetCredentials,
   loadTelerivetCredentials,
@@ -50,6 +51,7 @@ export function SimRouteSection() {
   const [projectId, setProjectId] = useState('');
   const [fromNumber, setFromNumber] = useState('');
   const [busy, setBusy] = useState(false);
+  const [exporting, setExporting] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -104,6 +106,52 @@ export function SimRouteSection() {
     }
   };
 
+  /**
+   * Copy everyone we have talked to into the Telerivet project. Blocked
+   * people are excluded, and the count is shown before anything is sent
+   * because each contact is one billable API call.
+   */
+  const runExport = () => {
+    if (!connected || exporting) return;
+    const plan = planContactExport();
+    if (plan.entries.length === 0) {
+      Alert.alert('Nothing to import', 'No conversations on this phone yet.');
+      return;
+    }
+    Alert.alert(
+      `Import ${plan.entries.length} contact${plan.entries.length === 1 ? '' : 's'}?`,
+      `Everyone you have exchanged messages with goes into your Telerivet project${
+        plan.blocked > 0
+          ? `. ${plan.blocked} blocked ${plan.blocked === 1 ? 'person is' : 'people are'} left out`
+          : ''
+      }. This uses one API call per contact.\n\nSending to all of them at once from a new SIM is the pattern carriers filter — space anything you send out.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Import',
+          onPress: async () => {
+            tapHaptic();
+            setExporting(`0 of ${plan.entries.length}`);
+            try {
+              const res = await exportContacts(connected, plan, (done, total) =>
+                setExporting(`${done} of ${total}`)
+              );
+              successHaptic();
+              Alert.alert(
+                'Imported',
+                `${res.added} contact${res.added === 1 ? '' : 's'} are now in Telerivet${
+                  res.failed > 0 ? `, ${res.failed} could not be added` : ''
+                }.`
+              );
+            } finally {
+              setExporting(null);
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const disconnect = () => {
     Alert.alert(
       'Remove your SIM line?',
@@ -135,6 +183,22 @@ export function SimRouteSection() {
           label="Second line ready"
           sublabel={connected.fromNumber}
           right={<Ionicons name="checkmark-circle" size={22} color={theme.success} />}
+        />
+        <SettingsRow
+          icon="cloud-upload"
+          tint={taskColor('sky').solid}
+          label="Import contacts to Telerivet"
+          sublabel={
+            exporting
+              ? `Importing ${exporting}…`
+              : 'Everyone you have messaged, except blocked people'
+          }
+          onPress={runExport}
+          right={
+            exporting ? (
+              <ActivityIndicator size="small" color={theme.textTertiary} />
+            ) : undefined
+          }
         />
         <SettingsRow
           icon="close-circle"

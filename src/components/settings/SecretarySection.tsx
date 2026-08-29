@@ -22,7 +22,12 @@ import {
   clearGeminiCredentials,
   saveGeminiCredentials,
 } from '../../lib/geminiCredentials';
-import { brainLabel, loadBrain, type BrainId } from '../../lib/secretaryBrain';
+import {
+  brainLabel,
+  connectedBrains,
+  loadBrain,
+  type BrainId,
+} from '../../lib/secretaryBrain';
 import { useSecretary } from '../../store/secretary';
 import { useSettings } from '../../store/settings';
 import { taskColor, useTheme } from '../../theme';
@@ -95,6 +100,7 @@ export function SecretarySection() {
   const clearChat = useSecretary((s) => s.clear);
   const usesNotes = useSettings((s) => s.settings.secretaryUsesNotes);
   const readsMessages = useSettings((s) => s.settings.secretaryReadsMessages);
+  const preload = useSettings((s) => s.settings.secretaryPreloadChats);
   const update = useSettings((s) => s.update);
 
   const [key, setKey] = useState('');
@@ -103,14 +109,17 @@ export function SecretarySection() {
   const [configured, setConfigured] = useState<boolean | null>(null);
   /** Which model is answering, for the connected row. */
   const [brain, setBrain] = useState<BrainId | null>(null);
+  /** Every brain with a key saved — a picker only makes sense with two. */
+  const [available, setAvailable] = useState<BrainId[]>([]);
 
   useEffect(() => {
     let alive = true;
-    loadBrain()
-      .then((b) => {
+    Promise.all([loadBrain(), connectedBrains()])
+      .then(([b, list]) => {
         if (!alive) return;
         setConfigured(b != null);
         setBrain(b?.id ?? null);
+        setAvailable(list);
       })
       .catch(() => {
         if (alive) setConfigured(false);
@@ -153,6 +162,7 @@ export function SecretarySection() {
       setEnabled(true);
       setConfigured(true);
       setBrain(which);
+      setAvailable((a) => (a.includes(which) ? a : [...a, which]));
       setKey('');
       successHaptic();
       Alert.alert(
@@ -183,6 +193,7 @@ export function SecretarySection() {
             setEnabled(false);
             setConfigured(false);
             setBrain(null);
+            setAvailable([]);
           },
         },
       ]
@@ -199,6 +210,55 @@ export function SecretarySection() {
           sublabel="Ask about clients, your week, or money"
           right={<Ionicons name="checkmark-circle" size={22} color={theme.success} />}
         />
+        {available.length > 1 ? (
+          <View style={styles.noteRow}>
+            <View style={[styles.iconCircle, { backgroundColor: taskColor('sky').solid }]}>
+              <Ionicons name="swap-horizontal" size={16} color="#fff" />
+            </View>
+            <View style={styles.noteLabels}>
+              <Text style={[styles.noteLabel, { color: theme.text }]}>Model</Text>
+              <Text style={[styles.noteSub, { color: theme.textTertiary }]}>
+                Both keys stay saved, so switching back is one tap.
+              </Text>
+            </View>
+            <View style={styles.brainRow}>
+              {available.map((b) => {
+                const on = b === brain;
+                return (
+                  <Pressable
+                    key={b}
+                    onPress={() => {
+                      if (on) return;
+                      selectionHaptic();
+                      update({ secretaryBrain: b });
+                      setBrain(b);
+                    }}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: on }}
+                    accessibilityLabel={`Use ${brainLabel(b)}`}
+                    style={({ pressed }) => [
+                      styles.brainChip,
+                      {
+                        backgroundColor: on ? theme.accentSoft : 'transparent',
+                        borderColor: on ? theme.accent : theme.border,
+                        opacity: pressed ? 0.7 : 1,
+                      },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.brainLabel,
+                        { color: on ? theme.accent : theme.textSecondary },
+                      ]}
+                    >
+                      {b === 'claude' ? 'Claude' : 'Gemini'}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+        ) : null}
         <View style={styles.noteRow}>
           <View style={[styles.iconCircle, { backgroundColor: taskColor('amber').solid }]}>
             <Ionicons name="document-text" size={16} color="#fff" />
@@ -247,6 +307,33 @@ export function SecretarySection() {
             accessibilityLabel="Let the secretary read message contents"
           />
         </View>
+        {readsMessages ? (
+          <View style={styles.noteRow}>
+            <View style={[styles.iconCircle, { backgroundColor: taskColor('violet').solid }]}>
+              <Ionicons name="albums" size={16} color="#fff" />
+            </View>
+            <View style={styles.noteLabels}>
+              <Text style={[styles.noteLabel, { color: theme.text }]}>
+                Know your inbox up front
+              </Text>
+              <Text style={[styles.noteSub, { color: theme.textTertiary }]}>
+                Gets a summary of every recent conversation with each question,
+                instead of looking things up only when it thinks to. Costs a
+                little on every question.
+              </Text>
+            </View>
+            <Switch
+              value={preload}
+              onValueChange={(on) => {
+                selectionHaptic();
+                update({ secretaryPreloadChats: on });
+              }}
+              trackColor={{ false: theme.surface, true: theme.accent }}
+              ios_backgroundColor={theme.surface}
+              accessibilityLabel="Preload recent conversations as context"
+            />
+          </View>
+        ) : null}
         <View style={styles.privacyInset}>
           <PrivacyNote usesNotes={usesNotes} readsMessages={readsMessages} />
         </View>
@@ -332,6 +419,14 @@ export function SecretarySection() {
 }
 
 const styles = StyleSheet.create({
+  brainRow: { flexDirection: 'row', gap: 6 },
+  brainChip: {
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+  },
+  brainLabel: { fontSize: 12, fontWeight: '700' },
   form: { paddingHorizontal: 14, paddingVertical: 14, gap: 12 },
   blurb: { fontSize: 13, lineHeight: 19 },
   privacy: { borderRadius: 10, padding: 12, gap: 6 },

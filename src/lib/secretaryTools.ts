@@ -1237,6 +1237,64 @@ function toolSearchMessages(
   };
 }
 
+/** Bounds for the always-on inbox digest. Every question pays for this. */
+const DIGEST_THREADS = 25;
+const DIGEST_PER_THREAD = 4;
+const DIGEST_DAYS = 21;
+const DIGEST_BODY_CHARS = 160;
+
+/**
+ * A compact picture of the whole inbox, handed over before the user has
+ * asked anything.
+ *
+ * The tools can already reach every conversation, but a model only calls a
+ * tool when it realizes it should, so "who should I chase" got answered from
+ * whatever the first tool returned. This puts a baseline in front of it every
+ * time, so it starts from what is actually going on rather than from nothing.
+ *
+ * Shorter and shallower than scan_conversations on purpose: this rides along
+ * with every single question, so it is a summary to reason from and a prompt
+ * to go read properly, not a replacement for reading.
+ */
+export function buildInboxDigest(map: PseudonymMap): string | null {
+  if (!useSettings.getState().settings.secretaryReadsMessages) return null;
+  const now = Date.now();
+  const floor = now - DIGEST_DAYS * 24 * 3_600_000;
+
+  const lines: string[] = [];
+  let shown = 0;
+  let omitted = 0;
+
+  for (const t of walkAllThreads(map)) {
+    const recent = t.messages.filter((m) => m.sentAt >= floor);
+    if (recent.length === 0) continue;
+    if (shown >= DIGEST_THREADS) {
+      omitted++;
+      continue;
+    }
+    shown++;
+    lines.push(`${t.label} (${t.status}, ${t.channel}):`);
+    for (const m of recent.slice(-DIGEST_PER_THREAD)) {
+      const who = m.direction === 'in' ? t.label : 'you';
+      const hrs = round1((now - m.sentAt) / 3_600_000);
+      const text = redactText(m.body.trim(), map).slice(0, DIGEST_BODY_CHARS);
+      if (text) lines.push(`  ${who} (${hrs}h ago): ${text}`);
+    }
+  }
+  if (lines.length === 0) return null;
+
+  return [
+    'CURRENT INBOX (loaded automatically, not something the user typed).',
+    `The last ${DIGEST_PER_THREAD} messages of each conversation active in the past ${DIGEST_DAYS} days, newest conversations first. Each line names who wrote it: a client label, or "you" for the user.`,
+    omitted > 0
+      ? `${omitted} further conversations are not shown here — use scan_conversations or search_messages if the answer may involve them.`
+      : 'This covers every recently active conversation.',
+    'Use it as your starting picture. For anything you are about to assert, or before drafting, read the actual thread with get_conversation rather than relying on these excerpts.',
+    '',
+    ...lines,
+  ].join('\n');
+}
+
 // ------------------------------------------------------------- proposals
 
 /** What a write tool tells the model: prepared, never done. */

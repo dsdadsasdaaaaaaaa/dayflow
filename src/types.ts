@@ -253,5 +253,17 @@ export interface Settings {
    * this phone, so reading them is a deliberate choice and never a default.
    */
   secretaryReadsMessages: boolean;
+  /**
+   * Which model answers, when keys for more than one are saved. 'auto'
+   * prefers Claude. Explicit so switching back does not mean deleting a key
+   * and re-pasting it later.
+   */
+  secretaryBrain: 'auto' | 'claude' | 'gemini';
+  /**
+   * Hand the assistant a picture of the whole inbox with every question,
+   * instead of waiting for it to decide to go looking. Costs tokens on every
+   * request, which is why it can be turned off.
+   */
+  secretaryPreloadChats: boolean;
   onboardingDone: boolean;
 }
