@@ -22,6 +22,7 @@ import {
   listThread,
   loadMessagingCredentials,
   loadRoutes,
+  routeLabel,
   sendMessage,
   supportsScheduling,
   SCHEDULING_UNSUPPORTED,
@@ -354,6 +355,7 @@ export const useMessages = create<MessagesState>()(
           // Poll EVERY connected line. Replies come back to whichever number
           // sent, so reading only the default route would silently lose every
           // answer to a conversation that was moved to the other one.
+          const routeFailures: string[] = [];
           const perRoute = await Promise.all(
             ids.map(async (id) => {
               const routeCreds = credsFor(routes, id);
@@ -366,14 +368,22 @@ export const useMessages = create<MessagesState>()(
                       maxPagesPerDirection: SYNC_PAGES_PER_DIRECTION,
                       previousNumbers,
                     });
-              } catch {
+              } catch (e) {
                 // One line being unreachable must not stop the other from
-                // syncing; the next tick retries it.
+                // syncing. But swallowing the reason entirely turned a broken
+                // line into "no new messages", which looks exactly like a
+                // quiet day and is impossible to tell apart from one.
+                routeFailures.push(
+                  `${routeLabel(id)}: ${e instanceof Error ? e.message : 'could not sync'}`
+                );
                 return [];
               }
             })
           );
           const fetched = perRoute.flat();
+          if (routeFailures.length > 0) {
+            set({ lastError: routeFailures.join(' · ') });
+          }
           // Advance the mark from message timestamps (Twilio's clock), never
           // the device clock — skew-proof by construction.
           // Ignore future-dated scheduled records when advancing the mark.
@@ -716,6 +726,7 @@ export const useMessages = create<MessagesState>()(
           );
           // Both lines: an open conversation may have been moved to the SIM
           // while its earlier half still sits on Twilio.
+          const threadFailures: string[] = [];
           const fetched = (
             await Promise.all(
               ids.map(async (id) => {
@@ -729,12 +740,18 @@ export const useMessages = create<MessagesState>()(
                     knownMediaSids,
                     get().previousNumbers
                   );
-                } catch {
+                } catch (e) {
+                  threadFailures.push(
+                    `${routeLabel(id)}: ${e instanceof Error ? e.message : 'could not sync'}`
+                  );
                   return [];
                 }
               })
             )
           ).flat();
+          if (threadFailures.length > 0) {
+            set({ lastError: threadFailures.join(' · ') });
+          }
           // "Changed" must count RESOLVED MEDIA and settled statuses, not
           // just unseen SIDs — an MMS often lists before its media exists,
           // and the first version of this gate threw the photo away on every

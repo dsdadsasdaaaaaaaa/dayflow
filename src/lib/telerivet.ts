@@ -28,6 +28,9 @@ const BASE = 'https://api.telerivet.com/v1';
 /** Telerivet returns seconds; the rest of the app is in epoch ms. */
 const SEC = 1000;
 
+/** How far back a first sync reaches when there is no high-water mark yet. */
+const FIRST_SYNC_WINDOW_MS = 30 * 24 * 60 * 60_000;
+
 interface TelerivetMedia {
   url?: string;
   type?: string;
@@ -153,8 +156,9 @@ async function call(
   }
   if (!res.ok) {
     const err = parsed as { error?: { message?: string; code?: string } } | null;
+    const detail = err?.error?.message?.trim();
     throw new SmsSendError(
-      err?.error?.message || `Telerivet request failed (${res.status})`
+      detail ? `${detail} (${res.status})` : `Telerivet request failed (${res.status})`
     );
   }
   return parsed;
@@ -255,20 +259,22 @@ export async function listTelerivet(
   pageSize: number,
   opts: TelerivetListOptions = {}
 ): Promise<TelerivetPageResult> {
+  // Only parameters Telerivet documents for this endpoint. sort/sort_dir were
+  // carried over from a different part of their API and are not listed here;
+  // an unrecognized parameter fails the request outright, which the callers
+  // then reported as an empty inbox.
   const query: Record<string, string> = {
     page_size: String(Math.min(Math.max(pageSize, 1), 500)),
-    sort: 'time_created',
-    sort_dir: 'desc',
   };
-  if (opts.sentAfterMs != null) {
-    query['time_created[min]'] = String(Math.floor(opts.sentAfterMs / SEC));
+  // With no ordering parameter available, a floor is what keeps a first sync
+  // from returning the oldest page of a long history instead of today's.
+  const floorMs =
+    opts.sentAfterMs ?? (opts.counterparty ? undefined : Date.now() - FIRST_SYNC_WINDOW_MS);
+  if (floorMs != null) {
+    query['time_created[min]'] = String(Math.floor(floorMs / SEC));
   }
   if (opts.sentBeforeMs != null) {
     query['time_created[max]'] = String(Math.ceil(opts.sentBeforeMs / SEC));
-  }
-  if (opts.counterparty) {
-    const n = normalizePhone(opts.counterparty);
-    if (n) query.contact_phone_number = n;
   }
   if (opts.marker) query.marker = opts.marker;
 
@@ -283,10 +289,24 @@ export async function listTelerivet(
     { query }
   )) as TelerivetPage | null;
 
-  const messages = (page?.data ?? [])
+  let messages = (page?.data ?? [])
     .map((r) => toSmsMessage(r, creds))
     .filter((m): m is SmsMessage => m != null);
 
+  // Narrowing to one conversation happens here rather than in the query.
+  // The server-side filter parameter was a guess, and an unrecognized
+  // parameter is not ignored — it fails the whole request, which the callers
+  // then swallowed as "no messages". Filtering what came back cannot be
+  // wrong, and the request is being made either way.
+  if (opts.counterparty) {
+    const only = normalizePhone(opts.counterparty);
+    if (only) messages = messages.filter((m) => m.counterparty === only);
+  }
+
+  if (opts.sentAfterMs != null) {
+    messages = messages.filter((m) => m.sentAt >= opts.sentAfterMs!);
+  }
+  messages.sort((a, b) => b.sentAt - a.sentAt);
   const result: TelerivetPageResult = {
     messages,
     ...(page?.next_marker ? { nextMarker: page.next_marker } : {}),
