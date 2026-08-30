@@ -19,11 +19,6 @@ import {
   loadTelerivetCredentials,
   type TelerivetCredentials,
 } from './telerivetCredentials';
-import { listTextbee, sendTextbee } from './textbee';
-import {
-  loadTextbeeCredentials,
-  type TextbeeCredentials,
-} from './textbeeCredentials';
 
 /**
  * The seam between the app and whichever route actually carries a message.
@@ -42,23 +37,15 @@ import {
  * Switching wholesale would move the ones who were never having trouble onto
  * a number they have never seen, for no reason.
  *
- * The SIM line itself can be served by two different gateways. textbee is
- * open source and self-hostable, so its traffic is unmetered; Telerivet
- * bills per API call but is the only one that sends MMS. When both are
- * connected textbee carries everything and Telerivet is used for photos
- * alone — never polled, so the same inbound message cannot arrive twice
- * through two apps reading the same SIM.
- *
- * Every route produces the same SmsMessage shape, so threads, dedup,
+ * Both routes produce the same SmsMessage shape, so threads, dedup,
  * follow-ups and the number-rotation UI never learn which one was used.
  */
 
-export type ProviderId = 'twilio' | 'telerivet' | 'textbee';
+export type ProviderId = 'twilio' | 'telerivet';
 
 export type MessagingCreds =
   | { provider: 'twilio'; twilio: SmsCredentials }
-  | { provider: 'telerivet'; telerivet: TelerivetCredentials }
-  | { provider: 'textbee'; textbee: TextbeeCredentials; mms: TelerivetCredentials | null };
+  | { provider: 'telerivet'; telerivet: TelerivetCredentials };
 
 /**
  * Both routes at once. Connecting the SIM used to mean switching to it, but
@@ -69,28 +56,21 @@ export type MessagingCreds =
 export interface Routes {
   twilio: SmsCredentials | null;
   telerivet: TelerivetCredentials | null;
-  textbee: TextbeeCredentials | null;
 }
 
 export async function loadRoutes(): Promise<Routes> {
-  const [twilio, telerivet, textbee] = await Promise.all([
+  const [twilio, telerivet] = await Promise.all([
     loadSmsCredentials(),
     loadTelerivetCredentials(),
-    loadTextbeeCredentials(),
   ]);
-  return { twilio, telerivet, textbee };
+  return { twilio, telerivet };
 }
 
-/**
- * Lines the user can actually choose between. There are still only two —
- * Twilio and the SIM — because Telerivet stops being a route of its own once
- * textbee is connected and becomes just the way photos leave that same SIM.
- */
+/** Which routes can actually send right now, preferred order first. */
 export function availableRoutes(routes: Routes): ProviderId[] {
   const out: ProviderId[] = [];
   if (routes.twilio) out.push('twilio');
-  if (routes.textbee) out.push('textbee');
-  else if (routes.telerivet) out.push('telerivet');
+  if (routes.telerivet) out.push('telerivet');
   return out;
 }
 
@@ -99,11 +79,6 @@ export function credsFor(routes: Routes, id: ProviderId): MessagingCreds | null 
   if (id === 'twilio') {
     return routes.twilio ? { provider: 'twilio', twilio: routes.twilio } : null;
   }
-  if (id === 'textbee') {
-    return routes.textbee
-      ? { provider: 'textbee', textbee: routes.textbee, mms: routes.telerivet }
-      : null;
-  }
   return routes.telerivet ? { provider: 'telerivet', telerivet: routes.telerivet } : null;
 }
 
@@ -111,10 +86,7 @@ export function credsFor(routes: Routes, id: ProviderId): MessagingCreds | null 
 export function activeNumbersOf(routes: Routes): string[] {
   const out: string[] = [];
   if (routes.twilio?.fromNumber) out.push(routes.twilio.fromNumber);
-  // The SIM contributes one number however it is served, so a phone running
-  // both gateways does not list the same line twice.
-  const sim = routes.textbee?.fromNumber ?? routes.telerivet?.fromNumber;
-  if (sim) out.push(sim);
+  if (routes.telerivet?.fromNumber) out.push(routes.telerivet.fromNumber);
   return out;
 }
 
@@ -147,9 +119,9 @@ export async function loadMessagingCredentials(
 
 /** The number we send from on the active route. */
 export function ownNumberOf(creds: MessagingCreds): string {
-  if (creds.provider === 'twilio') return creds.twilio.fromNumber;
-  if (creds.provider === 'textbee') return creds.textbee.fromNumber;
-  return creds.telerivet.fromNumber;
+  return creds.provider === 'twilio'
+    ? creds.twilio.fromNumber
+    : creds.telerivet.fromNumber;
 }
 
 export async function sendMessage(
@@ -158,22 +130,9 @@ export async function sendMessage(
   body: string,
   mediaUrls?: string[]
 ): Promise<SmsMessage> {
-  if (creds.provider === 'twilio') return sendSms(creds.twilio, to, body, mediaUrls);
-  if (creds.provider === 'telerivet') {
-    return sendTelerivet(creds.telerivet, to, body, mediaUrls);
-  }
-  // textbee cannot send MMS, so a photo goes out through Telerivet on the
-  // same SIM — the one billable call, paid only when there is actually a
-  // photo, instead of on every poll.
-  if (mediaUrls && mediaUrls.length > 0) {
-    if (!creds.mms) {
-      throw new SmsSendError(
-        'Sending photos from your SIM needs Telerivet connected as well. Text-only sends work as normal.'
-      );
-    }
-    return sendTelerivet(creds.mms, to, body, mediaUrls);
-  }
-  return sendTextbee(creds.textbee, to, body);
+  return creds.provider === 'twilio'
+    ? sendSms(creds.twilio, to, body, mediaUrls)
+    : sendTelerivet(creds.telerivet, to, body, mediaUrls);
 }
 
 export async function listRecent(
@@ -184,13 +143,6 @@ export async function listRecent(
 ): Promise<SmsMessage[]> {
   if (creds.provider === 'twilio') {
     return listRecentSms(creds.twilio, pageSize, skipMediaSids, opts);
-  }
-  if (creds.provider === 'textbee') {
-    return listTextbee(
-      creds.textbee,
-      pageSize,
-      opts?.sentAfterMs != null ? { sentAfterMs: opts.sentAfterMs } : {}
-    );
   }
   // Telerivet returns both directions in one project feed, and returns them
   // for every SIM the project has ever had — so rotated-away numbers keep
@@ -220,9 +172,6 @@ export async function listOlder(
       previousNumbers
     );
   }
-  if (creds.provider === 'textbee') {
-    return listTextbee(creds.textbee, pageSize, { counterparty });
-  }
   return listTelerivetPaged(creds.telerivet, pageSize, {
     counterparty,
     sentBeforeMs: beforeMs,
@@ -245,9 +194,6 @@ export async function listThread(
       previousNumbers
     );
   }
-  if (creds.provider === 'textbee') {
-    return listTextbee(creds.textbee, pageSize, { counterparty });
-  }
   return listTelerivetPaged(creds.telerivet, pageSize, { counterparty });
 }
 
@@ -255,11 +201,9 @@ export async function fetchStatus(
   creds: MessagingCreds,
   sid: string
 ): Promise<SmsMessage | null> {
-  if (creds.provider === 'twilio') return fetchSmsStatus(creds.twilio, sid);
-  // textbee reports no per-message status to settle, and asking Telerivet
-  // about a message it never sent would be a billed call for nothing.
-  if (creds.provider === 'textbee') return null;
-  return fetchTelerivetMessage(creds.telerivet, sid);
+  return creds.provider === 'twilio'
+    ? fetchSmsStatus(creds.twilio, sid)
+    : fetchTelerivetMessage(creds.telerivet, sid);
 }
 
 /**
