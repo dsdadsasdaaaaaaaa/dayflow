@@ -28,6 +28,9 @@ const BASE = 'https://api.telerivet.com/v1';
 /** Telerivet returns seconds; the rest of the app is in epoch ms. */
 const SEC = 1000;
 
+/** Telerivet's documented maximum for page_size. */
+const MAX_PAGE_SIZE = 500;
+
 /** How far back a first sync reaches when there is no high-water mark yet. */
 const FIRST_SYNC_WINDOW_MS = 30 * 24 * 60 * 60_000;
 
@@ -264,7 +267,7 @@ export async function listTelerivet(
   // an unrecognized parameter fails the request outright, which the callers
   // then reported as an empty inbox.
   const query: Record<string, string> = {
-    page_size: String(Math.min(Math.max(pageSize, 1), 500)),
+    page_size: String(Math.min(Math.max(pageSize, 1), MAX_PAGE_SIZE)),
   };
   // With no ordering parameter available, a floor is what keeps a first sync
   // from returning the oldest page of a long history instead of today's.
@@ -363,20 +366,28 @@ export async function listTelerivetPaged(
   creds: TelerivetCredentials,
   pageSize: number,
   opts: TelerivetListOptions = {},
-  maxPages = 5
+  maxPages = 6
 ): Promise<SmsMessage[]> {
   const out: SmsMessage[] = [];
   let marker = opts.marker;
   for (let page = 0; page < maxPages; page++) {
-    const res = await listTelerivet(creds, Math.min(pageSize, 500), {
-      ...opts,
-      marker,
-    });
+    // Always ask for the largest page the API allows, not the caller's
+    // display-sized page. Without an ordering parameter the server decides
+    // the order, so the only safe assumption is that the messages we want
+    // could be anywhere in the window — one big page is far likelier to
+    // contain them than several small ones, and it is the same one request.
+    const res = await listTelerivet(creds, MAX_PAGE_SIZE, { ...opts, marker });
     out.push(...res.messages);
-    if (!res.nextMarker || out.length >= pageSize) break;
+    // Stop only when the feed is exhausted. Stopping once enough messages
+    // had been COLLECTED was the bug: it returned after the first page, and
+    // if the server orders oldest-first that page is the oldest slice of the
+    // window, so newly arrived messages sat on a page never requested and
+    // simply never appeared.
+    if (!res.nextMarker) break;
     marker = res.nextMarker;
   }
-  return out;
+  out.sort((a, b) => b.sentAt - a.sentAt);
+  return pageSize > 0 ? out.slice(0, Math.max(pageSize, MAX_PAGE_SIZE)) : out;
 }
 
 /** One contact as Telerivet stores it. */
