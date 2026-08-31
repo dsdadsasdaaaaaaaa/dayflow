@@ -25,21 +25,20 @@ import { SettingsRow } from './SettingsRow';
 import { SettingsSection } from './SettingsSection';
 
 const CAPTION_SETUP =
-  'Add a real SIM in an Android phone as a second line alongside Twilio. ' +
-  'Carriers filter Twilio numbers as automated traffic no matter how ' +
-  'ordinary the conversation is, which is what keeps burning numbers. A ' +
-  'consumer SIM travels the normal person-to-person path, so there is no ' +
-  'campaign to register and nothing to be rejected from.';
+  'Telerivet sends photos from your SIM, which the free gateway above ' +
+  'cannot do. It bills per request, so it is used only when a message has a ' +
+  'photo attached, never for texting or for checking for replies.';
 
 const CAPTION_CONNECTED =
-  'Both lines are live. Each conversation picks which one it sends from, in ' +
-  'the chat itself. New conversations start on Twilio.';
+  'Photos from your SIM go out through Telerivet. With the free line ' +
+  'connected it is never polled, so it costs one request per photo and ' +
+  'nothing else.';
 
 /**
- * Settings → Own SIM: connect a Telerivet project whose Android gateway holds
- * the SIM. Connecting is itself the switch — the messaging layer prefers this
- * route whenever these credentials exist, and falls back to Twilio the moment
- * they are removed (see lib/messaging).
+ * Settings → Photos from your SIM: a Telerivet project attached to the same
+ * Android gateway. Kept only because it is the one route that can send MMS —
+ * SMSGate carries the texting for free and does all the receiving, and this
+ * is never polled, so a photo is the only thing that ever costs anything.
  */
 export function SimRouteSection() {
   const theme = useTheme();
@@ -176,7 +175,7 @@ export function SimRouteSection() {
 
   if (connected) {
     return (
-      <SettingsSection title="Own SIM" caption={CAPTION_CONNECTED}>
+      <SettingsSection title="Photos from your SIM" caption={CAPTION_CONNECTED}>
         <SettingsRow
           icon="hardware-chip"
           tint={taskColor('green').solid}
@@ -217,7 +216,7 @@ export function SimRouteSection() {
   ];
 
   return (
-    <SettingsSection title="Own SIM" caption={CAPTION_SETUP}>
+    <SettingsSection title="Photos from your SIM" caption={CAPTION_SETUP}>
       <View style={styles.form}>
         <Text style={[styles.hint, { color: theme.textTertiary }]}>
           Install the Telerivet Gateway app on a spare Android phone with your

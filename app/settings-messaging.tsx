@@ -12,6 +12,7 @@ import { BackButton } from '../src/components/clients/BackButton';
 import { CallingSection } from '../src/components/settings/CallingSection';
 import { MessagingSection } from '../src/components/settings/MessagingSection';
 import { SimRouteSection } from '../src/components/settings/SimRouteSection';
+import { SmsGateSection } from '../src/components/settings/SmsGateSection';
 import { SafetySection } from '../src/components/settings/SafetySection';
 import { TelegramSection } from '../src/components/settings/TelegramSection';
 import { SPACING, useTheme } from '../src/theme';
@@ -45,6 +46,7 @@ export default function SettingsMessagingScreen() {
           ]}
         >
           <MessagingSection />
+          <SmsGateSection />
           <SimRouteSection />
           <TelegramSection />
           <CallingSection />

@@ -19,6 +19,11 @@ import {
   loadTelerivetCredentials,
   type TelerivetCredentials,
 } from './telerivetCredentials';
+import { listSmsGate, sendSmsGate } from './smsgate';
+import {
+  loadSmsGateCredentials,
+  type SmsGateCredentials,
+} from './smsgateCredentials';
 
 /**
  * The seam between the app and whichever route actually carries a message.
@@ -37,15 +42,24 @@ import {
  * Switching wholesale would move the ones who were never having trouble onto
  * a number they have never seen, for no reason.
  *
+ * The SIM line can be served two ways. SMSGate is free — its cloud sends
+ * from anywhere, and a small user-deployed Worker holds received messages to
+ * be polled. Telerivet does the same job but bills per API call. Whichever
+ * serves it, Telerivet stays connected for photos alone, since it is the
+ * only one that sends MMS, and when SMSGate is present Telerivet is never
+ * polled: two gateways reading one SIM would otherwise report every inbound
+ * message twice.
+ *
  * Both routes produce the same SmsMessage shape, so threads, dedup,
  * follow-ups and the number-rotation UI never learn which one was used.
  */
 
-export type ProviderId = 'twilio' | 'telerivet';
+export type ProviderId = 'twilio' | 'telerivet' | 'smsgate';
 
 export type MessagingCreds =
   | { provider: 'twilio'; twilio: SmsCredentials }
-  | { provider: 'telerivet'; telerivet: TelerivetCredentials };
+  | { provider: 'telerivet'; telerivet: TelerivetCredentials }
+  | { provider: 'smsgate'; smsgate: SmsGateCredentials; mms: TelerivetCredentials | null };
 
 /**
  * Both routes at once. Connecting the SIM used to mean switching to it, but
@@ -56,21 +70,26 @@ export type MessagingCreds =
 export interface Routes {
   twilio: SmsCredentials | null;
   telerivet: TelerivetCredentials | null;
+  smsgate: SmsGateCredentials | null;
 }
 
 export async function loadRoutes(): Promise<Routes> {
-  const [twilio, telerivet] = await Promise.all([
+  const [twilio, telerivet, smsgate] = await Promise.all([
     loadSmsCredentials(),
     loadTelerivetCredentials(),
+    loadSmsGateCredentials(),
   ]);
-  return { twilio, telerivet };
+  return { twilio, telerivet, smsgate };
 }
 
 /** Which routes can actually send right now, preferred order first. */
 export function availableRoutes(routes: Routes): ProviderId[] {
   const out: ProviderId[] = [];
   if (routes.twilio) out.push('twilio');
-  if (routes.telerivet) out.push('telerivet');
+  // Still only two lines to choose between: Telerivet stops being a route of
+  // its own once SMSGate serves the SIM, and becomes how photos leave it.
+  if (routes.smsgate) out.push('smsgate');
+  else if (routes.telerivet) out.push('telerivet');
   return out;
 }
 
@@ -79,6 +98,11 @@ export function credsFor(routes: Routes, id: ProviderId): MessagingCreds | null 
   if (id === 'twilio') {
     return routes.twilio ? { provider: 'twilio', twilio: routes.twilio } : null;
   }
+  if (id === 'smsgate') {
+    return routes.smsgate
+      ? { provider: 'smsgate', smsgate: routes.smsgate, mms: routes.telerivet }
+      : null;
+  }
   return routes.telerivet ? { provider: 'telerivet', telerivet: routes.telerivet } : null;
 }
 
@@ -86,7 +110,10 @@ export function credsFor(routes: Routes, id: ProviderId): MessagingCreds | null 
 export function activeNumbersOf(routes: Routes): string[] {
   const out: string[] = [];
   if (routes.twilio?.fromNumber) out.push(routes.twilio.fromNumber);
-  if (routes.telerivet?.fromNumber) out.push(routes.telerivet.fromNumber);
+  // One number for the SIM however it is served, so a phone running both
+  // gateways is not listed twice.
+  const sim = routes.smsgate?.fromNumber ?? routes.telerivet?.fromNumber;
+  if (sim) out.push(sim);
   return out;
 }
 
@@ -119,9 +146,9 @@ export async function loadMessagingCredentials(
 
 /** The number we send from on the active route. */
 export function ownNumberOf(creds: MessagingCreds): string {
-  return creds.provider === 'twilio'
-    ? creds.twilio.fromNumber
-    : creds.telerivet.fromNumber;
+  if (creds.provider === 'twilio') return creds.twilio.fromNumber;
+  if (creds.provider === 'smsgate') return creds.smsgate.fromNumber;
+  return creds.telerivet.fromNumber;
 }
 
 export async function sendMessage(
@@ -130,9 +157,22 @@ export async function sendMessage(
   body: string,
   mediaUrls?: string[]
 ): Promise<SmsMessage> {
-  return creds.provider === 'twilio'
-    ? sendSms(creds.twilio, to, body, mediaUrls)
-    : sendTelerivet(creds.telerivet, to, body, mediaUrls);
+  if (creds.provider === 'twilio') return sendSms(creds.twilio, to, body, mediaUrls);
+  if (creds.provider === 'telerivet') {
+    return sendTelerivet(creds.telerivet, to, body, mediaUrls);
+  }
+  // SMSGate cannot send MMS, so a photo leaves through Telerivet on the same
+  // SIM: the one billable call, paid only when there is actually a photo
+  // rather than on every poll.
+  if (mediaUrls && mediaUrls.length > 0) {
+    if (!creds.mms) {
+      throw new SmsSendError(
+        'Sending photos from your SIM needs Telerivet connected as well. Text-only sends work as normal.'
+      );
+    }
+    return sendTelerivet(creds.mms, to, body, mediaUrls);
+  }
+  return sendSmsGate(creds.smsgate, to, body);
 }
 
 export async function listRecent(
@@ -143,6 +183,13 @@ export async function listRecent(
 ): Promise<SmsMessage[]> {
   if (creds.provider === 'twilio') {
     return listRecentSms(creds.twilio, pageSize, skipMediaSids, opts);
+  }
+  if (creds.provider === 'smsgate') {
+    return listSmsGate(
+      creds.smsgate,
+      pageSize,
+      opts?.sentAfterMs != null ? { sentAfterMs: opts.sentAfterMs } : {}
+    );
   }
   // Telerivet returns both directions in one project feed, and returns them
   // for every SIM the project has ever had — so rotated-away numbers keep
@@ -172,6 +219,11 @@ export async function listOlder(
       previousNumbers
     );
   }
+  if (creds.provider === 'smsgate') {
+    // The relay only holds recent inbound; older history for this route has
+    // to come from whatever is already stored on the phone.
+    return listSmsGate(creds.smsgate, pageSize, { counterparty });
+  }
   return listTelerivetPaged(creds.telerivet, pageSize, {
     counterparty,
     sentBeforeMs: beforeMs,
@@ -194,6 +246,9 @@ export async function listThread(
       previousNumbers
     );
   }
+  if (creds.provider === 'smsgate') {
+    return listSmsGate(creds.smsgate, pageSize, { counterparty });
+  }
   return listTelerivetPaged(creds.telerivet, pageSize, { counterparty });
 }
 
@@ -201,9 +256,11 @@ export async function fetchStatus(
   creds: MessagingCreds,
   sid: string
 ): Promise<SmsMessage | null> {
-  return creds.provider === 'twilio'
-    ? fetchSmsStatus(creds.twilio, sid)
-    : fetchTelerivetMessage(creds.telerivet, sid);
+  if (creds.provider === 'twilio') return fetchSmsStatus(creds.twilio, sid);
+  // The relay stores received messages only, so there is no delivery state
+  // to settle for a send made through SMSGate.
+  if (creds.provider === 'smsgate') return null;
+  return fetchTelerivetMessage(creds.telerivet, sid);
 }
 
 /**
