@@ -160,8 +160,16 @@ async function call(
   if (!res.ok) {
     const err = parsed as { error?: { message?: string; code?: string } } | null;
     const detail = err?.error?.message?.trim();
+    // The daily allowance counts messages RECEIVED as well as sent, and the
+    // gateway app on the phone sees every incoming text whether or not this
+    // app ever asks for it. So the quota can be gone before a single photo is
+    // attempted, which is baffling unless the message says so.
+    const quota =
+      /quota|limit|exceed/i.test(detail ?? '') || res.status === 402
+        ? ' Telerivet\'s daily allowance counts messages it RECEIVES too, and the gateway app on your phone sees every incoming text. Add your clients under Ignored Phones in the Telerivet app so only photos you send count.'
+        : '';
     throw new SmsSendError(
-      detail ? `${detail} (${res.status})` : `Telerivet request failed (${res.status})`
+      (detail ? `${detail} (${res.status})` : `Telerivet request failed (${res.status})`) + quota
     );
   }
   return parsed;

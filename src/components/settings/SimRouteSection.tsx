@@ -123,7 +123,7 @@ export function SimRouteSection() {
         plan.blocked > 0
           ? `. ${plan.blocked} blocked ${plan.blocked === 1 ? 'person is' : 'people are'} left out`
           : ''
-      }. This uses one API call per contact.\n\nSending to all of them at once from a new SIM is the pattern carriers filter — space anything you send out.`,
+      }.\n\nOn the Test plan contacts are capped at 50 and Telerivet already creates one automatically for every number it sees, so this can fill the allowance. Only worth doing if you actually intend to message people from Telerivet's own dashboard.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
