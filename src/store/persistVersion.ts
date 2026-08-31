@@ -11,8 +11,12 @@
  *
  * Historical note: state persisted before versioning carries version 0 and
  * flows through this identity migration unchanged.
+ *
+ * Version 2 exists for the messages store alone, which collapses messages
+ * stored more than once under different gateway ids. Every other store rides
+ * the bump through the identity migration below.
  */
-export const PERSIST_VERSION = 1;
+export const PERSIST_VERSION = 2;
 
 export function migrateStore<S>(persisted: unknown, _fromVersion: number): S {
   return persisted as S;

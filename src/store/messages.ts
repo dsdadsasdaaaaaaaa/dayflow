@@ -236,8 +236,37 @@ interface MessagesState {
  * twice under two event ids. Deduplicating on id therefore keeps every copy,
  * which is exactly what showed up as repeated messages after importing.
  */
-function contentSignature(m: SmsMessage): string {
-  return [m.direction, normalizePhone(m.counterparty), m.sentAt, m.body].join('|');
+/**
+ * How far apart two records of the same text may sit and still be one message.
+ *
+ * Nothing here shares a clock. A sent message is stamped by this app when it
+ * hands the text over, by the handset when it actually goes out, and by the
+ * gateway when it hears back — three times, seconds apart. A received one is
+ * stamped by whichever gateway happened to be polling. Demanding an exact
+ * match meant none of them lined up, and the same message was stored under
+ * every id it had ever been given.
+ *
+ * The cost of being wrong is asymmetric. Too wide and an identical text
+ * genuinely sent twice in quick succession collapses into one; too narrow and
+ * every conversation reads doubled. Two minutes is well past the spread
+ * between clocks and well short of a person repeating themselves verbatim.
+ */
+const DEDUPE_SLACK_MS = 2 * 60 * 1000;
+
+/** Same words, same person, same direction. Deliberately not the time. */
+function contentKey(m: SmsMessage): string {
+  return [m.direction, normalizePhone(m.counterparty), (m.body ?? '').trim()].join('|');
+}
+
+/** Of two records of one message, the one worth keeping. */
+function preferred(a: SmsMessage, b: SmsMessage): SmsMessage {
+  const media = (m: SmsMessage) => m.mediaUrls?.length ?? 0;
+  if (media(a) !== media(b)) return media(a) > media(b) ? a : b;
+  // Failing that, whichever id the relay will go on sending, so the next
+  // sync updates it in place rather than reviving the copy just dropped.
+  const fromRelay = (m: SmsMessage) => (m.sid.startsWith('sms:') ? 1 : 0);
+  if (fromRelay(a) !== fromRelay(b)) return fromRelay(a) > fromRelay(b) ? a : b;
+  return a;
 }
 
 /**
@@ -251,18 +280,71 @@ export function dropContentDuplicates(
   existing: Record<string, SmsMessage>,
   fetched: SmsMessage[]
 ): SmsMessage[] {
-  const seen = new Map<string, string>();
-  for (const m of Object.values(existing)) seen.set(contentSignature(m), m.sid);
+  const seen = new Map<string, { at: number; sid: string }[]>();
+  const note = (m: SmsMessage) => {
+    const key = contentKey(m);
+    const at = { at: m.sentAt, sid: m.sid };
+    const list = seen.get(key);
+    if (list) list.push(at);
+    else seen.set(key, [at]);
+  };
+  for (const m of Object.values(existing)) note(m);
   const out: SmsMessage[] = [];
   for (const m of fetched) {
-    const sig = contentSignature(m);
-    const owner = seen.get(sig);
-    // Same id: not a duplicate, it is the same record arriving again and may
-    // carry a settled status or resolved media.
-    if (owner != null && owner !== m.sid) continue;
-    seen.set(sig, m.sid);
+    // Same id is not a duplicate: it is the same record arriving again, and
+    // may carry a settled status or resolved media.
+    const twin = seen
+      .get(contentKey(m))
+      ?.find((e) => e.sid !== m.sid && Math.abs(e.at - m.sentAt) <= DEDUPE_SLACK_MS);
+    if (twin) continue;
+    note(m);
     out.push(m);
   }
+  return out;
+}
+
+/**
+ * Collapse messages already stored twice, and say so.
+ *
+ * The filter above only guards what arrives, so it cannot undo a history
+ * that was doubled before it could tell. Returns null when there was nothing
+ * to do, so an untouched store is never rewritten or re-persisted.
+ */
+export function collapseStoredDuplicates(
+  messages: Record<string, SmsMessage>
+): Record<string, SmsMessage> | null {
+  const groups = new Map<string, SmsMessage[]>();
+  for (const m of Object.values(messages)) {
+    const key = contentKey(m);
+    const group = groups.get(key);
+    if (group) group.push(m);
+    else groups.set(key, [m]);
+  }
+  const drop = new Set<string>();
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    // Oldest first, so a run of near-identical stamps clusters around the
+    // first of them rather than around whichever happened to be enumerated
+    // first — which would depend on insertion order and not survive a reload.
+    const kept: SmsMessage[] = [];
+    for (const m of [...group].sort((a, b) => a.sentAt - b.sentAt)) {
+      const twinAt = kept.findIndex((k) => Math.abs(k.sentAt - m.sentAt) <= DEDUPE_SLACK_MS);
+      if (twinAt < 0) {
+        kept.push(m);
+        continue;
+      }
+      const twin = kept[twinAt];
+      if (preferred(twin, m) === m) {
+        drop.add(twin.sid);
+        kept[twinAt] = m;
+      } else {
+        drop.add(m.sid);
+      }
+    }
+  }
+  if (drop.size === 0) return null;
+  const out: Record<string, SmsMessage> = {};
+  for (const [sid, m] of Object.entries(messages)) if (!drop.has(sid)) out[sid] = m;
   return out;
 }
 
@@ -370,7 +452,14 @@ export const useMessages = create<MessagesState>()(
       },
 
       resyncAll: async () => {
-        set({ highWaterMark: null, hasMoreOlder: {} });
+        set((s) => ({
+          highWaterMark: null,
+          hasMoreOlder: {},
+          // Re-reading everything is also the moment to clear up anything
+          // already stored twice, since a re-sync is what a person reaches
+          // for when a conversation looks wrong.
+          messages: collapseStoredDuplicates(s.messages) ?? s.messages,
+        }));
         // The relay pages on its own cursor rather than the high-water mark,
         // so clearing one without the other left a "re-sync everything" that
         // still skipped everything the relay had already handed over.
@@ -965,7 +1054,15 @@ export const useMessages = create<MessagesState>()(
     {
       name: 'dayflow-messages',
       version: PERSIST_VERSION,
-      migrate: migrateStore,
+      // One pass over a history that was doubled before the app could tell
+      // one copy from another: the same text arrived under a Telerivet id, a
+      // relay id, and the id this app minted when it sent it, and each was
+      // stored as its own message. Runs once, on the version bump.
+      migrate: (persisted, fromVersion) => {
+        const state = migrateStore<MessagesState>(persisted, fromVersion);
+        const collapsed = state?.messages ? collapseStoredDuplicates(state.messages) : null;
+        return collapsed ? { ...state, messages: collapsed } : state;
+      },
       storage: createJSONStorage(() => AsyncStorage),
       // Never persist transient flags.
       partialize: (s) => ({
