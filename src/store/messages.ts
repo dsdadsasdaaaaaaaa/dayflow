@@ -29,6 +29,7 @@ import {
   type ProviderId,
 } from '../lib/messaging';
 import { loadSmsCredentials, normalizePhone } from '../lib/smsCredentials';
+import { resetRelayCursor } from '../lib/smsgate';
 import { uploadPhotoAsset } from '../lib/twilioAssets';
 import { PERSIST_VERSION, migrateStore } from './persistVersion';
 import { useSettings } from './settings';
@@ -370,6 +371,10 @@ export const useMessages = create<MessagesState>()(
 
       resyncAll: async () => {
         set({ highWaterMark: null, hasMoreOlder: {} });
+        // The relay pages on its own cursor rather than the high-water mark,
+        // so clearing one without the other left a "re-sync everything" that
+        // still skipped everything the relay had already handed over.
+        resetRelayCursor();
         await get().sync();
       },
 

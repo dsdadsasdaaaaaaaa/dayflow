@@ -66,6 +66,52 @@ interface RelayMessage {
   /** 'out' for the user's own messages; absent means received. */
   dir?: string;
   at?: number;
+  /** When the relay learned of it. Ordering for paging; never displayed. */
+  storedAt?: number;
+}
+
+/**
+ * How far back a fresh session asks the relay for arrivals.
+ *
+ * Only used once per launch, to seed the cursor below. SMSGate gives up
+ * retrying a webhook long before this, so a day is a wide margin around the
+ * worst delivery delay a sleeping phone can produce.
+ */
+const RELAY_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+
+/** Ceiling on a full pull's backwards walk. 500 a page, so 3000 messages. */
+const MAX_BACKFILL_PAGES = 6;
+
+/**
+ * Newest arrival this session has already read out of the relay.
+ *
+ * Paging the relay by SEND time loses messages, and the loss is permanent.
+ * The store advances its high-water mark to the newest text it has seen, so
+ * a phone that was offline and delivers an hour-old message puts that
+ * message behind the mark the moment it lands — it is never asked for again,
+ * and it sits in the relay unread forever. Arrival time only moves forward,
+ * so a cursor on it cannot be overtaken.
+ *
+ * Deliberately not persisted: a cold start pays one wide pull (above) and
+ * the app deduplicates, which is cheaper than being wrong across an upgrade.
+ */
+let relayCursorMs = 0;
+
+/**
+ * Whether the deployed relay pages by arrival at all.
+ *
+ * A relay from before that change filters `since` against SEND time, so
+ * asking it for arrivals would quietly drop exactly the late messages this
+ * cursor exists to catch. It gives itself away by omitting `storedAt`, and
+ * until one is seen every read is a full pull — more traffic, but correct
+ * against either version, so upgrading the Worker is an improvement rather
+ * than a prerequisite.
+ */
+let relayPagesByArrival = false;
+
+/** Forget the cursor, so the next read pulls everything the relay holds. */
+export function resetRelayCursor(): void {
+  relayCursorMs = 0;
 }
 
 /**
@@ -196,30 +242,75 @@ export async function listSmsGate(
   opts: SmsGateListOptions = {}
 ): Promise<SmsMessage[]> {
   if (!creds.inboxUrl || !creds.inboxSecret) return [];
-  const since = opts.sentAfterMs != null ? `&since=${Math.floor(opts.sentAfterMs)}` : '';
-  // With no time floor this is a full pull, so ask for everything the relay
-  // holds rather than the caller's display-sized page. Asking for 100 of 201
-  // silently returned the newest hundred and looked like a partial import.
-  const want = opts.sentAfterMs != null ? Math.min(Math.max(pageSize, 1), 500) : 500;
-  const res = await withTimeout(
-    `${inbox(creds)}/messages?limit=${want}${since}`,
-    { headers: { Authorization: `Bearer ${creds.inboxSecret}` } },
-    READ_TIMEOUT_MS,
-    'reading the relay'
-  );
-  const text = await res.text();
-  if (!res.ok) {
-    throw new SmsSendError(
-      res.status === 403
-        ? 'The inbox relay rejected the secret. Check it matches the Worker.'
-        : `Inbox relay error (${res.status}).`
+  // The caller's `sentAfterMs` is a floor on SEND time, which is the wrong
+  // question to ask the relay — see relayCursorMs. Page by arrival instead,
+  // and let a full pull (no floor at all) stay a full pull.
+  const incremental = opts.sentAfterMs != null && relayPagesByArrival;
+  const floor = incremental
+    ? relayCursorMs > 0
+      ? relayCursorMs
+      : Date.now() - RELAY_LOOKBACK_MS
+    : 0;
+  const since = incremental ? `&since=${Math.floor(floor)}` : '';
+  // Always ask for everything that fits. Asking for 100 of 201 silently
+  // returned one page and looked like a partial import.
+  const want = 500;
+
+  const readPage = async (before: number | null): Promise<RelayMessage[]> => {
+    const cursor = before == null ? '' : `&before=${Math.floor(before)}`;
+    const res = await withTimeout(
+      `${inbox(creds)}/messages?limit=${want}${since}${cursor}`,
+      { headers: { Authorization: `Bearer ${creds.inboxSecret}` } },
+      READ_TIMEOUT_MS,
+      'reading the relay'
     );
+    const text = await res.text();
+    if (!res.ok) {
+      throw new SmsSendError(
+        res.status === 403
+          ? 'The inbox relay rejected the secret. Check it matches the Worker.'
+          : `Inbox relay error (${res.status}).`
+      );
+    }
+    try {
+      return ((JSON.parse(text) as { messages?: RelayMessage[] }).messages ?? []) as RelayMessage[];
+    } catch {
+      return [];
+    }
+  };
+
+  const rows = await readPage(null);
+  // A full pull keeps walking backwards. Imported history can run to several
+  // thousand messages, and stopping at the first page is what made a
+  // finished import look like it had only half arrived. Incremental reads
+  // never need this: one page always covers everything since the cursor.
+  if (!incremental) {
+    let oldest = rows.reduce<number | null>((min, r) => {
+      const a = typeof r.storedAt === 'number' ? r.storedAt : null;
+      return a == null ? min : min == null || a < min ? a : min;
+    }, null);
+    // Bounded: the relay itself is bounded, and a relay that ignores
+    // `before` would otherwise hand back the same page for ever.
+    for (let page = 0; page < MAX_BACKFILL_PAGES && oldest != null; page++) {
+      const older = await readPage(oldest);
+      const fresh = older.filter((r) => typeof r.storedAt === 'number' && r.storedAt < oldest!);
+      if (fresh.length === 0) break;
+      rows.push(...fresh);
+      oldest = fresh.reduce((min, r) => Math.min(min, r.storedAt as number), oldest);
+    }
   }
-  let rows: RelayMessage[] = [];
-  try {
-    rows = ((JSON.parse(text) as { messages?: RelayMessage[] }).messages ?? []) as RelayMessage[];
-  } catch {
-    rows = [];
+
+  // Advance only after a successful parse, so a failed read re-asks for the
+  // same window instead of stepping over it — and only on a read that keeps
+  // everything it fetched. A thread-scoped read discards every other
+  // conversation before returning, so moving the cursor there would step
+  // past messages nothing ever stored.
+  if (rows.some((r) => typeof r.storedAt === 'number')) relayPagesByArrival = true;
+  if (!opts.counterparty) {
+    for (const r of rows) {
+      if (typeof r.storedAt !== 'number') continue;
+      if (r.storedAt > relayCursorMs) relayCursorMs = r.storedAt;
+    }
   }
 
   const mine = normalizePhone(creds.fromNumber);

@@ -13,8 +13,17 @@
  * Deploy notes are in worker/README.md.
  */
 
-/** Most recent messages kept. Older ones fall off; the app has its own copy. */
-const KEEP = 500;
+/**
+ * Most recent messages kept. Older ones fall off; the app has its own copy.
+ *
+ * Sized for a history import rather than for live traffic. Live polling only
+ * needs the buffer to outlast the longest stretch the app is closed, which a
+ * few hundred already covered. But a one-time backfill of everything the
+ * phone remembers arrives all at once, and at a few hundred the front of it
+ * pushed the back of it off the end before the app ever asked. The whole
+ * inbox is one KV value, well inside the 25 MB a value may hold.
+ */
+const KEEP = 3000;
 
 /** One KV key holding the whole inbox as JSON. */
 const INBOX_KEY = 'inbox';
@@ -53,12 +62,16 @@ function normalize(payload) {
   const from = p.phoneNumber ?? p.sender ?? p.from ?? p.source ?? '';
   const at = p.receivedAt ?? p.receivedat ?? p.timestamp ?? p.createdAt ?? null;
   const parsed = at ? Date.parse(at) : NaN;
+  // Keyed on the SMS's OWN id, not the webhook envelope's. SMSGate retries a
+  // delivery it did not see acknowledged, and each retry carries a fresh
+  // envelope id — so keying on that stored the same text again every time.
+  // Duplicates are not only noise: each one consumes a slot against KEEP, so
+  // a retry storm silently pushed real older messages off the end.
+  const smsId = p.messageId ?? p.id ?? null;
   return {
-    id:
-      payload?.id ??
-      p.messageId ??
-      p.id ??
-      `w-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id: smsId
+      ? `sms:${smsId}`
+      : (payload?.id ?? `w-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
     from: String(from),
     text: String(text),
     // Which way it went. Webhooks only ever carry received messages, so
@@ -126,11 +139,16 @@ export default {
       // and avoiding it entirely would mean a Durable Object and a paid plan.
       const inbox = await readInbox(env);
       const seen = new Set(inbox.map((m) => m.id));
+      // When the message ARRIVED here, which is not when it was sent. A phone
+      // that was offline delivers hours-old texts the moment it reconnects,
+      // and the reader pages by this rather than by send time so a late
+      // arrival is still new to whoever is polling. Stamped once, at write.
+      const storedAt = Date.now();
       let added = 0;
       for (const message of incoming) {
         if (seen.has(message.id)) continue;
         seen.add(message.id);
-        inbox.push(message);
+        inbox.push({ ...message, storedAt });
         added++;
       }
       if (added > 0) {
@@ -150,16 +168,61 @@ export default {
       const since = Number(url.searchParams.get('since') ?? '0');
       const limit = Math.min(Number(url.searchParams.get('limit') ?? '200'), KEEP);
       const inbox = await readInbox(env);
+      // `since` is a floor on ARRIVAL, never on send time. Filtering by send
+      // time loses any message this relay learned about late: the reader
+      // advances its cursor to the newest text it has seen, and a webhook
+      // retried an hour later carries an older send time, so it lands behind
+      // the cursor and is never asked for again. Arrival only ever moves
+      // forward, so nothing can be stored behind the reader's back.
+      const arrival = (m) => (typeof m.storedAt === 'number' ? m.storedAt : m.at);
+      // `before` walks backwards through arrivals, so a reader can page the
+      // whole relay instead of seeing only its newest page. An import of
+      // several thousand messages is otherwise invisible past the first one.
+      const beforeParam = url.searchParams.get('before');
+      const before = beforeParam == null ? null : Number(beforeParam);
       const messages = inbox
-        .filter((m) => (Number.isFinite(since) ? m.at >= since : true))
-        .sort((a, b) => b.at - a.at)
-        .slice(0, limit);
+        .filter((m) => (Number.isFinite(since) ? arrival(m) >= since : true))
+        .filter((m) => (before != null && Number.isFinite(before) ? arrival(m) < before : true))
+        // Newest arrival first, so a `limit` smaller than the backlog keeps
+        // the part the reader has not seen rather than the part it has.
+        .sort((a, b) => arrival(b) - arrival(a))
+        .slice(0, limit)
+        .map((m) => ({ ...m, storedAt: arrival(m) }));
       return json({ messages });
     }
 
     if (request.method === 'GET' && url.pathname === '/health') {
       const inbox = await readInbox(env);
       return json({ ok: true, stored: inbox.length });
+    }
+
+    // --- one-off repair -----------------------------------------------------
+    // Records written before ids were keyed on the SMS's own message id are
+    // still duplicated under envelope ids, and they hold no arrival stamp.
+    // This re-keys them the way a fresh write would, so the duplicates
+    // collapse and every record can be paged by arrival. Idempotent.
+    if (request.method === 'POST' && url.pathname === '/compact') {
+      const auth = request.headers.get('authorization') ?? '';
+      if (!secretMatches(auth.replace(/^Bearer\s+/i, ''), secret)) {
+        return json({ error: 'forbidden' }, 403);
+      }
+      const inbox = await readInbox(env);
+      const byId = new Map();
+      for (const m of inbox) {
+        const smsId = m?.raw?.messageId ?? m?.raw?.id ?? null;
+        const id = smsId ? `sms:${smsId}` : m.id;
+        // Keep whichever copy already carries an arrival stamp; failing that,
+        // the first seen. Never invent an arrival later than the send time,
+        // or the repair would hide old messages from a reader mid-page.
+        const kept = byId.get(id);
+        const storedAt = typeof m.storedAt === 'number' ? m.storedAt : m.at;
+        if (!kept || (kept.storedAt == null && storedAt != null)) {
+          byId.set(id, { ...m, id, storedAt });
+        }
+      }
+      const compacted = [...byId.values()].sort((a, b) => a.at - b.at).slice(-KEEP);
+      await env.INBOX.put(INBOX_KEY, JSON.stringify(compacted));
+      return json({ ok: true, before: inbox.length, after: compacted.length });
     }
 
     return json({ error: 'not found' }, 404);

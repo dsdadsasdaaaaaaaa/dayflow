@@ -61,3 +61,32 @@ control rather than a third party's.
   message stays at "sent" rather than settling to "delivered".
 - **Last 500 messages.** Older ones fall off the relay; DayFlow keeps its own
   copy, so this only bounds how far a fresh install can backfill.
+
+## Bringing over history from before SMSGate
+
+SMSGate only remembers what it has handled, so its inbox starts the day it was
+installed, and it never sees a message sent from the phone's own Messages app.
+Everything older lives in Android's SMS database and has to come from a backup:
+
+1. Install **SMS Backup & Restore** (SyncTech) on the phone with the SIM.
+2. Back up **messages only**, to local storage.
+3. Copy the `sms-*.xml` file to this computer.
+4. `./import-backup.sh ~/Downloads/sms-20260831.xml`
+5. In DayFlow: Settings → Own SIM → **Re-sync all messages**.
+
+Both directions come across, so threads read as conversations rather than as
+one side of one. Re-running it adds nothing, so it is safe to repeat after
+each backup.
+
+## Repairing an older relay
+
+Records written before message ids were keyed on the SMS's own id are stored
+twice, once per webhook retry. Collapse them:
+
+```
+curl -X POST -H "Authorization: Bearer $SHARED_SECRET" \
+  https://YOUR-WORKER.workers.dev/compact
+```
+
+It reports how many records it started and finished with, and is safe to run
+more than once.
