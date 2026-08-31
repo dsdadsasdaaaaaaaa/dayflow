@@ -19,7 +19,7 @@ import {
   loadTelerivetCredentials,
   type TelerivetCredentials,
 } from './telerivetCredentials';
-import { listSmsGate, sendSmsGate } from './smsgate';
+import { listSmsGate, sendSmsGate, wasActuallySent } from './smsgate';
 import {
   loadSmsGateCredentials,
   type SmsGateCredentials,
@@ -172,7 +172,27 @@ export async function sendMessage(
     }
     return sendTelerivet(creds.mms, to, body, mediaUrls);
   }
-  return sendSmsGate(creds.smsgate, to, body);
+  const attemptedAt = Date.now();
+  try {
+    return await sendSmsGate(creds.smsgate, to, body);
+  } catch (e) {
+    // Before calling it failed, ask the gateway whether it actually went. A
+    // slow acknowledgement is indistinguishable from a refusal at this
+    // layer, and reporting a sent message as failed makes the user send it
+    // twice — worse than either outcome on its own.
+    const sent = await wasActuallySent(creds.smsgate, to, body, attemptedAt);
+    if (!sent) throw e;
+    return {
+      sid: `sg-unconfirmed-${attemptedAt}`,
+      counterparty: to,
+      direction: 'out',
+      body,
+      sentAt: attemptedAt,
+      // It left the gateway; only the acknowledgement was lost.
+      status: 'sent',
+      ownNumber: creds.smsgate.fromNumber,
+    };
+  }
 }
 
 export async function listRecent(

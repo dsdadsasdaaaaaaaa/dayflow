@@ -226,6 +226,45 @@ interface MessagesState {
  * Skips hidden SIDs (failed sends living in the retry outbox) so no merge
  * path — sync, loadOlder, or the background alerts task — resurrects them.
  */
+/**
+ * A message's identity independent of who reported it.
+ *
+ * Ids cannot carry this. The same text arrives with one id when it lands live
+ * through a webhook and another when the same message is imported from the
+ * phone's own history, and gateways have been seen delivering one message
+ * twice under two event ids. Deduplicating on id therefore keeps every copy,
+ * which is exactly what showed up as repeated messages after importing.
+ */
+function contentSignature(m: SmsMessage): string {
+  return [m.direction, normalizePhone(m.counterparty), m.sentAt, m.body].join('|');
+}
+
+/**
+ * Drop anything already present under a different id.
+ *
+ * Applied to what a sync RETURNS rather than to what is stored, so it costs
+ * one pass over the fetched page instead of a rewrite of the whole history,
+ * and an id we already know still updates in place as usual.
+ */
+export function dropContentDuplicates(
+  existing: Record<string, SmsMessage>,
+  fetched: SmsMessage[]
+): SmsMessage[] {
+  const seen = new Map<string, string>();
+  for (const m of Object.values(existing)) seen.set(contentSignature(m), m.sid);
+  const out: SmsMessage[] = [];
+  for (const m of fetched) {
+    const sig = contentSignature(m);
+    const owner = seen.get(sig);
+    // Same id: not a duplicate, it is the same record arriving again and may
+    // carry a settled status or resolved media.
+    if (owner != null && owner !== m.sid) continue;
+    seen.set(sig, m.sid);
+    out.push(m);
+  }
+  return out;
+}
+
 export function mergeMessage(messages: Record<string, SmsMessage>, m: SmsMessage): void {
   if (useMessages.getState().hiddenSids[m.sid]) return;
   // Scheduled sends live in the `scheduled` map until they deliver; canceled
@@ -394,7 +433,7 @@ export const useMessages = create<MessagesState>()(
               }
             })
           );
-          const fetched = perRoute.flat();
+          const fetched = dropContentDuplicates(get().messages, perRoute.flat());
           if (routeFailures.length > 0) {
             set({ lastError: routeFailures.join(' · ') });
           }
@@ -629,6 +668,7 @@ export const useMessages = create<MessagesState>()(
               })
             )
           ).flat();
+          const deduped = dropContentDuplicates(get().messages, fetched);
           // "More history?" keys on RAW returned volume, not new-SID count —
           // the day-granular overlap means most records re-fetch the cached
           // day, and counting only fresh sids latched this false while whole
@@ -636,7 +676,7 @@ export const useMessages = create<MessagesState>()(
           const hasMore = fetched.length >= PAGE_SIZE;
           set((s) => {
             const messages = { ...s.messages };
-            for (const m of fetched) mergeMessage(messages, m);
+            for (const m of deduped) mergeMessage(messages, m);
             return {
               messages,
               hasMoreOlder: { ...s.hasMoreOlder, [key]: hasMore },
@@ -763,6 +803,7 @@ export const useMessages = create<MessagesState>()(
               })
             )
           ).flat();
+          const deduped = dropContentDuplicates(get().messages, fetched);
           if (threadFailures.length > 0) {
             set({ lastError: threadFailures.join(' · ') });
           }
@@ -771,7 +812,7 @@ export const useMessages = create<MessagesState>()(
           // and the first version of this gate threw the photo away on every
           // later tick (the "photos never appear in the open thread" bug).
           const cur = get().messages;
-          const changed = fetched.some((m) => {
+          const changed = deduped.some((m) => {
             const prev = cur[m.sid];
             if (!prev) return true;
             if (m.mediaUrls?.length && !prev.mediaUrls?.length) return true;
@@ -781,7 +822,7 @@ export const useMessages = create<MessagesState>()(
           set((s) => {
             if (s.generation !== gen) return s;
             const messages = { ...s.messages };
-            for (const m of fetched) mergeMessage(messages, m);
+            for (const m of deduped) mergeMessage(messages, m);
             // Outbound records also reconcile scheduled sends live — a
             // delivered scheduled message leaves the banner immediately.
             let scheduled = s.scheduled;

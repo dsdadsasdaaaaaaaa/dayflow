@@ -133,6 +133,57 @@ export async function sendSmsGate(
   };
 }
 
+/**
+ * Did a message we thought failed actually go out?
+ *
+ * A send is queued by the gateway and acknowledged separately, so a slow
+ * acknowledgement — or the timeout that bounds it — can look identical to a
+ * refusal while the message is already on its way. Reporting that as failed
+ * is the worst outcome available: the user sees an error, resends, and the
+ * client gets it twice. The gateway's own sent log settles it.
+ */
+export async function wasActuallySent(
+  creds: SmsGateCredentials,
+  to: string,
+  body: string,
+  sinceMs: number
+): Promise<boolean> {
+  const target = normalizePhone(to);
+  try {
+    const res = await withTimeout(
+      `${base(creds)}/messages?limit=50`,
+      { headers: { Authorization: authHeader(creds) } },
+      READ_TIMEOUT_MS,
+      'checking the sent log'
+    );
+    if (!res.ok) return false;
+    const parsed = JSON.parse(await res.text()) as unknown;
+    const rows = (Array.isArray(parsed) ? parsed : ((parsed as { data?: unknown[] })?.data ?? [])) as Record<
+      string,
+      unknown
+    >[];
+    return rows.some((r) => {
+      const text =
+        ((r.textMessage as { text?: string } | undefined)?.text ?? (r.message as string) ?? '').trim();
+      if (text !== body.trim()) return false;
+      const recips = (r.recipients ?? r.phoneNumbers ?? []) as unknown[];
+      const first = recips[0];
+      const num =
+        typeof first === 'string' ? first : ((first as { phoneNumber?: string })?.phoneNumber ?? '');
+      if (normalizePhone(num) !== target) return false;
+      // Only count something queued around the attempt, so an identical
+      // message sent last week cannot mask a genuine failure now.
+      const states = r.states as Record<string, string> | undefined;
+      const stamps = states ? Object.values(states).filter((v) => typeof v === 'string') : [];
+      if (stamps.length === 0) return true;
+      const at = Date.parse(stamps.sort()[0]);
+      return !Number.isFinite(at) || at >= sinceMs - 60_000;
+    });
+  } catch {
+    return false;
+  }
+}
+
 export interface SmsGateListOptions {
   sentAfterMs?: number;
   counterparty?: string;
