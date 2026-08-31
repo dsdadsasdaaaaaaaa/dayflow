@@ -44,7 +44,12 @@ const MAX_TURNS = 40;
 /** Turns sent as context — enough for follow-ups, small enough to stay cheap. */
 const CONTEXT_TURNS = 20;
 /** Proposals shown under one answer. A wall of cards is not a suggestion. */
-const MAX_ACTIONS = 4;
+/**
+ * Draft and booking cards kept from one answer. Larger than it was: asking
+ * to line up several follow-ups is a normal request, and silently keeping
+ * four of eight made the assistant look like it had ignored the rest.
+ */
+const MAX_ACTIONS = 10;
 
 interface SecretaryState {
   /** Local transcript with REAL names, oldest first. */

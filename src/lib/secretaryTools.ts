@@ -29,7 +29,7 @@ import { instancesForDay, useTasks } from '../store/tasks';
 import { buildTelegramThreads, useTelegram } from '../store/telegramAccount';
 import type { DayKey } from '../types';
 import { computeFreeSlotsWithCalendar, formatSlotRange } from './availability';
-import { addDays, daysBetween, lastNDays, toDayKey, todayKey } from './dates';
+import { addDays, daysBetween, fromDayKey, lastNDays, toDayKey, todayKey } from './dates';
 import {
   bookedClientKeys,
   needsFollowUp,
@@ -186,7 +186,7 @@ const READ_TOOLS: ToolSpec[] = [
   {
     name: 'get_client_detail',
     description:
-      'Everything the app knows about ONE client, by label: meetings completed, their own median gap between meetings, when they were last seen, their usual rate, lifetime earnings, what they still owe, no-shows, their next booking, their status, and whether they are currently waiting on a reply. Status is \"client\", \"lead\", or \"blocked\"; a blocked person was cut off deliberately, so never draft to them or suggest booking them. Use it before drafting a message so what you write actually fits them.',
+      'Everything the app knows about ONE client, by label: meetings completed, their own median gap between meetings, when they were last seen, their usual rate, lifetime earnings, what they still owe, no-shows, their next booking, their status, whether they are currently waiting on a reply, and a "patterns" block describing how this person actually behaves: the weekday they usually book, their usual start time and length, the kind of meeting they choose, whether their rate is rising or falling, whether they are booking closer together or drifting apart, and what share of their bookings they actually keep. Any of those is null when their history is too thin to support it, and null means unknown, never zero or "no preference". Status is \"client\", \"lead\", or \"blocked\"; a blocked person was cut off deliberately, so never draft to them or suggest booking them. Use it before drafting a message so what you write actually fits them.',
     parameters: {
       type: 'object',
       properties: {
@@ -887,6 +887,130 @@ interface ClientDetail {
   nextBooking: DayKey | null;
   /** Set when they sent the last message and are owed a reply. */
   unanswered: { channel: FollowUpChannel; hoursWaiting: number } | null;
+  /**
+   * How this particular client actually behaves, rather than what the book
+   * says about them. Counts and totals describe a client; these describe the
+   * person, which is what a suggestion has to fit — proposing Tuesday
+   * mornings to someone who has only ever come on Friday evenings is
+   * technically informed and practically useless.
+   */
+  patterns: ClientPatterns | null;
+}
+
+interface ClientPatterns {
+  /** Weekday they book most often, when there is a clear favourite. */
+  usualDay: string | null;
+  /** Their typical start, as minutes from midnight. */
+  usualStartMinutes: number | null;
+  usualDurationMinutes: number | null;
+  /** in-call, out-call or public — whichever they choose most. */
+  usualKind: string | null;
+  /** How the agreed amount has moved: 'rising', 'falling' or 'steady'. */
+  rateTrend: 'rising' | 'falling' | 'steady' | null;
+  /** Whether they are booking closer together or drifting apart. */
+  cadenceTrend: 'quickening' | 'steady' | 'slowing' | null;
+  /** Completed against booked, as a percentage. */
+  showRate: number | null;
+}
+
+
+/** How far back a client's habits are read from. */
+const PATTERN_WINDOW_DAYS = 365;
+
+/** Most common value, when one is clearly ahead of the rest. */
+function modeOf<T>(values: T[]): T | null {
+  if (values.length === 0) return null;
+  const counts = new Map<T, number>();
+  for (const v of values) counts.set(v, (counts.get(v) ?? 0) + 1);
+  let best: T | null = null;
+  let bestN = 0;
+  let tied = false;
+  for (const [v, n] of counts) {
+    if (n > bestN) {
+      best = v;
+      bestN = n;
+      tied = false;
+    } else if (n === bestN) {
+      tied = true;
+    }
+  }
+  // A tie is not a habit; reporting one as a preference invents a pattern.
+  return tied && counts.size > 1 ? null : best;
+}
+
+/** Direction of travel between the older half and the recent half. */
+function trendOf(values: number[], tolerance = 0.12): 'rising' | 'falling' | 'steady' | null {
+  if (values.length < 4) return null;
+  const half = Math.floor(values.length / 2);
+  const older = values.slice(0, half);
+  const recent = values.slice(half);
+  const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+  const a = mean(older);
+  const b = mean(recent);
+  if (a === 0) return null;
+  const change = (b - a) / a;
+  if (change > tolerance) return 'rising';
+  if (change < -tolerance) return 'falling';
+  return 'steady';
+}
+
+/**
+ * What this client actually does, from their own completed meetings.
+ *
+ * Everything here is derived rather than remembered: there is nothing to
+ * keep up to date and nothing to go stale. Each field returns null rather
+ * than a guess when the history is too thin to support it — a "usual day"
+ * drawn from two meetings is noise wearing the costume of insight.
+ */
+function patternsFor(client: string): ClientPatterns | null {
+  const tasks = useTasks.getState().tasks;
+  // A year is enough to see a habit without letting one ancient booking
+  // define a client who has since changed how they book.
+  const all = meetingOccurrences(tasks, lastNDays(PATTERN_WINDOW_DAYS))
+    .filter((o) => o.client === client)
+    .sort((a, b) => a.dateKey.localeCompare(b.dateKey));
+  const done = all.filter((o) => o.completed);
+  if (done.length < 3) return null;
+
+  const days = done
+    .map((o) => fromDayKey(o.dateKey).toLocaleDateString('en-US', { weekday: 'long' }))
+    .filter(Boolean);
+  const starts = done
+    .map((o) => o.task.startMinutes)
+    .filter((m): m is number => typeof m === 'number');
+  const durations = done
+    .map((o) => o.task.durationMinutes)
+    .filter((m): m is number => typeof m === 'number' && m > 0);
+  const rates = done.map((o) => o.rate).filter((r) => r > 0);
+
+  // Gaps between consecutive meetings, oldest first, so the trend reads in
+  // the direction time runs.
+  const gaps: number[] = [];
+  for (let i = 1; i < done.length; i++) {
+    gaps.push(daysBetween(done[i - 1].dateKey, done[i].dateKey));
+  }
+  const gapTrend = trendOf(gaps, 0.2);
+
+  const booked = all.filter((o) => o.dateKey <= todayKey()).length;
+
+  return {
+    usualDay: modeOf(days),
+    usualStartMinutes: starts.length >= 3 ? Math.round(median(starts)) : null,
+    usualDurationMinutes: durations.length >= 3 ? Math.round(median(durations)) : null,
+    usualKind: modeOf(done.map((o) => String(o.kind))),
+    rateTrend: trendOf(rates),
+    // A widening gap means they are cooling off, which is the opposite sense
+    // to the number rising, so this is deliberately inverted.
+    cadenceTrend:
+      gapTrend == null
+        ? null
+        : gapTrend === 'rising'
+          ? 'slowing'
+          : gapTrend === 'falling'
+            ? 'quickening'
+            : 'steady',
+    showRate: booked > 0 ? Math.round((done.length / booked) * 100) : null,
+  };
 }
 
 /**
@@ -930,6 +1054,7 @@ function toolGetClientDetail(
     lastNoShowDate: noShow?.last ?? null,
     nextBooking: profile?.nextMeeting ?? null,
     unanswered: unansweredForClient(real),
+    patterns: patternsFor(real),
   };
 }
 
