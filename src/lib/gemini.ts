@@ -151,9 +151,18 @@ async function discoverModels(apiKey: string): Promise<string[]> {
 
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 /** Tool round trips per question before we stop and answer with what we have. */
-const MAX_ROUNDS = 5;
+/**
+ * Tool rounds before the model is made to answer.
+ *
+ * Raised from five because the assistant is now told to read a client's
+ * actual thread before making claims about them, and a question about four
+ * or five people spends a round each. Running out used to surface as "ask a
+ * narrower question", which blamed the user for a budget they could not see.
+ */
+const MAX_ROUNDS = 10;
 /** Per-request network timeout. */
-const TIMEOUT_MS = 45_000;
+/** Per request. Generous because every request now carries an inbox digest. */
+const TIMEOUT_MS = 90_000;
 
 /** One turn of the conversation. `text` is redacted on the wire, real on device. */
 
@@ -367,7 +376,11 @@ export async function askSecretary(
   const toolsUsed: string[] = [];
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
-    const res = await postTurn(apiKey, contents, tools);
+    // Withhold the tools on the final round. The model cannot then ask for
+    // anything else and has to answer from what it has, which is far more
+    // use than an error telling the user their question was too broad.
+    const lastRound = round === MAX_ROUNDS - 1;
+    const res = await postTurn(apiKey, contents, lastRound ? [] : tools);
     if (!res.ok) return { ok: false, error: res.error };
 
     const candidate = res.data.candidates?.[0];

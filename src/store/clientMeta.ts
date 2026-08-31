@@ -236,6 +236,18 @@ export function clientNameForTelegram(
 }
 
 /** Find the client name whose saved phone matches, or null. */
+/**
+ * The last ten digits — the part that identifies a North American line
+ * regardless of how it was written down.
+ *
+ * Returns null for anything too short to identify someone, so short codes and
+ * fragments can never collide into a false match.
+ */
+function lineDigits(phone: string): string | null {
+  const digits = normalizePhone(phone).replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : null;
+}
+
 export function clientNameForPhone(
   meta: Record<string, ClientMeta>,
   phone: string,
@@ -243,12 +255,24 @@ export function clientNameForPhone(
 ): string | null {
   const target = normalizePhone(phone);
   if (!target) return null;
+
+  const nameFor = (key: string, m: ClientMeta) =>
+    // Prefer the original-cased display name when the caller knows it.
+    displayNames.find((n) => clientMetaKey(n) === key) ?? m.displayName ?? key;
+
   for (const [key, m] of Object.entries(meta)) {
-    if (m.phone && normalizePhone(m.phone) === target) {
-      // Prefer the original-cased display name when the caller knows it.
-      const display = displayNames.find((n) => clientMetaKey(n) === key);
-      return display ?? m.displayName ?? key;
-    }
+    if (m.phone && normalizePhone(m.phone) === target) return nameFor(key, m);
+  }
+
+  // Exact match failed. Numbers reach this app from several places — typed by
+  // hand, read off a Twilio record, imported from an Android inbox — and they
+  // do not all arrive in the same shape. Falling back to the last ten digits
+  // links a client whose number is merely written differently, which is why
+  // imported history was showing up as strangers beside their own thread.
+  const target10 = lineDigits(target);
+  if (!target10) return null;
+  for (const [key, m] of Object.entries(meta)) {
+    if (m.phone && lineDigits(m.phone) === target10) return nameFor(key, m);
   }
   return null;
 }

@@ -67,7 +67,7 @@ export const SYSTEM_INSTRUCTION = [
   'When you suggest contacting someone, ALWAYS say why: their usual rhythm is overdue, they have an unanswered message, they owe an outstanding balance, or a gap is about to go unfilled.',
   'Times from tools are minutes from midnight (540 = 9:00 AM); dates are "YYYY-MM-DD". Convert them to friendly times and day names in your answer.',
   'Money is in the user\'s own currency; report amounts exactly as the tools give them.',
-  'When get_conversation is available, USE IT before you recommend contacting anyone, explain why someone went quiet, or draft a message to them. Call it for each person you are about to talk about. Timing tells you that a thread stalled; only the words tell you why, and the why is the entire value of the suggestion.',
+  'The inbox picture already quotes recent conversations — read it first and answer from it wherever it is enough. Reach for get_conversation when you are about to draft a message, or to make a specific claim about someone the picture only summarized. Ask for several people in ONE turn rather than one at a time.',
   'Never characterize what someone wants, agreed to, or objected to unless you have read that thread in this conversation. If you have not read it, say what you actually know: that they have been quiet since a given time.',
   'When you have read a thread, ground the suggestion in it: what they last asked for, the day or time they floated, the price they hesitated over. Summarize in your own words and quote at most a short phrase.',
   'When you draft a message, match how the user actually writes to that person, based on their own past messages.',

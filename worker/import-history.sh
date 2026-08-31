@@ -153,6 +153,81 @@ for r in rows:
 print(f"Sent {sent}, newly stored {added} (the rest were already there).")
 PY
 
+# --- messages the user sent -------------------------------------------------
+# Only ones sent THROUGH the gateway. SMSGate knows what it sent and nothing
+# about what the phone's own Messages app sent, so replies typed directly on
+# the handset cannot be recovered.
+echo
+echo "Reading sent messages…"
+SENT=$(curl -sS --max-time 25 -u "${USER}:${PASS}" "${LOCAL}/messages?limit=500" || echo "")
+TMP_SENT=$(mktemp)
+printf '%s' "$SENT" > "$TMP_SENT"
+trap 'rm -f "$TMP_BODY" "$TMP_SENT"' EXIT
+
+python3 - "$RELAY" "$SECRET" "$FROM" "$TMP_SENT" <<'SENTPY'
+import json, sys, urllib.request
+
+relay, secret, since, path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+try:
+    rows = json.load(open(path))
+except Exception:
+    print("No readable sent log.")
+    sys.exit(0)
+if isinstance(rows, dict):
+    rows = rows.get("data") or rows.get("messages") or []
+if not rows:
+    print("The gateway has no sent messages recorded.")
+    sys.exit(0)
+
+def left_at(states):
+    """Earliest state timestamp — when the message actually went out."""
+    if not isinstance(states, dict):
+        return None
+    times = [v for v in states.values() if isinstance(v, str)]
+    return min(times) if times else None
+
+posted = added = skipped = 0
+for r in rows:
+    text = (r.get("textMessage") or {}).get("text") or r.get("message") or ""
+    recips = r.get("recipients") or r.get("phoneNumbers") or []
+    to = ""
+    if recips:
+        first = recips[0]
+        to = first.get("phoneNumber") if isinstance(first, dict) else str(first)
+    at = left_at(r.get("states")) or r.get("scheduleAt")
+    if not to or not text or not at or at < since:
+        skipped += 1
+        continue
+    payload = {
+        "event": "sms:sent",
+        "id": r.get("id"),
+        "dir": "out",
+        "payload": {
+            "messageId": r.get("id"),
+            "message": text,
+            # For a message WE sent, the counterparty is the recipient.
+            "sender": to,
+            "receivedAt": at,
+            "dir": "out",
+        },
+    }
+    req = urllib.request.Request(
+        f"{relay}/webhook/{secret}",
+        data=json.dumps(payload).encode(),
+        headers={"content-type": "application/json", "user-agent": "dayflow-import/1.0"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.loads(resp.read() or b"{}")
+            posted += 1
+            added += int(body.get("added") or 0)
+    except Exception as e:
+        print(f"  failed for {r.get('id')}: {e}")
+
+print(f"Sent log: {posted} posted, {added} newly stored, {skipped} outside the window.")
+SENTPY
+
 echo
 echo "Relay now holds:"
 curl -sS "${RELAY}/health"

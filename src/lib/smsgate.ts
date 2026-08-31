@@ -16,6 +16,37 @@ import type { SmsGateCredentials } from './smsgateCredentials';
  * then billed once per photo and never polled — see lib/messaging.
  */
 
+/**
+ * Every request here is bounded. Without this a slow or half-connected
+ * gateway left a send spinning with no timeout at all — the request never
+ * failed, so nothing ever surfaced and the composer just sat there.
+ */
+const SEND_TIMEOUT_MS = 20_000;
+const READ_TIMEOUT_MS = 15_000;
+
+/** fetch with an abort, so a hung gateway fails instead of hanging. */
+async function withTimeout(
+  url: string,
+  init: RequestInit,
+  ms: number,
+  what: string
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (e) {
+    const aborted = e instanceof Error && e.name === 'AbortError';
+    throw new SmsSendError(
+      aborted
+        ? `The gateway did not respond within ${Math.round(ms / 1000)}s (${what}). Check the Android phone is awake and online.`
+        : `Could not reach the gateway (${what}).`
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function base(creds: SmsGateCredentials): string {
   return creds.baseUrl.replace(/\/+$/, '');
 }
@@ -32,6 +63,8 @@ interface RelayMessage {
   id?: string;
   from?: string;
   text?: string;
+  /** 'out' for the user's own messages; absent means received. */
+  dir?: string;
   at?: number;
 }
 
@@ -48,14 +81,16 @@ export async function sendSmsGate(
   const target = normalizePhone(to);
   if (!target) throw new SmsSendError('That number does not look valid.');
 
-  const res = await fetch(`${base(creds)}/messages`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', Authorization: authHeader(creds) },
-    body: JSON.stringify({
-      textMessage: { text: body },
-      phoneNumbers: [target],
-    }),
-  });
+  const res = await withTimeout(
+    `${base(creds)}/messages`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: authHeader(creds) },
+      body: JSON.stringify({ textMessage: { text: body }, phoneNumbers: [target] }),
+    },
+    SEND_TIMEOUT_MS,
+    'sending'
+  );
   const text = await res.text();
   if (!res.ok) {
     let detail = '';
@@ -65,8 +100,18 @@ export async function sendSmsGate(
     } catch {
       detail = '';
     }
+    // The gateway's own wording is far more useful than a generic refusal,
+    // and its two common causes have specific fixes worth naming.
+    const hint =
+      res.status === 401
+        ? ' Check the SMSGate username and password in Settings.'
+        : res.status === 400 && /device/i.test(detail)
+          ? ' The Android phone is not reachable — open the app and check it is online.'
+          : res.status === 429
+            ? ' The gateway is rate limiting; wait a moment and retry.'
+            : '';
     throw new SmsSendError(
-      detail ? `${detail} (${res.status})` : `SMSGate rejected the send (${res.status}).`
+      (detail ? `${detail} (${res.status})` : `SMSGate refused the send (${res.status}).`) + hint
     );
   }
   let id = '';
@@ -101,9 +146,11 @@ export async function listSmsGate(
 ): Promise<SmsMessage[]> {
   if (!creds.inboxUrl || !creds.inboxSecret) return [];
   const since = opts.sentAfterMs != null ? `&since=${Math.floor(opts.sentAfterMs)}` : '';
-  const res = await fetch(
+  const res = await withTimeout(
     `${inbox(creds)}/messages?limit=${Math.min(Math.max(pageSize, 1), 500)}${since}`,
-    { headers: { Authorization: `Bearer ${creds.inboxSecret}` } }
+    { headers: { Authorization: `Bearer ${creds.inboxSecret}` } },
+    READ_TIMEOUT_MS,
+    'reading the relay'
   );
   const text = await res.text();
   if (!res.ok) {
@@ -126,13 +173,14 @@ export async function listSmsGate(
     .map((r): SmsMessage | null => {
       const counterparty = normalizePhone(r.from ?? '');
       if (!counterparty || !r.id) return null;
+      const outbound = r.dir === 'out';
       return {
         sid: r.id,
         counterparty,
-        direction: 'in',
+        direction: outbound ? 'out' : 'in',
         body: r.text ?? '',
         sentAt: typeof r.at === 'number' ? r.at : Date.now(),
-        status: 'received',
+        status: outbound ? 'sent' : 'received',
         ownNumber: mine,
       };
     })
@@ -178,7 +226,7 @@ export async function registerSmsGateWebhook(
     Authorization: authHeader(creds),
   };
   try {
-    const existing = await fetch(`${base(creds)}/webhooks`, { headers });
+    const existing = await withTimeout(`${base(creds)}/webhooks`, { headers }, READ_TIMEOUT_MS, 'listing webhooks');
     if (existing.ok) {
       const text = await existing.text();
       let rows: WebhookRecord[] = [];
@@ -192,11 +240,12 @@ export async function registerSmsGateWebhook(
         return { ok: true, created: false };
       }
     }
-    const res = await fetch(`${base(creds)}/webhooks`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ url: target, event: RECEIVED_EVENT }),
-    });
+    const res = await withTimeout(
+      `${base(creds)}/webhooks`,
+      { method: 'POST', headers, body: JSON.stringify({ url: target, event: RECEIVED_EVENT }) },
+      READ_TIMEOUT_MS,
+      'registering the webhook'
+    );
     if (!res.ok) {
       const detail = (await res.text()).slice(0, 160);
       return { ok: false, error: `SMSGate refused the webhook (${res.status}). ${detail}` };
@@ -235,9 +284,12 @@ export async function diagnoseSmsGate(
   // 1. Can we talk to SMSGate at all?
   let devicesOk = false;
   try {
-    const res = await fetch(`${base(creds)}/devices`, {
-      headers: { Authorization: authHeader(creds) },
-    });
+    const res = await withTimeout(
+      `${base(creds)}/devices`,
+      { headers: { Authorization: authHeader(creds) } },
+      READ_TIMEOUT_MS,
+      'checking devices'
+    );
     if (res.ok) {
       const text = await res.text();
       let count = 0;
@@ -268,9 +320,12 @@ export async function diagnoseSmsGate(
   if (devicesOk) {
     const target = webhookUrlFor(creds);
     try {
-      const res = await fetch(`${base(creds)}/webhooks`, {
-        headers: { Authorization: authHeader(creds) },
-      });
+      const res = await withTimeout(
+        `${base(creds)}/webhooks`,
+        { headers: { Authorization: authHeader(creds) } },
+        READ_TIMEOUT_MS,
+        'listing webhooks'
+      );
       if (res.ok) {
         const text = await res.text();
         let rows: WebhookRecord[] = [];
@@ -314,7 +369,7 @@ export async function diagnoseSmsGate(
     fail('No relay address set', 'Without a relay address nothing incoming can reach the app.');
   } else {
     try {
-      const health = await fetch(`${inbox(creds)}/health`);
+      const health = await withTimeout(`${inbox(creds)}/health`, {}, READ_TIMEOUT_MS, 'relay health');
       if (health.ok) {
         const body = (await health.json()) as { stored?: number };
         lines.push(`✓ Relay reachable, holding ${body.stored ?? 0} message(s)`);
@@ -328,9 +383,12 @@ export async function diagnoseSmsGate(
       fail('Could not reach the relay', 'Check the Worker address, including https://');
     }
     try {
-      const res = await fetch(`${inbox(creds)}/messages?limit=1`, {
-        headers: { Authorization: `Bearer ${creds.inboxSecret}` },
-      });
+      const res = await withTimeout(
+        `${inbox(creds)}/messages?limit=1`,
+        { headers: { Authorization: `Bearer ${creds.inboxSecret}` } },
+        READ_TIMEOUT_MS,
+        'reading the relay'
+      );
       if (res.ok) lines.push('✓ Relay secret accepted');
       else if (res.status === 403)
         fail(

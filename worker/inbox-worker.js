@@ -61,6 +61,11 @@ function normalize(payload) {
       `w-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     from: String(from),
     text: String(text),
+    // Which way it went. Webhooks only ever carry received messages, so
+    // inbound is the default; the history importer sets this explicitly so
+    // the user's own replies come across too, and a thread reads as a
+    // conversation rather than one side of one.
+    dir: payload?.dir === 'out' || p.dir === 'out' ? 'out' : 'in',
     at: Number.isFinite(parsed) ? parsed : Date.now(),
     // Kept so a field this normalizer missed can still be recovered later
     // without having to ask the sender to resend anything.

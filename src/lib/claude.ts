@@ -32,8 +32,17 @@ export const CLAUDE_MODELS = ['claude-sonnet-5', 'claude-haiku-4-5-20251001'] as
 
 export const CLAUDE_MODEL = CLAUDE_MODELS[0];
 
-const MAX_ROUNDS = 5;
-const TIMEOUT_MS = 45_000;
+/**
+ * Tool rounds before the model is made to answer.
+ *
+ * Raised from five because the assistant is now told to read a client's
+ * actual thread before making claims about them, and a question about four
+ * or five people spends a round each. Running out used to surface as "ask a
+ * narrower question", which blamed the user for a budget they could not see.
+ */
+const MAX_ROUNDS = 10;
+/** Per request. Generous because every request now carries an inbox digest. */
+const TIMEOUT_MS = 90_000;
 const MAX_TOKENS = 900;
 
 /** A tool call the model asked for, in Anthropic's shape. */
@@ -210,7 +219,11 @@ export async function askSecretary(
   const toolsUsed: string[] = [];
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
-    const res = await postTurn(apiKey, messages, tools);
+    // Withhold the tools on the final round. The model cannot then ask for
+    // anything else and has to answer from what it has, which is far more
+    // use than an error telling the user their question was too broad.
+    const lastRound = round === MAX_ROUNDS - 1;
+    const res = await postTurn(apiKey, messages, lastRound ? [] : tools);
     if (!res.ok) return { ok: false, error: res.error };
 
     const blocks = res.data.content ?? [];
