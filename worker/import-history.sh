@@ -16,10 +16,11 @@
 # Safe to re-run: the relay deduplicates by message id.
 #
 # Usage:
-#   ./import-history.sh <phone-ip> <local-user> <local-pass> [days]
+#   ./import-history.sh 192.168.2.33 sms MyPassword 90
 #
-# The IP and the local username/password are shown in the SMSGate app once
-# Local Server mode is switched on.
+# The IP and the LOCAL username/password are shown in the SMSGate app once
+# Local Server mode is switched on. They are not the cloud credentials.
+# No angle brackets — pass the values themselves.
 
 set -euo pipefail
 
@@ -30,16 +31,42 @@ DAYS="${4:-90}"
 
 RELAY="https://dayflow-inbox.giveawaybot1225.workers.dev"
 SECRET="473b71b56fd1d8224a42965ff4a15c2b515d4973a4fbcba0"
-LOCAL="http://${IP}:8080/api/3rdparty/v1"
+# Strip a port if one was pasted in with the address.
+IP="${IP%%:*}"
 
 FROM=$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=$DAYS)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
 
-echo "Reading inbox from ${IP} (last ${DAYS} days)…"
-BODY=$(curl -sS --max-time 20 -u "${USER}:${PASS}" "${LOCAL}/inbox?limit=500&from=${FROM}") || {
-  echo "Could not reach the phone. Check you are on the same wifi, that Local"
-  echo "Server mode is on in SMSGate, and that the IP is right."
+# The local server's base path is not documented consistently — the OpenAPI
+# spec lists one thing and the app another — so try the plausible ones and
+# keep whichever actually answers, rather than guessing and failing opaquely.
+BASES=(
+  "http://${IP}:8080/api/3rdparty/v1"
+  "http://${IP}:8080/3rdparty/v1"
+  "http://${IP}:8080/api"
+  "http://${IP}:8080/api/v1"
+  "http://${IP}:3000/api"
+)
+
+echo "Looking for the gateway on ${IP}…"
+LOCAL=""
+for B in "${BASES[@]}"; do
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 6 -u "${USER}:${PASS}" "${B}/inbox?limit=1" || true)
+  echo "  ${B} -> ${CODE:-no response}"
+  if [ "$CODE" = "200" ]; then LOCAL="$B"; break; fi
+done
+
+if [ -z "$LOCAL" ]; then
+  echo
+  echo "Could not find the gateway API on ${IP}."
+  echo "Check that you are on the same wifi as the phone, that Local Server"
+  echo "mode is switched on in SMSGate, and that the address and the LOCAL"
+  echo "username/password (they differ from the cloud ones) are right."
   exit 1
-}
+fi
+
+echo "Using ${LOCAL}"
+echo "Reading inbox (last ${DAYS} days)…"
+BODY=$(curl -sS --max-time 20 -u "${USER}:${PASS}" "${LOCAL}/inbox?limit=500&from=${FROM}")
 
 echo "$BODY" | python3 - "$RELAY" "$SECRET" <<'PY'
 import json, sys, urllib.request
