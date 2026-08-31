@@ -48,6 +48,7 @@ const CAPTION_CONNECTED =
 export function SmsGateSection() {
   const theme = useTheme();
   const refreshConfigured = useMessages((s) => s.refreshConfigured);
+  const resyncAll = useMessages((s) => s.resyncAll);
 
   const [connected, setConnected] = useState<SmsGateCredentials | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -58,6 +59,7 @@ export function SmsGateSection() {
   const [fromNumber, setFromNumber] = useState('');
   const [busy, setBusy] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [resyncing, setResyncing] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -191,6 +193,31 @@ export function SmsGateSection() {
     }
   };
 
+  /**
+   * Pull the relay from scratch. Needed after importing history, because a
+   * routine sync only asks for messages newer than the last one it saw and
+   * imported history is by definition older than that.
+   */
+  const runResync = async () => {
+    if (resyncing) return;
+    tapHaptic();
+    setResyncing(true);
+    try {
+      const before = Object.keys(useMessages.getState().messages).length;
+      await resyncAll();
+      const after = Object.keys(useMessages.getState().messages).length;
+      successHaptic();
+      Alert.alert(
+        'Re-synced',
+        after > before
+          ? `${after - before} message${after - before === 1 ? '' : 's'} pulled in that were missing. ${after} in total now.`
+          : `Nothing new — all ${after} messages were already here.`
+      );
+    } finally {
+      setResyncing(false);
+    }
+  };
+
   const disconnect = () => {
     Alert.alert(
       'Disconnect the free SIM line?',
@@ -231,6 +258,18 @@ export function SmsGateSection() {
             sublabel="Sending works, but replies cannot reach the app"
           />
         ) : null}
+        <SettingsRow
+          icon="refresh"
+          tint={taskColor('violet').solid}
+          label="Re-sync all messages"
+          sublabel={
+            resyncing ? 'Pulling everything…' : 'Pull the full history, including imports'
+          }
+          onPress={runResync}
+          right={
+            resyncing ? <ActivityIndicator size="small" color={theme.textTertiary} /> : undefined
+          }
+        />
         <SettingsRow
           icon="pulse"
           tint={taskColor('sky').solid}

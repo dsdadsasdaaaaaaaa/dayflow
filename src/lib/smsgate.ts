@@ -146,8 +146,12 @@ export async function listSmsGate(
 ): Promise<SmsMessage[]> {
   if (!creds.inboxUrl || !creds.inboxSecret) return [];
   const since = opts.sentAfterMs != null ? `&since=${Math.floor(opts.sentAfterMs)}` : '';
+  // With no time floor this is a full pull, so ask for everything the relay
+  // holds rather than the caller's display-sized page. Asking for 100 of 201
+  // silently returned the newest hundred and looked like a partial import.
+  const want = opts.sentAfterMs != null ? Math.min(Math.max(pageSize, 1), 500) : 500;
   const res = await withTimeout(
-    `${inbox(creds)}/messages?limit=${Math.min(Math.max(pageSize, 1), 500)}${since}`,
+    `${inbox(creds)}/messages?limit=${want}${since}`,
     { headers: { Authorization: `Bearer ${creds.inboxSecret}` } },
     READ_TIMEOUT_MS,
     'reading the relay'

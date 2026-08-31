@@ -205,6 +205,15 @@ interface MessagesState {
   clearFollowUp: (counterparty: string) => void;
   /** Record a retired work number so its traffic keeps syncing. */
   addPreviousNumber: (number: string) => void;
+  /**
+   * Forget how far we have read and pull everything again.
+   *
+   * Routine syncs only ask for traffic newer than the high-water mark, which
+   * is right for keeping up and wrong after a backfill: imported history is
+   * OLDER than messages already seen, so it sits behind the mark and never
+   * arrives. This drops the mark for one pass.
+   */
+  resyncAll: () => Promise<void>;
   /** Pin one conversation to a line; persists until changed. */
   setThreadRoute: (counterparty: string, route: ProviderId) => void;
   clearAll: () => void;
@@ -318,6 +327,11 @@ export const useMessages = create<MessagesState>()(
           currentNumber: active[0] ?? null,
           activeNumbers: active,
         });
+      },
+
+      resyncAll: async () => {
+        set({ highWaterMark: null, hasMoreOlder: {} });
+        await get().sync();
       },
 
       setThreadRoute: (counterparty, route) =>
