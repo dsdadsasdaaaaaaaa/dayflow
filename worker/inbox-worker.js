@@ -68,6 +68,27 @@ function normalize(payload) {
   };
 }
 
+/**
+ * Every message in a webhook body.
+ *
+ * A normal delivery carries one message. A history replay (POST
+ * /inbox/refresh with batch delivery) carries up to a hundred, and doing
+ * that one-at-a-time would mean a hundred read-modify-write cycles racing
+ * each other over a single key — most of the backfill would be lost. Both
+ * shapes are read defensively, since only one of them is documented in a way
+ * worth trusting.
+ */
+function messagesIn(payload) {
+  const p = payload?.payload ?? payload ?? {};
+  const candidates =
+    (Array.isArray(p) && p) ||
+    (Array.isArray(p.messages) && p.messages) ||
+    (Array.isArray(payload?.messages) && payload.messages) ||
+    null;
+  if (candidates) return candidates.map((m) => normalize({ ...payload, payload: m, id: undefined }));
+  return [normalize(payload)];
+}
+
 async function readInbox(env) {
   const stored = await env.INBOX.get(INBOX_KEY, 'json');
   return Array.isArray(stored) ? stored : [];
@@ -92,19 +113,27 @@ export default {
       } catch {
         return json({ error: 'body was not JSON' }, 400);
       }
-      const message = normalize(payload);
+      const incoming = messagesIn(payload);
 
-      // Read-modify-write. Two messages arriving in the same instant could
-      // race and lose one; at the rate a person receives texts that is not a
-      // real risk, and avoiding it entirely would mean a Durable Object and a
-      // paid plan for no practical gain.
+      // One read-modify-write for the whole delivery, however many messages
+      // it carried. Two deliveries landing in the same instant can still
+      // race, which at the rate a person receives texts is not a real risk —
+      // and avoiding it entirely would mean a Durable Object and a paid plan.
       const inbox = await readInbox(env);
-      if (!inbox.some((m) => m.id === message.id)) {
+      const seen = new Set(inbox.map((m) => m.id));
+      let added = 0;
+      for (const message of incoming) {
+        if (seen.has(message.id)) continue;
+        seen.add(message.id);
         inbox.push(message);
+        added++;
+      }
+      if (added > 0) {
         inbox.sort((a, b) => a.at - b.at);
+        // Oldest fall off, so a long backfill keeps the most recent KEEP.
         await env.INBOX.put(INBOX_KEY, JSON.stringify(inbox.slice(-KEEP)));
       }
-      return json({ ok: true });
+      return json({ ok: true, received: incoming.length, added });
     }
 
     // --- polling from DayFlow ---------------------------------------------
