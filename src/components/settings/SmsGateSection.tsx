@@ -82,8 +82,8 @@ export function SmsGateSection() {
       baseUrl: defaultSmsGateBase(),
       username: username.trim(),
       password: password.trim(),
-      inboxUrl: inboxUrl.trim().replace(/\/+$/, ''),
-      inboxSecret: inboxSecret.trim(),
+      inboxUrl: inboxUrl.replace(/\s+/g, '').replace(/\/+$/, ''),
+      inboxSecret: inboxSecret.replace(/\s+/g, ''),
       fromNumber: normalizePhone(fromNumber),
     };
     setBusy(true);

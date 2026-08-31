@@ -229,21 +229,43 @@ export async function verifySmsGateCredentials(
   }
 
   if (creds.inboxUrl) {
+    // /health needs no auth, so it separates "wrong address" from "wrong
+    // secret" — two failures that otherwise look identical and send you
+    // checking the wrong field.
+    try {
+      const probe = await fetch(`${inbox(creds)}/health`);
+      if (!probe.ok) {
+        return {
+          ok: false,
+          error: `Reached ${inbox(creds)} but it did not answer as the relay (${probe.status}). Check the Worker address.`,
+        };
+      }
+    } catch {
+      return {
+        ok: false,
+        error: `Could not reach ${inbox(creds)}. Check the Worker address, including https://`,
+      };
+    }
+
     try {
       const res = await fetch(`${inbox(creds)}/messages?limit=1`, {
         headers: { Authorization: `Bearer ${creds.inboxSecret}` },
       });
-      if (!res.ok) {
+      if (res.status === 403) {
+        // The relay is definitely reachable, so this is the secret. Report
+        // the length rather than the value: a truncated or half-pasted
+        // secret is by far the likeliest cause and is invisible in a
+        // password field.
         return {
           ok: false,
-          error:
-            res.status === 403
-              ? 'The Worker rejected the secret. It must match SHARED_SECRET exactly.'
-              : `The inbox relay answered with an error (${res.status}).`,
+          error: `The relay is reachable but rejected the secret. It received ${creds.inboxSecret.length} characters; the one in the Worker is 48. Re-paste it, making sure nothing was cut off.`,
         };
       }
+      if (!res.ok) {
+        return { ok: false, error: `The inbox relay answered with an error (${res.status}).` };
+      }
     } catch {
-      return { ok: false, error: 'Could not reach the inbox relay at that address.' };
+      return { ok: false, error: 'Could not read from the inbox relay.' };
     }
   }
   return { ok: true };
