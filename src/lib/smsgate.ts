@@ -281,7 +281,16 @@ export async function diagnoseSmsGate(
           rows = [];
         }
         const mine = rows.find((w) => w.url === target);
-        if (mine) lines.push('✓ Webhook registered and pointing at your relay');
+        if (mine) {
+          lines.push('✓ Webhook registered and pointing at your relay');
+          // Registration and delivery are separate things. The phone sends
+          // the webhook itself, so it has to sync the list down first, and
+          // until it has, a registered webhook fires nothing. Anything that
+          // arrives in that window is lost — there is no retroactive send.
+          lines.push(
+            '  Check SMSGate → Settings → Webhooks shows it too; the phone sends these, and only after it has synced.'
+          );
+        }
         else if (rows.length > 0)
           fail(
             `${rows.length} webhook(s) registered, none pointing here`,
