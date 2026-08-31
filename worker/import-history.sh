@@ -70,12 +70,25 @@ fi
 
 echo "Using ${LOCAL}"
 echo "Reading inbox (last ${DAYS} days)…"
-BODY=$(curl -sS --max-time 20 -u "${USER}:${PASS}" "${LOCAL}/inbox?limit=500&from=${FROM}")
 
-echo "$BODY" | python3 - "$RELAY" "$SECRET" <<'PY'
+# Deliberately no date filter in the request. Bare /inbox returns data, but
+# adding the documented from/limit parameters made the local server answer
+# with an empty body — so the window is applied below instead, where it
+# cannot be refused. One person's inbox is small enough that this is free.
+RESP=$(curl -sS --max-time 25 -u "${USER}:${PASS}" -w '\n%{http_code}' "${LOCAL}/inbox")
+CODE=$(printf '%s' "$RESP" | tail -1)
+BODY=$(printf '%s' "$RESP" | sed '$d')
+
+if [ "$CODE" != "200" ]; then
+  echo "The phone answered ${CODE} rather than 200."
+  echo "${BODY}" | cut -c1-300
+  exit 1
+fi
+
+echo "$BODY" | python3 - "$RELAY" "$SECRET" "$FROM" <<'PY'
 import json, sys, urllib.request
 
-relay, secret = sys.argv[1], sys.argv[2]
+relay, secret, since = sys.argv[1], sys.argv[2], sys.argv[3]
 raw = sys.stdin.read()
 try:
     rows = json.loads(raw)
@@ -85,10 +98,16 @@ except json.JSONDecodeError:
 if isinstance(rows, dict):
     rows = rows.get("data") or rows.get("messages") or []
 if not rows:
-    print("The phone reported no messages in that range.")
+    print("The phone reported no messages at all.")
     sys.exit(0)
 
-print(f"Found {len(rows)} message(s). Sending to the relay…")
+total = len(rows)
+rows = [r for r in rows if (r.get("createdAt") or "") >= since]
+print(f"Phone holds {total} message(s); {len(rows)} within the window.")
+if not rows:
+    sys.exit(0)
+
+print("Sending to the relay…")
 sent = added = 0
 for r in rows:
     # Rebuild the sms:received envelope the relay already understands, so it
