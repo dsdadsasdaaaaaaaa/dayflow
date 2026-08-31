@@ -39,23 +39,18 @@ control rather than a third party's.
 
    Keep it: DayFlow needs the same value.
 
-4. **Point SMSGate at it.** In the SMSGate app, add a webhook for the
-   `sms:received` event with the URL:
-
-   ```
-   https://<your-worker>.workers.dev/webhook/<SHARED_SECRET>
-   ```
-
-   The secret is in the path because the app only lets you configure a URL,
-   not headers.
-
-5. **Check it.** Visit `https://<your-worker>.workers.dev/health` — it should
+4. **Check it.** Visit `https://<your-worker>.workers.dev/health` — it should
    answer `{"ok":true,"stored":0}`. Text the SIM from another phone, reload,
    and `stored` should become 1.
 
-6. **Connect DayFlow.** Settings → Messaging & calls → Own SIM. You need the
+5. **Connect DayFlow.** Settings → Messaging & calls → Own SIM. You need the
    username and password from the SMSGate app's Home tab, the Worker URL, the
    shared secret, and the SIM's own number.
+
+   DayFlow registers the `sms:received` webhook with SMSGate itself on
+   connect. If that fails it says so and shows the exact URL to add by hand —
+   the secret goes in the path because SMSGate lets you configure a URL but
+   not headers.
 
 ## What it does not do
 

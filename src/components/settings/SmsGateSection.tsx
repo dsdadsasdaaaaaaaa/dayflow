@@ -11,7 +11,11 @@ import {
 } from 'react-native';
 import { successHaptic, tapHaptic, warningHaptic } from '../../lib/haptics';
 import { normalizePhone } from '../../lib/smsCredentials';
-import { verifySmsGateCredentials } from '../../lib/smsgate';
+import {
+  registerSmsGateWebhook,
+  verifySmsGateCredentials,
+  webhookUrlFor,
+} from '../../lib/smsgate';
 import {
   clearSmsGateCredentials,
   defaultSmsGateBase,
@@ -90,6 +94,13 @@ export function SmsGateSection() {
         Alert.alert('Could not connect', res.error);
         return;
       }
+      // Point SMSGate at the relay here rather than leaving it as a manual
+      // last step. Getting this wrong is invisible: sending keeps working
+      // while nothing ever comes back.
+      const hook = creds.inboxUrl
+        ? await registerSmsGateWebhook(creds)
+        : ({ ok: false, error: 'no relay' } as const);
+
       await saveSmsGateCredentials(creds);
       await refreshConfigured();
       setConnected(creds);
@@ -99,12 +110,26 @@ export function SmsGateSection() {
       setInboxSecret('');
       setFromNumber('');
       successHaptic();
-      Alert.alert(
-        'SIM line connected',
-        creds.inboxUrl
-          ? `Texting runs through ${creds.fromNumber} at no cost. Pick which line a conversation uses in the chat itself.`
-          : `Sending works, but without a relay address nothing incoming can reach the app. Add the Worker URL to receive replies.`
-      );
+      if (!creds.inboxUrl) {
+        Alert.alert(
+          'Sending only',
+          'Texts will send from your SIM, but without a relay address nothing incoming can reach the app. Add the Worker URL to receive replies.'
+        );
+      } else if (hook.ok) {
+        Alert.alert(
+          'SIM line connected',
+          `Texting runs through ${creds.fromNumber} at no cost, and incoming messages are wired up${
+            hook.created ? '' : ' (already were)'
+          }. Pick which line a conversation uses in the chat itself.`
+        );
+      } else {
+        // Everything works except receiving, and that is worth saying loudly
+        // along with the exact URL to paste, rather than a vague failure.
+        Alert.alert(
+          'Connected, but incoming needs one step',
+          `Sending works. DayFlow could not register the webhook automatically (${hook.error}).\n\nAdd it in SMSGate manually, event "sms:received", URL:\n\n${webhookUrlFor(creds)}`
+        );
+      }
     } finally {
       setBusy(false);
     }

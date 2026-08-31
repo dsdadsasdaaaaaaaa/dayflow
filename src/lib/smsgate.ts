@@ -140,6 +140,73 @@ export async function listSmsGate(
     .sort((a, b) => b.sentAt - a.sentAt);
 }
 
+interface WebhookRecord {
+  id?: string;
+  url?: string;
+  event?: string;
+}
+
+/** The event that carries an incoming text. */
+const RECEIVED_EVENT = 'sms:received';
+
+/** The URL SMSGate should post to, secret in the path. */
+export function webhookUrlFor(creds: SmsGateCredentials): string {
+  return `${inbox(creds)}/webhook/${encodeURIComponent(creds.inboxSecret)}`;
+}
+
+/**
+ * Point SMSGate at the relay.
+ *
+ * Webhooks are configured through the API rather than in the app, which would
+ * otherwise leave the user hand-crafting a curl command with a secret in it
+ * as the very last setup step — the easiest place to get something wrong and
+ * the hardest to notice, since sending would work perfectly while nothing
+ * ever came back.
+ *
+ * Existing registrations for the same URL are left alone, so reconnecting
+ * does not pile up duplicates and deliver every message several times.
+ */
+export async function registerSmsGateWebhook(
+  creds: SmsGateCredentials
+): Promise<{ ok: true; created: boolean } | { ok: false; error: string }> {
+  if (!creds.inboxUrl || !creds.inboxSecret) {
+    return { ok: false, error: 'No relay address to register.' };
+  }
+  const target = webhookUrlFor(creds);
+  const headers = {
+    'content-type': 'application/json',
+    Authorization: authHeader(creds),
+  };
+  try {
+    const existing = await fetch(`${base(creds)}/webhooks`, { headers });
+    if (existing.ok) {
+      const text = await existing.text();
+      let rows: WebhookRecord[] = [];
+      try {
+        const parsed = JSON.parse(text) as WebhookRecord[] | { data?: WebhookRecord[] };
+        rows = Array.isArray(parsed) ? parsed : (parsed.data ?? []);
+      } catch {
+        rows = [];
+      }
+      if (rows.some((w) => w.url === target && w.event === RECEIVED_EVENT)) {
+        return { ok: true, created: false };
+      }
+    }
+    const res = await fetch(`${base(creds)}/webhooks`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ url: target, event: RECEIVED_EVENT }),
+    });
+    if (!res.ok) {
+      const detail = (await res.text()).slice(0, 160);
+      return { ok: false, error: `SMSGate refused the webhook (${res.status}). ${detail}` };
+    }
+    return { ok: true, created: true };
+  } catch {
+    return { ok: false, error: 'Could not reach SMSGate to register the webhook.' };
+  }
+}
+
 /** Check both halves: the cloud can be reached AND the relay answers. */
 export async function verifySmsGateCredentials(
   creds: SmsGateCredentials
