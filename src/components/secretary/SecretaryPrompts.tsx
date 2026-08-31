@@ -14,16 +14,33 @@ export const SECRETARY_EXAMPLES = [
   'When am I free Thursday?',
 ] as const;
 
+/**
+ * Openers when the assistant was opened FROM a conversation. Scoped to that
+ * person, because arriving from their chat and being asked "who should I
+ * follow up with?" wastes the one thing the screen already knew.
+ */
+export function clientExamples(name: string): string[] {
+  return [
+    `What should I say to ${name}?`,
+    `Why has ${name} gone quiet?`,
+    `When does ${name} usually book?`,
+    `Does ${name} owe me anything?`,
+  ];
+}
+
 interface Props {
   /** Tapping an example asks it straight away. */
   onPick: (prompt: string) => void;
   /** Disabled while a key is missing or a request is already running. */
   disabled?: boolean;
+  /** Set when opened from a conversation: scopes the examples to them. */
+  client?: string;
 }
 
 /** Empty state: one line of what it does, then the examples, tappable. */
-export function SecretaryPrompts({ onPick, disabled = false }: Props) {
+export function SecretaryPrompts({ onPick, disabled = false, client }: Props) {
   const theme = useTheme();
+  const examples = client ? clientExamples(client) : [...SECRETARY_EXAMPLES];
 
   return (
     <View style={styles.wrap}>
@@ -37,7 +54,7 @@ export function SecretaryPrompts({ onPick, disabled = false }: Props) {
       </Text>
 
       <View style={styles.list}>
-        {SECRETARY_EXAMPLES.map((prompt) => (
+        {examples.map((prompt) => (
           <Pressable
             key={prompt}
             onPress={() => {

@@ -789,6 +789,24 @@ export default function ThreadScreen() {
             </Text>
           ) : null}
         </Pressable>
+        <Pressable
+          onPress={() => {
+            tapHaptic();
+            // Carry who this conversation is with, so the assistant opens
+            // already pointed at them instead of asking the user to restate
+            // in a general chat what the screen already knows.
+            router.push({
+              pathname: '/secretary',
+              params: { client: clientName || displayTitle },
+            });
+          }}
+          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityLabel={`Ask the secretary about ${displayTitle}`}
+          style={[styles.calendarBtn, { backgroundColor: theme.surface }]}
+        >
+          <Ionicons name="sparkles-outline" size={18} color={theme.accent} />
+        </Pressable>
         {!isTelegram ? (
           <Pressable
             onPress={() => {

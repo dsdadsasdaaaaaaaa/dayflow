@@ -20,9 +20,6 @@ interface Props {
 
 type Route = { label: string; icon: 'chatbubble-outline' | 'paper-plane-outline' | 'person-outline'; href: string };
 
-/** Enough for "who should I chase this week" without covering the screen. */
-const MAX_CHIPS = 12;
-
 /** Phone-shaped enough to be a counterparty rather than someone's name. */
 function looksLikePhone(value: string): boolean {
   const digits = value.replace(/\D/g, '');
@@ -44,11 +41,11 @@ export function ClientActions({ names }: Props) {
 
   const routes = useMemo<Route[]>(() => {
     const out: Route[] = [];
-    // The answer decides how many people are worth contacting; this should
-    // not quietly drop the rest. Chips wrap, so a long list costs height
-    // rather than usefulness. The cap only exists so a runaway answer cannot
-    // paper over the screen.
-    for (const name of names.slice(0, MAX_CHIPS)) {
+    // No cap. The answer decides how many people are worth contacting, and
+    // truncating that list silently made the assistant look like it had
+    // ignored people it had in fact named. Chips wrap, so a long list costs
+    // height and nothing else.
+    for (const name of names) {
       // A Telegram counterparty is already a thread id.
       if (name.startsWith('tgc:')) {
         out.push({

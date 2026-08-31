@@ -1,4 +1,4 @@
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   FlatList,
@@ -40,6 +40,15 @@ export default function SecretaryScreen() {
   const busy = useSecretary((s) => s.busy);
   const lastError = useSecretary((s) => s.lastError);
   const ask = useSecretary((s) => s.ask);
+
+  /**
+   * Set when opened from a conversation. The screen then offers openers about
+   * that person rather than the general ones, since arriving from their chat
+   * and being asked "who should I follow up with?" throws away the one piece
+   * of context the tap already carried.
+   */
+  const params = useLocalSearchParams<{ client?: string }>();
+  const aboutClient = typeof params.client === 'string' ? params.client.trim() : '';
 
   const [draft, setDraft] = useState('');
   const [dismissedError, setDismissedError] = useState<string | null>(null);
@@ -137,7 +146,11 @@ export default function SecretaryScreen() {
             contentContainerStyle={[styles.list, rows.length === 0 && styles.listEmpty]}
             showsVerticalScrollIndicator={false}
             ListEmptyComponent={
-              <SecretaryPrompts onPick={send} disabled={busy || hasKey !== true} />
+              <SecretaryPrompts
+                onPick={send}
+                disabled={busy || hasKey !== true}
+                client={aboutClient || undefined}
+              />
             }
             renderItem={({ item }) =>
               item.type === 'typing' ? <TypingDots /> : <SecretaryBubble turn={item.turn} />

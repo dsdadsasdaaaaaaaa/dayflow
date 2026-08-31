@@ -205,6 +205,10 @@ export async function listRecent(
     return listRecentSms(creds.twilio, pageSize, skipMediaSids, opts);
   }
   if (creds.provider === 'smsgate') {
+    // Reads go to the relay only. Telerivet is deliberately never polled
+    // while SMSGate serves the SIM: its plan meters received messages, so
+    // polling it would spend a monthly allowance on data already arriving
+    // free through the relay.
     return listSmsGate(
       creds.smsgate,
       pageSize,
