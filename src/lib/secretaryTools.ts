@@ -1362,11 +1362,36 @@ function toolSearchMessages(
   };
 }
 
-/** Bounds for the always-on inbox digest. Every question pays for this. */
-const DIGEST_THREADS = 25;
-const DIGEST_PER_THREAD = 4;
-const DIGEST_DAYS = 21;
-const DIGEST_BODY_CHARS = 160;
+/**
+ * Bounds for the always-on inbox digest.
+ *
+ * Depth follows recency rather than being flat. A conversation from this
+ * morning is worth reading; one from six weeks ago is worth KNOWING ABOUT,
+ * and quoting four of its messages spends the budget that would otherwise
+ * have covered ten other people. Tiering this way roughly triples how many
+ * clients fit in the same space.
+ */
+const DIGEST_TIERS = [
+  { withinDays: 3, messages: 5, label: 'active' },
+  { withinDays: 14, messages: 3, label: 'recent' },
+  { withinDays: 30, messages: 1, label: 'cooling' },
+] as const;
+
+/** Beyond the last tier: named and summarized, but never quoted. */
+const DIGEST_DORMANT_DAYS = 240;
+const DIGEST_MAX_THREADS = 60;
+const DIGEST_BODY_CHARS = 170;
+
+const DAY_MS = 24 * 3_600_000;
+
+/** "3 hours" / "6 days" / "7 weeks" — a length, not a timestamp. */
+function quietFor(ms: number): string {
+  const hours = ms / 3_600_000;
+  if (hours < 24) return `${Math.max(1, Math.round(hours))} hours`;
+  const days = Math.round(hours / 24);
+  if (days < 21) return `${days} days`;
+  return `${Math.round(days / 7)} weeks`;
+}
 
 /**
  * A compact picture of the whole inbox, handed over before the user has
@@ -1377,44 +1402,67 @@ const DIGEST_BODY_CHARS = 160;
  * whatever the first tool returned. This puts a baseline in front of it every
  * time, so it starts from what is actually going on rather than from nothing.
  *
- * Shorter and shallower than scan_conversations on purpose: this rides along
- * with every single question, so it is a summary to reason from and a prompt
- * to go read properly, not a replacement for reading.
+ * Deliberately shallower than scan_conversations: this rides along with every
+ * question, so it is a map to reason from and a prompt to go read properly,
+ * never a replacement for reading.
  */
 export function buildInboxDigest(map: PseudonymMap): string | null {
   if (!useSettings.getState().settings.secretaryReadsMessages) return null;
   const now = Date.now();
-  const floor = now - DIGEST_DAYS * 24 * 3_600_000;
 
-  const lines: string[] = [];
+  const quoted: string[] = [];
+  const dormant: string[] = [];
   let shown = 0;
   let omitted = 0;
 
   for (const t of walkAllThreads(map)) {
-    const recent = t.messages.filter((m) => m.sentAt >= floor);
-    if (recent.length === 0) continue;
-    if (shown >= DIGEST_THREADS) {
+    const last = t.messages[t.messages.length - 1];
+    if (!last) continue;
+    const age = now - last.sentAt;
+    if (age > DIGEST_DORMANT_DAYS * DAY_MS) continue;
+
+    if (shown >= DIGEST_MAX_THREADS) {
       omitted++;
       continue;
     }
     shown++;
-    lines.push(`${t.label} (${t.status}, ${t.channel}):`);
-    for (const m of recent.slice(-DIGEST_PER_THREAD)) {
-      const who = m.direction === 'in' ? t.label : 'you';
-      const hrs = round1((now - m.sentAt) / 3_600_000);
+
+    const tier = DIGEST_TIERS.find((x) => age <= x.withinDays * DAY_MS);
+    const head = `${t.label} (${t.status}, ${t.channel})`;
+
+    if (!tier) {
+      // Dormant: who they are and where it was left, in one line. Enough to
+      // notice they exist and go looking; not enough to spend a budget on.
+      const who = last.direction === 'in' ? 'they' : 'you';
+      dormant.push(`${head}: quiet ${quietFor(age)}, ${who} spoke last`);
+      continue;
+    }
+
+    quoted.push(`${head} — ${tier.label}:`);
+    for (const m of t.messages.slice(-tier.messages)) {
+      const speaker = m.direction === 'in' ? t.label : 'you';
       const text = redactText(m.body.trim(), map).slice(0, DIGEST_BODY_CHARS);
-      if (text) lines.push(`  ${who} (${hrs}h ago): ${text}`);
+      if (text) {
+        quoted.push(`  ${speaker} (${quietFor(now - m.sentAt)} ago): ${text}`);
+      }
     }
   }
-  if (lines.length === 0) return null;
+
+  if (quoted.length === 0 && dormant.length === 0) return null;
+
+  const lines = [...quoted];
+  if (dormant.length > 0) {
+    lines.push('', 'Quiet for over a month, not quoted:');
+    lines.push(...dormant.map((d) => `  ${d}`));
+  }
 
   return [
     'CURRENT INBOX (loaded automatically, not something the user typed).',
-    `The last ${DIGEST_PER_THREAD} messages of each conversation active in the past ${DIGEST_DAYS} days, newest conversations first. Each line names who wrote it: a client label, or "you" for the user.`,
+    `Recent conversations in more detail, older ones in less: up to ${DIGEST_TIERS[0].messages} messages for anything from the last ${DIGEST_TIERS[0].withinDays} days, fewer as they get older, and a single summary line past a month. Each quoted line names who wrote it: a client label, or "you" for the user.`,
     omitted > 0
-      ? `${omitted} further conversations are not shown here — use scan_conversations or search_messages if the answer may involve them.`
-      : 'This covers every recently active conversation.',
-    'Use it as your starting picture. For anything you are about to assert, or before drafting, read the actual thread with get_conversation rather than relying on these excerpts.',
+      ? `${omitted} further conversations did not fit — use scan_conversations or search_messages if the answer may involve them.`
+      : 'This covers every conversation with any activity in the past few months.',
+    'Use it as your starting picture. Before asserting anything, or drafting, read the actual thread with get_conversation — especially for anyone summarized without quotes.',
     '',
     ...lines,
   ].join('\n');
