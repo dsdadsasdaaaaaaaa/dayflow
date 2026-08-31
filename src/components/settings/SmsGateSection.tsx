@@ -91,7 +91,13 @@ export function SmsGateSection() {
     setBusy(true);
     try {
       const res = await verifySmsGateCredentials(creds);
-      if (!res.ok) {
+      // Only an SMSGate failure is fatal: without it nothing can send. A
+      // relay problem is worth saying loudly but must NOT abort, because
+      // aborting also skipped registering the webhook — so a mistyped secret
+      // silently cost the user all incoming messages, which is the opposite
+      // of what that check was for.
+      const relayProblem = !res.ok && /relay|secret|Worker/i.test(res.error);
+      if (!res.ok && !relayProblem) {
         warningHaptic();
         Alert.alert('Could not connect', res.error);
         return;
@@ -112,7 +118,15 @@ export function SmsGateSection() {
       setInboxSecret('');
       setFromNumber('');
       successHaptic();
-      if (!creds.inboxUrl) {
+      if (relayProblem) {
+        warningHaptic();
+        Alert.alert(
+          'Sending works, receiving does not',
+          `${!res.ok ? res.error : ''}\n\nEverything else is saved and the webhook is ${
+            hook.ok ? 'registered' : 'NOT registered'
+          }. Fix the relay details and reconnect, then use Check setup.`
+        );
+      } else if (!creds.inboxUrl) {
         Alert.alert(
           'Sending only',
           'Texts will send from your SIM, but without a relay address nothing incoming can reach the app. Add the Worker URL to receive replies.'
