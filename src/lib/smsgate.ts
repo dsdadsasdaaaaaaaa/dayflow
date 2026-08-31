@@ -207,6 +207,136 @@ export async function registerSmsGateWebhook(
   }
 }
 
+export interface SmsGateDiagnosis {
+  /** Each check, in the order they have to pass. */
+  lines: string[];
+  /** The first thing that is actually wrong, or null when all is well. */
+  problem: string | null;
+}
+
+/**
+ * Walk the whole path and report where it stops.
+ *
+ * Inbound depends on four separate things being right — SMSGate credentials,
+ * a registered webhook, a reachable relay, a matching secret — and every one
+ * of them fails as "no messages". Without this the only way to tell them
+ * apart is to guess and re-check one at a time.
+ */
+export async function diagnoseSmsGate(
+  creds: SmsGateCredentials
+): Promise<SmsGateDiagnosis> {
+  const lines: string[] = [];
+  let problem: string | null = null;
+  const fail = (line: string, why: string) => {
+    lines.push(`✕ ${line}`);
+    if (!problem) problem = why;
+  };
+
+  // 1. Can we talk to SMSGate at all?
+  let devicesOk = false;
+  try {
+    const res = await fetch(`${base(creds)}/devices`, {
+      headers: { Authorization: authHeader(creds) },
+    });
+    if (res.ok) {
+      const text = await res.text();
+      let count = 0;
+      try {
+        const parsed = JSON.parse(text) as unknown[] | { data?: unknown[] };
+        count = (Array.isArray(parsed) ? parsed : (parsed.data ?? [])).length;
+      } catch {
+        count = 0;
+      }
+      devicesOk = true;
+      if (count > 0) lines.push(`✓ SMSGate reachable, ${count} device${count === 1 ? '' : 's'} registered`);
+      else
+        fail(
+          'SMSGate reachable but NO device registered',
+          'The Android app is not registered with SMSGate. Open it and make sure Cloud Server mode is on.'
+        );
+    } else {
+      fail(
+        `SMSGate rejected the login (${res.status})`,
+        'Check the username and password on the SMSGate app Home tab.'
+      );
+    }
+  } catch {
+    fail('Could not reach SMSGate', 'No connection to SMSGate.');
+  }
+
+  // 2. Is our webhook registered? This is the step that silently does nothing.
+  if (devicesOk) {
+    const target = webhookUrlFor(creds);
+    try {
+      const res = await fetch(`${base(creds)}/webhooks`, {
+        headers: { Authorization: authHeader(creds) },
+      });
+      if (res.ok) {
+        const text = await res.text();
+        let rows: WebhookRecord[] = [];
+        try {
+          const parsed = JSON.parse(text) as WebhookRecord[] | { data?: WebhookRecord[] };
+          rows = Array.isArray(parsed) ? parsed : (parsed.data ?? []);
+        } catch {
+          rows = [];
+        }
+        const mine = rows.find((w) => w.url === target);
+        if (mine) lines.push('✓ Webhook registered and pointing at your relay');
+        else if (rows.length > 0)
+          fail(
+            `${rows.length} webhook(s) registered, none pointing here`,
+            'A webhook exists but has the wrong address. Disconnect and reconnect to re-register it.'
+          );
+        else
+          fail(
+            'NO webhook registered',
+            'SMSGate has no webhook, so nothing is ever sent to the relay. Disconnect and reconnect to register it.'
+          );
+      } else {
+        fail(`Could not list webhooks (${res.status})`, 'SMSGate would not report its webhooks.');
+      }
+    } catch {
+      fail('Could not list webhooks', 'SMSGate would not report its webhooks.');
+    }
+  }
+
+  // 3 and 4. The relay, and whether the secret matches.
+  if (!creds.inboxUrl) {
+    fail('No relay address set', 'Without a relay address nothing incoming can reach the app.');
+  } else {
+    try {
+      const health = await fetch(`${inbox(creds)}/health`);
+      if (health.ok) {
+        const body = (await health.json()) as { stored?: number };
+        lines.push(`✓ Relay reachable, holding ${body.stored ?? 0} message(s)`);
+        if ((body.stored ?? 0) === 0) {
+          lines.push('  (never received anything, so the webhook has not fired)');
+        }
+      } else {
+        fail(`Relay answered ${health.status}`, 'The relay address does not look right.');
+      }
+    } catch {
+      fail('Could not reach the relay', 'Check the Worker address, including https://');
+    }
+    try {
+      const res = await fetch(`${inbox(creds)}/messages?limit=1`, {
+        headers: { Authorization: `Bearer ${creds.inboxSecret}` },
+      });
+      if (res.ok) lines.push('✓ Relay secret accepted');
+      else if (res.status === 403)
+        fail(
+          `Relay rejected the secret (sent ${creds.inboxSecret.length} characters)`,
+          'The secret does not match the one in the Worker.'
+        );
+      else fail(`Relay read failed (${res.status})`, 'The relay would not return messages.');
+    } catch {
+      fail('Could not read from the relay', 'The relay would not return messages.');
+    }
+  }
+
+  return { lines, problem };
+}
+
 /** Check both halves: the cloud can be reached AND the relay answers. */
 export async function verifySmsGateCredentials(
   creds: SmsGateCredentials

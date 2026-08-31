@@ -12,6 +12,7 @@ import {
 import { successHaptic, tapHaptic, warningHaptic } from '../../lib/haptics';
 import { normalizePhone } from '../../lib/smsCredentials';
 import {
+  diagnoseSmsGate,
   registerSmsGateWebhook,
   verifySmsGateCredentials,
   webhookUrlFor,
@@ -56,6 +57,7 @@ export function SmsGateSection() {
   const [inboxSecret, setInboxSecret] = useState('');
   const [fromNumber, setFromNumber] = useState('');
   const [busy, setBusy] = useState(false);
+  const [checking, setChecking] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -135,6 +137,46 @@ export function SmsGateSection() {
     }
   };
 
+  /**
+   * Walk the whole inbound path and say where it stops. Four separate things
+   * have to be right and all four fail identically as "no messages", so
+   * without this the only way to find the broken one is to guess.
+   */
+  const runCheck = async () => {
+    if (!connected || checking) return;
+    tapHaptic();
+    setChecking(true);
+    try {
+      const d = await diagnoseSmsGate(connected);
+      const body = d.problem
+        ? `${d.lines.join('\n')}\n\n${d.problem}`
+        : `${d.lines.join('\n')}\n\nEverything is wired up. If messages still are not arriving, the Android app is likely not running: check it is open and that battery optimisation is disabled for it.`;
+      Alert.alert(d.problem ? 'Found the problem' : 'Setup looks right', body, [
+        { text: 'OK' },
+        ...(d.problem
+          ? [
+              {
+                text: 'Re-register webhook',
+                onPress: async () => {
+                  const r = await registerSmsGateWebhook(connected);
+                  Alert.alert(
+                    r.ok ? 'Webhook registered' : 'Could not register',
+                    r.ok
+                      ? r.created
+                        ? 'SMSGate will now send incoming messages to your relay.'
+                        : 'It was already registered.'
+                      : `${r.error}\n\nAdd it by hand in SMSGate, event "sms:received", URL:\n\n${webhookUrlFor(connected)}`
+                  );
+                },
+              },
+            ]
+          : []),
+      ]);
+    } finally {
+      setChecking(false);
+    }
+  };
+
   const disconnect = () => {
     Alert.alert(
       'Disconnect the free SIM line?',
@@ -175,6 +217,16 @@ export function SmsGateSection() {
             sublabel="Sending works, but replies cannot reach the app"
           />
         ) : null}
+        <SettingsRow
+          icon="pulse"
+          tint={taskColor('sky').solid}
+          label="Check setup"
+          sublabel={checking ? 'Checking…' : 'Find why messages are not arriving'}
+          onPress={runCheck}
+          right={
+            checking ? <ActivityIndicator size="small" color={theme.textTertiary} /> : undefined
+          }
+        />
         <SettingsRow
           icon="close-circle"
           tint={taskColor('red').solid}
