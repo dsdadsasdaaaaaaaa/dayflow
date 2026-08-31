@@ -39,12 +39,16 @@ FROM=$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezon
 # The local server's base path is not documented consistently — the OpenAPI
 # spec lists one thing and the app another — so try the plausible ones and
 # keep whichever actually answers, rather than guessing and failing opaquely.
+# The on-device server mounts its endpoints at the ROOT — /inbox, not
+# /3rdparty/v1/inbox as the cloud does. Nothing documents that; it was found
+# by asking the phone (see probe-gateway.sh). The rest are kept as fallbacks
+# in case a future version moves them.
 BASES=(
+  "http://${IP}:8080"
   "http://${IP}:8080/api/3rdparty/v1"
   "http://${IP}:8080/3rdparty/v1"
   "http://${IP}:8080/api"
-  "http://${IP}:8080/api/v1"
-  "http://${IP}:3000/api"
+  "http://${IP}:3000"
 )
 
 echo "Looking for the gateway on ${IP}…"
