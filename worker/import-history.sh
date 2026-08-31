@@ -71,11 +71,11 @@ fi
 echo "Using ${LOCAL}"
 echo "Reading inbox (last ${DAYS} days)…"
 
-# Deliberately no date filter in the request. Bare /inbox returns data, but
-# adding the documented from/limit parameters made the local server answer
-# with an empty body — so the window is applied below instead, where it
-# cannot be refused. One person's inbox is small enough that this is free.
-RESP=$(curl -sS --max-time 25 -u "${USER}:${PASS}" -w '\n%{http_code}' "${LOCAL}/inbox")
+# limit=500 because the default page returns only the newest handful. The
+# date window is still applied locally rather than with a `from` parameter,
+# since one person's inbox is small enough that fetching all of it is free
+# and it removes a parameter that has to behave.
+RESP=$(curl -sS --max-time 25 -u "${USER}:${PASS}" -w '\n%{http_code}' "${LOCAL}/inbox?limit=500")
 CODE=$(printf '%s' "$RESP" | tail -1)
 BODY=$(printf '%s' "$RESP" | sed '$d')
 
@@ -85,11 +85,18 @@ if [ "$CODE" != "200" ]; then
   exit 1
 fi
 
-echo "$BODY" | python3 - "$RELAY" "$SECRET" "$FROM" <<'PY'
+TMP_BODY=$(mktemp)
+printf '%s' "$BODY" > "$TMP_BODY"
+trap 'rm -f "$TMP_BODY"' EXIT
+
+# The body goes in as a FILE, not on stdin: stdin is already carrying this
+# script to python, so anything piped here is silently swallowed and the
+# result looks exactly like the phone returning nothing.
+python3 - "$RELAY" "$SECRET" "$FROM" "$TMP_BODY" <<'PY'
 import json, sys, urllib.request
 
-relay, secret, since = sys.argv[1], sys.argv[2], sys.argv[3]
-raw = sys.stdin.read()
+relay, secret, since, body_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+raw = open(body_path).read()
 try:
     rows = json.loads(raw)
 except json.JSONDecodeError:
