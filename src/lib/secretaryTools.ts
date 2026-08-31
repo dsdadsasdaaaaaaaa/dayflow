@@ -1384,6 +1384,22 @@ const DIGEST_BODY_CHARS = 170;
 
 const DAY_MS = 24 * 3_600_000;
 
+/**
+ * Automated traffic: carrier notices, shortcodes, one-way robotexts.
+ *
+ * A number that is not dialable and that the user has never once replied to
+ * is not a conversation. Importing a phone's history drags in a lot of it,
+ * and every line spent quoting "Welcome to Lucky Mobile" is a line not spent
+ * on a client. Any reply at all disqualifies a thread from this, since
+ * replying is the clearest possible signal that a human is on the far end.
+ */
+function looksAutomated(t: WalkedThread): boolean {
+  const digits = t.counterparty.replace(/\D/g, '');
+  const dialable = t.counterparty.startsWith('+') && digits.length >= 10;
+  if (dialable) return false;
+  return !t.messages.some((m) => m.direction === 'out');
+}
+
 /** "3 hours" / "6 days" / "7 weeks" — a length, not a timestamp. */
 function quietFor(ms: number): string {
   const hours = ms / 3_600_000;
@@ -1391,6 +1407,44 @@ function quietFor(ms: number): string {
   const days = Math.round(hours / 24);
   if (days < 21) return `${days} days`;
   return `${Math.round(days / 7)} weeks`;
+}
+
+/**
+ * Where today stands, in one line.
+ *
+ * Almost every question is really about now — who to fit in, whether there
+ * is room, what is already booked — and answering that used to cost a tool
+ * call before the assistant could even orient itself. It is two lines of
+ * text and it removes a round trip from the common case.
+ */
+function todayLine(map: PseudonymMap): string {
+  const today = todayKey();
+  const tasks = useTasks.getState().tasks;
+  const meetings = instancesForDay(tasks, today)
+    .filter((i) => i.task.meeting?.client)
+    .sort((a, b) => (a.task.startMinutes ?? 0) - (b.task.startMinutes ?? 0));
+
+  const done = meetings.filter((m) => m.completed).length;
+  const nowMinutes = new Date().getHours() * 60 + new Date().getMinutes();
+  const next = meetings.find(
+    (m) => !m.completed && (m.task.startMinutes ?? 0) >= nowMinutes
+  );
+
+  const parts = [`TODAY is ${today}.`];
+  if (meetings.length === 0) {
+    parts.push('Nothing booked today.');
+  } else {
+    parts.push(
+      `${meetings.length} meeting${meetings.length === 1 ? '' : 's'} booked, ${done} done.`
+    );
+    if (next?.task.meeting?.client) {
+      const label = map.toPseudo(next.task.meeting!.client);
+      parts.push(
+        `Next is ${label} at ${next.task.startMinutes ?? 0} minutes past midnight.`
+      );
+    }
+  }
+  return parts.join(' ');
 }
 
 /**
@@ -1415,11 +1469,18 @@ export function buildInboxDigest(map: PseudonymMap): string | null {
   let shown = 0;
   let omitted = 0;
 
+  let filtered = 0;
   for (const t of walkAllThreads(map)) {
     const last = t.messages[t.messages.length - 1];
     if (!last) continue;
     const age = now - last.sentAt;
     if (age > DIGEST_DORMANT_DAYS * DAY_MS) continue;
+    // Blocked people are excluded outright: the assistant must not act on
+    // them, so spending the standing budget on them buys nothing.
+    if (t.status === 'blocked' || looksAutomated(t)) {
+      filtered++;
+      continue;
+    }
 
     if (shown >= DIGEST_MAX_THREADS) {
       omitted++;
@@ -1457,11 +1518,15 @@ export function buildInboxDigest(map: PseudonymMap): string | null {
   }
 
   return [
+    todayLine(map),
     'CURRENT INBOX (loaded automatically, not something the user typed).',
     `Recent conversations in more detail, older ones in less: up to ${DIGEST_TIERS[0].messages} messages for anything from the last ${DIGEST_TIERS[0].withinDays} days, fewer as they get older, and a single summary line past a month. Each quoted line names who wrote it: a client label, or "you" for the user.`,
     omitted > 0
       ? `${omitted} further conversations did not fit — use scan_conversations or search_messages if the answer may involve them.`
       : 'This covers every conversation with any activity in the past few months.',
+    filtered > 0
+      ? `${filtered} more were left out as blocked contacts or automated senders. They are still reachable through search_messages if a question genuinely needs them.`
+      : '',
     'Use it as your starting picture. Before asserting anything, or drafting, read the actual thread with get_conversation — especially for anyone summarized without quotes.',
     '',
     ...lines,
