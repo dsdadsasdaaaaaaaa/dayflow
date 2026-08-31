@@ -34,7 +34,7 @@ SECRET="473b71b56fd1d8224a42965ff4a15c2b515d4973a4fbcba0"
 [ -f "$FILE" ] || { echo "No such file: $FILE" >&2; exit 1; }
 
 python3 - "$FILE" "$DAYS" "$RELAY" "$SECRET" <<'PY'
-import hashlib, json, sys, time, urllib.error, urllib.request
+import calendar, hashlib, json, sys, time, urllib.error, urllib.request
 import xml.etree.ElementTree as ET
 
 path, days, relay, secret = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
@@ -87,11 +87,76 @@ for _, el in ET.iterparse(path, events=("end",)):
         "dir": direction,
     })
 
-records.sort(key=lambda r: r["messageId"])
 ins = sum(1 for r in records if r["dir"] == "in")
 print(f"Read {len(records)} messages ({ins} received, {len(records) - ins} sent)"
       + (f", skipped {skipped_mms} picture messages" if skipped_mms else ""))
 if not records:
+    sys.exit(0)
+
+
+def read_relay():
+    """Everything the relay already holds, paged oldest-ward.
+
+    The relay ids a webhook by the gateway's own message id, which nothing in
+    a backup can reproduce — so without this every received message would be
+    stored a second time under a backup id. The app collapses those on
+    content and the threads would still read correctly, but the relay keeps
+    only so many records, and spending half of them on second copies is what
+    pushes real messages off the end.
+    """
+    seen, before = [], None
+    while True:
+        q = f"{relay}/messages?limit=500" + (f"&before={before}" if before else "")
+        req = urllib.request.Request(
+            q, headers={"authorization": f"Bearer {secret}", "user-agent": "dayflow-import/1"}
+        )
+        with urllib.request.urlopen(req, timeout=60) as res:
+            page = json.loads(res.read().decode("utf-8")).get("messages", [])
+        stamps = [m["storedAt"] for m in page if isinstance(m.get("storedAt"), (int, float))]
+        fresh = [m for m in page if before is None or (m.get("storedAt") or 0) < before]
+        if not fresh:
+            break
+        seen.extend(fresh)
+        # A relay too old to page backwards ignores `before` and would hand
+        # back the same records for ever. One page is all it can offer.
+        if not stamps:
+            break
+        before = min(stamps)
+    return seen
+
+
+def digits(num):
+    d = "".join(c for c in str(num) if c.isdigit())
+    return d[-10:] if len(d) >= 10 else d
+
+
+held = {}
+try:
+    for m in read_relay():
+        key = (m.get("dir") or "in", digits(m.get("from")), (m.get("text") or "").strip())
+        held.setdefault(key, []).append(m.get("at") or 0)
+except urllib.error.HTTPError as e:
+    print(f"Could not read the relay first ({e.code}); importing without it.")
+
+# Two clocks are involved — Android's and the gateway's — so the same text
+# can carry stamps a few seconds apart. Same words, same person, same
+# direction, within five minutes is the same message.
+SLACK_MS = 5 * 60 * 1000
+kept = []
+for r in records:
+    # timegm, not mktime: the stamp is UTC and mktime would read it as local,
+    # which in summer is off by the DST hour — far enough to miss every match.
+    at = calendar.timegm(time.strptime(r["receivedAt"], "%Y-%m-%dT%H:%M:%SZ")) * 1000
+    key = (r["dir"], digits(r["phoneNumber"]), r["message"].strip())
+    if any(abs(at - t) <= SLACK_MS for t in held.get(key, ())):
+        continue
+    kept.append(r)
+
+if len(kept) != len(records):
+    print(f"{len(records) - len(kept)} already in the relay; {len(kept)} to add")
+records = kept
+if not records:
+    print("Nothing new to send.")
     sys.exit(0)
 
 # Oldest first, so if the relay's cap is reached the newest survive.
