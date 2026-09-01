@@ -321,3 +321,155 @@ export function lastMeetingFor(
   if (!best?.meeting) return null;
   return { rate: best.meeting.rate, kind: best.meeting.kind, location: best.meeting.location };
 }
+
+/** One past meeting with a client, and what it actually settled for. */
+export interface ClientMeetingRecord {
+  task: Task;
+  dateKey: DayKey;
+  /** Start time in minutes from midnight, or null for an all-day booking. */
+  startMinutes: number | null;
+  kind: MeetingKind;
+  location: string;
+  /** Final agreed amount for the day: the rate, plus any settled extras. */
+  amount: number;
+  /** Of that amount, how much has actually been received. */
+  paid: number;
+  /** Still owed. Zero once settled. */
+  owed: number;
+  /** Paid in full — either marked paid, or covered by the deposit. */
+  settled: boolean;
+  /** Money taken up front, whether or not the rest has been collected. */
+  deposit: number;
+  noShow: boolean;
+  /** How long it actually ran, when the live timer recorded it. */
+  loggedMinutes: number | null;
+}
+
+/**
+ * A month of a client's history, with its own totals.
+ *
+ * Grouped here rather than in the screen because the totals are the point:
+ * a list of amounts answers "what did this cost" one meeting at a time,
+ * where the question people actually ask is what a month came to.
+ */
+export interface ClientMeetingMonth {
+  /** 'YYYY-MM', for keying and ordering. */
+  month: string;
+  /** 'August 2026'. */
+  label: string;
+  records: ClientMeetingRecord[];
+  amount: number;
+  paid: number;
+  owed: number;
+}
+
+/**
+ * How far back history is walked, in years.
+ *
+ * A recurring meeting with no end date is expanded day by day, so the cost
+ * of looking back is the elapsed time rather than the number of bookings.
+ * This is a guard against a task anchored to an absurd date, not a real
+ * limit — nobody has a client further back than this.
+ */
+const HISTORY_YEARS = 5;
+
+/**
+ * Every past meeting with one client, newest first.
+ *
+ * Deliberately not windowed the way the summary tiles are. "What has this
+ * client had, and what did they pay" is a question about the whole
+ * relationship, and answering it for the last ninety days only is how a
+ * regular of two years looks like someone who showed up in June.
+ */
+export function clientMeetingHistory(
+  tasks: Record<string, Task>,
+  log: MeetingLogEntry[],
+  client: string
+): ClientMeetingRecord[] {
+  const key = client.trim().toLowerCase();
+  if (!key) return [];
+  const today = todayKey();
+  const floor = addDays(today, -HISTORY_YEARS * 365);
+
+  // Actual durations come from the live timer, which only some meetings
+  // ever ran; a booking without one still belongs in the list.
+  const ran = new Map<string, number>();
+  for (const e of log) ran.set(`${e.taskId}|${e.dateKey}`, e.actualMinutes);
+
+  const out: ClientMeetingRecord[] = [];
+  for (const task of Object.values(tasks)) {
+    const meeting = task.meeting;
+    if (!meeting || meeting.client.trim().toLowerCase() !== key) continue;
+
+    // An unscheduled meeting has never happened, so it has no history.
+    if (!task.date) continue;
+    const start: DayKey = task.date < floor ? floor : task.date;
+    for (let day: DayKey = start; day <= today; day = addDays(day, 1)) {
+      if (!taskOccursOn(task, day)) {
+        if (!task.recurrence) break;
+        continue;
+      }
+      const noShow = meeting.noShows?.includes(day) ?? false;
+      // A no-show never completes and never earns, but it is part of the
+      // history: dropping it would quietly flatter the client's record.
+      if (!noShow && !isInstanceCompleted(task, day)) {
+        if (!task.recurrence) break;
+        continue;
+      }
+      const amount = noShow ? 0 : occurrenceAmount(task, day);
+      const deposit = Math.min(amount, occurrenceDeposit(task, day));
+      const paid = isPaidOn(task, day) ? amount : deposit;
+      out.push({
+        task,
+        dateKey: day,
+        startMinutes: task.allDay ? null : (task.startMinutes ?? null),
+        kind: meeting.kind,
+        location: meeting.location,
+        amount,
+        paid,
+        owed: Math.max(0, amount - paid),
+        settled: amount > 0 && paid >= amount,
+        deposit,
+        noShow,
+        loggedMinutes: ran.get(`${task.id}|${day}`) ?? null,
+      });
+      if (!task.recurrence) break;
+    }
+  }
+
+  return out.sort((a, b) =>
+    a.dateKey < b.dateKey ? 1 : a.dateKey > b.dateKey ? -1 : 0
+  );
+}
+
+/** Group history into months, newest first, each with its own totals. */
+export function groupHistoryByMonth(records: ClientMeetingRecord[]): ClientMeetingMonth[] {
+  const byMonth = new Map<string, ClientMeetingMonth>();
+  for (const r of records) {
+    const month = r.dateKey.slice(0, 7);
+    let group = byMonth.get(month);
+    if (!group) {
+      // Parsed as local noon: a bare 'YYYY-MM-DD' is read as UTC, which in
+      // any western timezone lands on the previous day and labels January
+      // as December.
+      const [y, m] = month.split('-').map(Number);
+      group = {
+        month,
+        label: new Date(y, m - 1, 15, 12).toLocaleDateString('en-US', {
+          month: 'long',
+          year: 'numeric',
+        }),
+        records: [],
+        amount: 0,
+        paid: 0,
+        owed: 0,
+      };
+      byMonth.set(month, group);
+    }
+    group.records.push(r);
+    group.amount += r.amount;
+    group.paid += r.paid;
+    group.owed += r.owed;
+  }
+  return [...byMonth.values()].sort((a, b) => (a.month < b.month ? 1 : -1));
+}

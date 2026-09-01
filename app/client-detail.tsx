@@ -38,12 +38,13 @@ import {
   formatDayShort,
   formatDuration,
   formatMinutes,
-  lastNDays,
 } from '../src/lib/dates';
 import { successHaptic, tapHaptic, warningHaptic } from '../src/lib/haptics';
 import {
+  clientMeetingHistory,
   clientProfiles,
   formatMoney,
+  groupHistoryByMonth,
   meetingKindMeta,
   meetingOccurrences,
 } from '../src/lib/meetings';
@@ -112,22 +113,17 @@ export default function ClientDetailScreen() {
     : '';
 
   /**
-   * Recent past occurrences for this client, newest first, capped at 20:
-   * completed ones plus days marked as a no-show (which stay uncompleted —
-   * the flag is what keeps them visible here).
+   * Every past meeting with this client, newest first — completed ones plus
+   * days marked as a no-show, which stay uncompleted on purpose so the flag
+   * keeps them visible here.
    */
-  const history = useMemo(() => {
-    if (!profile) return [];
-    const key = profile.name.trim().toLowerCase();
-    return meetingOccurrences(tasks, lastNDays(90))
-      .filter(
-        (o) =>
-          o.client.trim().toLowerCase() === key &&
-          (o.completed || (o.task.meeting?.noShows?.includes(o.dateKey) ?? false))
-      )
-      .sort((a, b) => (a.dateKey < b.dateKey ? 1 : a.dateKey > b.dateKey ? -1 : 0))
-      .slice(0, 20);
-  }, [tasks, profile]);
+  const history = useMemo(
+    () => (profile ? clientMeetingHistory(tasks, log, profile.name) : []),
+    [tasks, log, profile]
+  );
+
+  /** The same history in months, each with what that month came to. */
+  const historyMonths = useMemo(() => groupHistoryByMonth(history), [history]);
 
   /** No-show days recorded across this client's meetings (all time). */
   const noShowCount = useMemo(() => {
@@ -587,69 +583,113 @@ export default function ClientDetailScreen() {
         ) : null}
 
         {/* History */}
-        {history.length > 0 ? (
+        {historyMonths.length > 0 ? (
           <View>
             <SectionLabel>History</SectionLabel>
-            <GlassCard padding={6}>
-              {history.map((o, i) => {
-                const noShow = o.task.meeting?.noShows?.includes(o.dateKey) ?? false;
-                return (
-                  <Pressable
-                    key={`${o.task.id}-${o.dateKey}`}
-                    onLongPress={() => handleNoShowToggle(o.task.id, o.dateKey, noShow)}
-                    accessibilityRole="button"
-                    accessibilityLabel={`${formatDayShort(o.dateKey)}${
-                      noShow ? ', no-show' : `, ${formatMoney(o.rate, symbol)}`
-                    }`}
-                    accessibilityHint={
-                      noShow ? 'Long press to unmark no-show' : 'Long press to mark as a no-show'
-                    }
-                    style={[
-                      styles.historyRow,
-                      i > 0 && {
-                        borderTopWidth: StyleSheet.hairlineWidth,
-                        borderTopColor: theme.separator,
-                      },
-                      noShow && styles.historyRowDimmed,
-                    ]}
-                  >
-                    <View style={{ flex: 1 }}>
-                      <Text style={[styles.historyDate, { color: theme.text }]}>
-                        {formatDayShort(o.dateKey)}
-                      </Text>
-                      <Text style={[styles.historyTime, { color: theme.textTertiary }]}>
-                        {o.task.allDay || o.task.startMinutes == null
-                          ? 'All day'
-                          : formatMinutes(o.task.startMinutes)}
-                      </Text>
-                    </View>
-                    {noShow ? (
-                      <View
-                        style={[
-                          styles.noShowTag,
-                          { backgroundColor: theme.dark ? amber.bgDark : amber.bgLight },
+            {historyMonths.map((month) => (
+              <View key={month.month} style={styles.historyMonth}>
+                <View style={styles.historyMonthHead}>
+                  <Text style={[styles.historyMonthLabel, { color: theme.textSecondary }]}>
+                    {month.label}
+                  </Text>
+                  <Text style={[styles.historyMonthTotal, { color: theme.textSecondary }]}>
+                    {formatMoney(month.amount, symbol)}
+                    {month.owed > 0 ? ` · ${formatMoney(month.owed, symbol)} owed` : ''}
+                  </Text>
+                </View>
+                <GlassCard padding={6}>
+                  {month.records.map((r, i) => {
+                    // What the money actually did, in the fewest words that
+                    // stay true: a part payment has to name both halves, or
+                    // "paid" and "unpaid" are the only two states a person
+                    // can see and a deposit looks like neither.
+                    const paidLabel =
+                      r.noShow
+                        ? null
+                        : r.settled
+                          ? 'Paid'
+                          : r.paid > 0
+                            ? `${formatMoney(r.paid, symbol)} of ${formatMoney(r.amount, symbol)}`
+                            : 'Unpaid';
+                    const kindLabel = meetingKindMeta(r.kind).label;
+                    const when =
+                      r.startMinutes == null ? 'All day' : formatMinutes(r.startMinutes);
+                    const ran =
+                      r.loggedMinutes != null ? ` · ${formatDuration(r.loggedMinutes)}` : '';
+                    return (
+                      <Pressable
+                        key={`${r.task.id}-${r.dateKey}`}
+                        onPress={() => {
+                          tapHaptic();
+                          router.push({
+                            pathname: '/task-editor',
+                            params: { id: r.task.id, day: r.dateKey },
+                          });
+                        }}
+                        onLongPress={() => handleNoShowToggle(r.task.id, r.dateKey, r.noShow)}
+                        accessibilityRole="button"
+                        accessibilityLabel={`${formatDayShort(r.dateKey)}, ${
+                          r.noShow ? 'no-show' : `${formatMoney(r.amount, symbol)}, ${paidLabel}`
+                        }`}
+                        accessibilityHint={
+                          r.noShow
+                            ? 'Opens the meeting. Long press to unmark no-show'
+                            : 'Opens the meeting. Long press to mark as a no-show'
+                        }
+                        style={({ pressed }) => [
+                          styles.historyRow,
+                          i > 0 && {
+                            borderTopWidth: StyleSheet.hairlineWidth,
+                            borderTopColor: theme.separator,
+                          },
+                          r.noShow && styles.historyRowDimmed,
+                          pressed && { opacity: 0.6 },
                         ]}
                       >
-                        <Text style={[styles.noShowTagLabel, { color: amberFg }]}>
-                          No-show
-                        </Text>
-                      </View>
-                    ) : (
-                      <>
-                        <Text style={[styles.historyAmount, { color: money }]}>
-                          {formatMoney(o.rate, symbol)}
-                        </Text>
-                        <Ionicons
-                          name={o.paid ? 'checkmark-circle' : 'ellipse-outline'}
-                          size={18}
-                          color={o.paid ? theme.success : theme.textTertiary}
-                        />
-                      </>
-                    )}
-                  </Pressable>
-                );
-              })}
-            </GlassCard>
+                        <View style={{ flex: 1 }}>
+                          <Text style={[styles.historyDate, { color: theme.text }]}>
+                            {formatDayShort(r.dateKey)}
+                          </Text>
+                          <Text
+                            style={[styles.historyTime, { color: theme.textTertiary }]}
+                            numberOfLines={1}
+                          >
+                            {`${when}${ran} · ${kindLabel}`}
+                            {r.location ? ` · ${r.location}` : ''}
+                          </Text>
+                        </View>
+                        {r.noShow ? (
+                          <View
+                            style={[
+                              styles.noShowTag,
+                              { backgroundColor: theme.dark ? amber.bgDark : amber.bgLight },
+                            ]}
+                          >
+                            <Text style={[styles.noShowTagLabel, { color: amberFg }]}>
+                              No-show
+                            </Text>
+                          </View>
+                        ) : (
+                          <View style={styles.historyMoney}>
+                            <Text style={[styles.historyAmount, { color: money }]}>
+                              {formatMoney(r.amount, symbol)}
+                            </Text>
+                            <Text
+                              style={[
+                                styles.historyPaid,
+                                { color: r.settled ? theme.success : amberFg },
+                              ]}
+                            >
+                              {paidLabel}
+                            </Text>
+                          </View>
+                        )}
+                      </Pressable>
+                    );
+                  })}
+                </GlassCard>
+              </View>
+            ))}
           </View>
         ) : null}
       </ScrollView>
@@ -847,6 +887,34 @@ const styles = StyleSheet.create({
   },
   historyTime: {
     fontSize: 12,
+    marginTop: 1,
+  },
+  historyMonth: {
+    marginBottom: SPACING.md,
+  },
+  historyMonthHead: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    paddingHorizontal: SPACING.xs,
+    paddingBottom: 6,
+    gap: SPACING.sm,
+  },
+  historyMonthLabel: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  historyMonthTotal: {
+    fontSize: 12,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
+  historyMoney: {
+    alignItems: 'flex-end',
+  },
+  historyPaid: {
+    fontSize: 11,
+    fontWeight: '600',
     marginTop: 1,
   },
   historyAmount: {
