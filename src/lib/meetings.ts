@@ -155,6 +155,13 @@ export interface ClientProfile {
   outstanding: number;
   /** Actual minutes from live-session logs (all time). */
   loggedMinutes: number;
+  /**
+   * Time spent with this client, all time — measured where the live timer
+   * ran, and the booked length everywhere else. Most meetings are never
+   * timed, so counting only the measured ones reported a regular of two
+   * years as zero hours.
+   */
+  minutes: number;
   /** Most recent completed occurrence day. */
   lastSeen: DayKey | null;
   /** Next uncompleted occurrence — today counts (a booking later today is
@@ -193,6 +200,7 @@ export function clientProfiles(
         collected: 0,
         outstanding: 0,
         loggedMinutes: 0,
+        minutes: 0,
         lastSeen: null,
         nextMeeting: null,
         unpaid: [],
@@ -221,6 +229,7 @@ export function clientProfiles(
         const amount = occurrenceAmount(task, day);
         p.meetingsDone += 1;
         p.earned += amount;
+        p.minutes += task.durationMinutes;
         if (isPaidOn(task, day)) {
           p.collected += amount;
         } else {
@@ -244,9 +253,18 @@ export function clientProfiles(
     }
   }
 
+  // Where a meeting was actually timed, the measurement replaces the booked
+  // length rather than adding to it.
+  const counted = new Set<string>();
   for (const e of log) {
     const p = byKey.get(e.client.trim().toLowerCase());
-    if (p) p.loggedMinutes += e.actualMinutes;
+    if (!p) continue;
+    p.loggedMinutes += e.actualMinutes;
+    const occurrence = `${e.taskId}|${e.dateKey}`;
+    if (counted.has(occurrence)) continue;
+    counted.add(occurrence);
+    const booked = tasks[e.taskId]?.durationMinutes ?? 0;
+    p.minutes += e.actualMinutes - booked;
   }
 
   return [...byKey.values()]
@@ -343,6 +361,10 @@ export interface ClientMeetingRecord {
   noShow: boolean;
   /** How long it actually ran, when the live timer recorded it. */
   loggedMinutes: number | null;
+  /** How long it was booked for. */
+  plannedMinutes: number;
+  /** How long it took: what was measured, or failing that what was booked. */
+  minutes: number;
 }
 
 /**
@@ -361,6 +383,8 @@ export interface ClientMeetingMonth {
   amount: number;
   paid: number;
   owed: number;
+  /** Time spent with them this month, on the same measured-or-booked basis. */
+  minutes: number;
 }
 
 /**
@@ -416,6 +440,7 @@ export function clientMeetingHistory(
         if (!task.recurrence) break;
         continue;
       }
+      const logged = ran.get(`${task.id}|${day}`) ?? null;
       const amount = noShow ? 0 : occurrenceAmount(task, day);
       const deposit = Math.min(amount, occurrenceDeposit(task, day));
       const paid = isPaidOn(task, day) ? amount : deposit;
@@ -431,7 +456,10 @@ export function clientMeetingHistory(
         settled: amount > 0 && paid >= amount,
         deposit,
         noShow,
-        loggedMinutes: ran.get(`${task.id}|${day}`) ?? null,
+        loggedMinutes: logged,
+        plannedMinutes: task.durationMinutes,
+        // A no-show took none of the day, whatever it was booked for.
+        minutes: noShow ? 0 : (logged ?? task.durationMinutes),
       });
       if (!task.recurrence) break;
     }
@@ -463,6 +491,7 @@ export function groupHistoryByMonth(records: ClientMeetingRecord[]): ClientMeeti
         amount: 0,
         paid: 0,
         owed: 0,
+        minutes: 0,
       };
       byMonth.set(month, group);
     }
@@ -470,6 +499,7 @@ export function groupHistoryByMonth(records: ClientMeetingRecord[]): ClientMeeti
     group.amount += r.amount;
     group.paid += r.paid;
     group.owed += r.owed;
+    group.minutes += r.minutes;
   }
   return [...byMonth.values()].sort((a, b) => (a.month < b.month ? 1 : -1));
 }

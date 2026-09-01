@@ -386,7 +386,7 @@ export default function ClientDetailScreen() {
               tint={profile.outstanding > 0 ? amberFg : undefined}
               delay={100}
             />
-            <StatTile label="Hours" value={formatDuration(profile.loggedMinutes)} delay={130} />
+            <StatTile label="Hours" value={formatDuration(profile.minutes)} delay={130} />
             {noShowCount > 0 ? (
               <StatTile
                 label="No-shows"
@@ -593,6 +593,7 @@ export default function ClientDetailScreen() {
                     {month.label}
                   </Text>
                   <Text style={[styles.historyMonthTotal, { color: theme.textSecondary }]}>
+                    {month.minutes > 0 ? `${formatDuration(month.minutes)} · ` : ''}
                     {formatMoney(month.amount, symbol)}
                     {month.owed > 0 ? ` · ${formatMoney(month.owed, symbol)} owed` : ''}
                   </Text>
@@ -614,8 +615,17 @@ export default function ClientDetailScreen() {
                     const kindLabel = meetingKindMeta(r.kind).label;
                     const when =
                       r.startMinutes == null ? 'All day' : formatMinutes(r.startMinutes);
-                    const ran =
-                      r.loggedMinutes != null ? ` · ${formatDuration(r.loggedMinutes)}` : '';
+                    // Every meeting states a length. Where the live timer ran
+                    // and the meeting did not match its booking, both are
+                    // worth seeing: the gap between them is overtime, and
+                    // overtime is the part that gets billed and forgotten.
+                    const overran =
+                      r.loggedMinutes != null && r.loggedMinutes !== r.plannedMinutes;
+                    const ran = r.noShow
+                      ? ''
+                      : ` · ${formatDuration(r.minutes)}${
+                          overran ? ` (booked ${formatDuration(r.plannedMinutes)})` : ''
+                        }`;
                     return (
                       <Pressable
                         key={`${r.task.id}-${r.dateKey}`}
