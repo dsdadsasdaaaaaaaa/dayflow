@@ -27,6 +27,7 @@ import {
   weeklyOn,
   type ParsedClass,
 } from '../src/lib/timetableImport';
+import { applyStoredRules } from '../src/lib/schoolDay';
 import { useTasks } from '../src/store/tasks';
 import { SPACING, useTheme } from '../src/theme';
 
@@ -140,6 +141,11 @@ export default function TimetableImportScreen() {
         tags: [SCHOOL_TAG],
       });
     }
+    // Classes that have just arrived know nothing about closures the
+    // newsletter announced before them, so every remembered amendment is
+    // re-applied. Without this, importing in the other order puts a full day
+    // of school back on the day the school is shut.
+    void applyStoredRules();
     successHaptic();
     setAdded(chosen.length);
     setClasses(null);

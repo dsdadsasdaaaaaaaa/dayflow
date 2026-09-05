@@ -23,6 +23,7 @@ import { parseScheduleEmail, type ParsedEvent } from '../src/lib/scheduleImport'
 import { lastScheduleStatus, type ScheduleStatus } from '../src/lib/scheduleAuto';
 import { fetchRelaySchedule, type RelaySchedule } from '../src/lib/smsgate';
 import { loadSmsGateCredentials } from '../src/lib/smsgateCredentials';
+import { applySchoolDayRules, deriveDayRules, rememberDayRules } from '../src/lib/schoolDay';
 import { SCHOOL_TAG } from '../src/lib/timetableImport';
 import { useSettings } from '../src/store/settings';
 import { useTasks } from '../src/store/tasks';
@@ -57,6 +58,7 @@ export default function ScheduleImportScreen() {
   const [dropped, setDropped] = useState(0);
   const [skipped, setSkipped] = useState<Record<string, boolean>>({});
   const [added, setAdded] = useState<number | null>(null);
+  const [amended, setAmended] = useState(0);
   const [waiting, setWaiting] = useState<RelaySchedule | null>(null);
   const [status, setStatus] = useState<ScheduleStatus | null>(null);
 
@@ -155,8 +157,14 @@ export default function ScheduleImportScreen() {
         tags: [SCHOOL_TAG],
       });
     }
+    // Same amendment the automatic path makes: a closure or an early bell
+    // has to clear the classes that are not happening.
+    const rules = deriveDayRules(chosen);
+    void rememberDayRules(rules);
+    const amended = applySchoolDayRules(rules);
     successHaptic();
     setAdded(chosen.length);
+    setAmended(amended.skipped);
     setEvents(null);
     setEmail('');
   }
@@ -310,7 +318,12 @@ export default function ScheduleImportScreen() {
 
               {added != null ? (
                 <Text style={[styles.done, { color: theme.success }]}>
-                  {added === 1 ? 'Added 1 item to your calendar.' : `Added ${added} items to your calendar.`}
+                  {(added === 1
+                    ? 'Added 1 item to your calendar.'
+                    : `Added ${added} items to your calendar.`) +
+                    (amended > 0
+                      ? ` ${amended} class${amended === 1 ? '' : 'es'} cleared for closures and early finishes.`
+                      : '')}
                 </Text>
               ) : null}
             </>

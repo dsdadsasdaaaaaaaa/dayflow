@@ -5,6 +5,7 @@ import { fetchRelaySchedule } from './smsgate';
 import { loadSmsGateCredentials } from './smsgateCredentials';
 import { useSettings } from '../store/settings';
 import { useTasks } from '../store/tasks';
+import { applySchoolDayRules, deriveDayRules, rememberDayRules } from './schoolDay';
 import { SCHOOL_TAG } from './timetableImport';
 
 /**
@@ -155,23 +156,40 @@ export async function autoImportSchedule(): Promise<number> {
   }
 
   const added = addScheduleEvents(parsed.events);
+
+  // The newsletter is an amendment to the timetable, not a second list
+  // beside it: a closure or an early bell has to remove the classes that are
+  // not happening, or the calendar shows a full day of school on Labour Day.
+  const rules = deriveDayRules(parsed.events);
+  await rememberDayRules(rules);
+  const amended = applySchoolDayRules(rules);
+
   await markHandled(waiting.storedAt);
+  const amendment =
+    amended.skipped + amended.shortened > 0
+      ? ` Cleared ${amended.skipped} class${amended.skipped === 1 ? '' : 'es'} that are not happening` +
+        (amended.shortened > 0 ? ` and cut ${amended.shortened} short` : '') +
+        `, across ${amended.days} day${amended.days === 1 ? '' : 's'}.`
+      : '';
   if (added === 0) {
     await note(
-      `Read ${parsed.events.length} item${parsed.events.length === 1 ? '' : 's'}; all of them were already on your calendar.`,
+      `Read ${parsed.events.length} item${parsed.events.length === 1 ? '' : 's'}; all were already on your calendar.${amendment}`,
       true
     );
     return 0;
   }
-  await note(`Added ${added} item${added === 1 ? '' : 's'} from "${waiting.subject}".`, true);
+  await note(`Added ${added} item${added === 1 ? '' : 's'} from "${waiting.subject}".${amendment}`, true);
 
   await Notifications.scheduleNotificationAsync({
     content: {
       title: 'School schedule added',
       body:
-        added === 1
+        (added === 1
           ? '1 item from the newsletter is on your calendar.'
-          : `${added} items from the newsletter are on your calendar.`,
+          : `${added} items from the newsletter are on your calendar.`) +
+        (amended.skipped > 0
+          ? ` ${amended.skipped} class${amended.skipped === 1 ? '' : 'es'} removed for closures and early finishes.`
+          : ''),
       sound: false,
       data: { scheduleImported: true },
     },
