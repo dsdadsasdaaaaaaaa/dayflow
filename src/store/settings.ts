@@ -10,6 +10,7 @@ export const DEFAULT_SETTINGS: Settings = {
   dayStartHour: 0,
   dayEndHour: 24,
   showCalendarEvents: true,
+  autoImportSchedule: true,
   hiddenCalendarIds: [],
   defaultDurationMinutes: 60,
   defaultAlerts: [0],

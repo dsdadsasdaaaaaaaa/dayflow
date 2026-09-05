@@ -83,13 +83,15 @@ function instruction(today: DayKey, weekday: string, zone: string): string {
     'Rules:',
     '- date comes from the day heading the entry sits under. The heading gives a weekday and',
     '  a month/day; take the year from the email itself, minding a December-to-January roll.',
-    '- title is the entry as the school wrote it, e.g. "Labour Day: School Closed" or',
-    '  "Welcome Back Carnival". Keep their words: a person recognises those. Only drop a time',
-    '  that trails in brackets, e.g. "Curriculum Night (7:30 PM)" becomes "Curriculum Night".',
-    '- startMinutes is minutes from midnight (540 = 9:00 AM) when the entry names a time,',
-    '  including one written into its own name: "2:25 PM Dismissal" is 865, "Noon Dismissal"',
-    '  is 720, "10:30 AM Start" is 630. Use null when the entry names no time at all, which',
-    '  is normal for things like "School Closed" or "No Assessment Day".',
+    '- title is the entry EXACTLY as the school wrote it, e.g. "Labour Day: School Closed",',
+    '  "2:25 PM Dismissal", "Curriculum Night (7:30 PM)". Keep their words and keep any time',
+    '  written into them. A person recognises the school\'s own wording, and the written time',
+    '  is checked against yours afterwards.',
+    '- startMinutes is minutes from midnight when the entry names a time. Add 12 hours for',
+    '  every PM time except noon itself: 7:30 PM is 19:30 = 1170, NOT 1050. "2:25 PM',
+    '  Dismissal" is 865, "3:08 PM Dismissal" is 908, "10:30 AM Start" is 630, "Noon',
+    '  Dismissal" is 720, "12:30 AM" is 30. Use null when the entry names no time at all,',
+    '  which is normal for "School Closed" or "No Assessment Day".',
     '- durationMinutes: 30 for a dismissal or a start time, 60 for anything else timed, 60',
     '  when there is no time.',
     '- location is a room or place if the entry names one, otherwise "".',
@@ -125,6 +127,31 @@ function isRealDate(key: string): boolean {
   if (m < 1 || m > 12 || d < 1 || d > 31) return false;
   const probe = new Date(y, m - 1, d, 12);
   return probe.getFullYear() === y && probe.getMonth() === m - 1 && probe.getDate() === d;
+}
+
+/**
+ * The clock time written in an entry's own text, in minutes from midnight.
+ *
+ * The school's words are the ground truth, and reading a 12-hour clock is
+ * the one part of this a model reliably gets wrong — a PM time landing
+ * twelve hours early looks completely plausible in a list and puts an
+ * evening event in the middle of the school day. So where the entry says
+ * the time out loud, that is what gets used, and the model's arithmetic is
+ * only consulted when the entry does not.
+ */
+export function timeInText(text: string): number | null {
+  if (/\bnoon\b/i.test(text) && !/\d/.test(text)) return 12 * 60;
+  const match = /\b(1[0-2]|0?[1-9])(?::([0-5][0-9]))?\s*(a\.?m\.?|p\.?m\.?)/i.exec(text);
+  if (match) {
+    const hour12 = Number(match[1]);
+    const minutes = Number(match[2] ?? '0');
+    const pm = /^p/i.test(match[3]);
+    // 12 AM is midnight and 12 PM is noon; every other PM hour gains twelve.
+    const hour = hour12 === 12 ? (pm ? 12 : 0) : pm ? hour12 + 12 : hour12;
+    return hour * 60 + minutes;
+  }
+  if (/\bnoon\b/i.test(text)) return 12 * 60;
+  return null;
 }
 
 function str(v: unknown, max: number): string {
@@ -168,12 +195,15 @@ export function validateEvents(raw: unknown): { events: ParsedEvent[]; dropped: 
       dropped++;
       continue;
     }
+    // Where the entry states its own time, believe the entry.
+    const written = timeInText(title);
+    const settled = written ?? startMinutes;
     const rawDuration = typeof r.durationMinutes === 'number' ? r.durationMinutes : 60;
     const durationMinutes = Math.min(1440, Math.max(5, Math.round(rawDuration) || 60));
     events.push({
       title,
       date,
-      startMinutes,
+      startMinutes: settled,
       durationMinutes,
       location: str(r.location, 120),
       notes: str(r.notes, 400),

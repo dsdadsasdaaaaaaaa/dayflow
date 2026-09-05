@@ -189,6 +189,15 @@ export interface Settings {
   dayEndHour: number;
   /** Show imported device calendar events on the timeline. */
   showCalendarEvents: boolean;
+  /**
+   * Add a new school schedule to the calendar as it arrives, without asking.
+   *
+   * Off would mean the week sits in the relay until someone opens a screen,
+   * which for a thing whose whole point is not having to remember is close
+   * to useless. On, every item is still checked before it lands and a
+   * notification says what appeared, so it is auditable rather than silent.
+   */
+  autoImportSchedule: boolean;
   /** Device calendar IDs to hide. */
   hiddenCalendarIds: string[];
   /** Default task duration in minutes for new tasks. */

@@ -1,6 +1,7 @@
 import * as BackgroundTask from 'expo-background-task';
 import * as Notifications from 'expo-notifications';
 import * as TaskManager from 'expo-task-manager';
+import { autoImportSchedule } from './scheduleAuto';
 import { Platform } from 'react-native';
 import { useClientMeta, isPhoneBlocked } from '../store/clientMeta';
 import { mergeMessage, useMessages } from '../store/messages';
@@ -101,6 +102,11 @@ TaskManager.defineTask(TASK_NAME, async () => {
   // Missed-check-in escalation piggybacks on this wake (see lib/safety) —
   // first, so a failed inbound fetch never delays a safety alert.
   try { await maybeEscalate(); } catch {}
+  // So does the school schedule (see lib/scheduleAuto). It rides this wake
+  // rather than registering one of its own: a second background task would
+  // compete with this one for the same iOS budget, and the thing it waits
+  // for arrives once a week.
+  try { await autoImportSchedule(); } catch {}
   try {
     await notifyNewInbound();
     return BackgroundTask.BackgroundTaskResult.Success;
@@ -128,5 +134,13 @@ export async function checkInboundNow(): Promise<void> {
     await notifyNewInbound();
   } catch {
     // Offline — next check catches up.
+  }
+  // Opening the app is the most reliable wake there is. iOS grants
+  // background time when it feels like it, so a schedule that arrived
+  // overnight should not wait on its goodwill.
+  try {
+    await autoImportSchedule();
+  } catch {
+    // Next wake catches up.
   }
 }

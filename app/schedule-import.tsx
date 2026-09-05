@@ -9,6 +9,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
@@ -21,6 +22,7 @@ import { selectionHaptic, successHaptic, tapHaptic } from '../src/lib/haptics';
 import { parseScheduleEmail, type ParsedEvent } from '../src/lib/scheduleImport';
 import { fetchRelaySchedule, type RelaySchedule } from '../src/lib/smsgate';
 import { loadSmsGateCredentials } from '../src/lib/smsgateCredentials';
+import { useSettings } from '../src/store/settings';
 import { useTasks } from '../src/store/tasks';
 import { SPACING, useTheme } from '../src/theme';
 
@@ -40,6 +42,8 @@ export default function ScheduleImportScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const addTask = useTasks((s) => s.addTask);
+  const auto = useSettings((s) => s.settings.autoImportSchedule);
+  const updateSettings = useSettings((s) => s.update);
   const tasks = useTasks((s) => s.tasks);
 
   const [email, setEmail] = useState('');
@@ -252,6 +256,29 @@ export default function ScheduleImportScreen() {
                 </Pressable>
               </View>
 
+              <GlassCard padding={0}>
+                <View style={styles.autoRow}>
+                  <View style={styles.flex}>
+                    <Text style={[styles.eventTitle, { color: theme.text }]}>
+                      Add new schedules automatically
+                    </Text>
+                    <Text style={[styles.eventMeta, { color: theme.textTertiary }]}>
+                      {auto
+                        ? 'New newsletters go straight on your calendar, and you get a notification saying what was added.'
+                        : 'New newsletters wait here until you come and read them.'}
+                    </Text>
+                  </View>
+                  <Switch
+                    value={auto}
+                    onValueChange={(autoImportSchedule) => {
+                      selectionHaptic();
+                      updateSettings({ autoImportSchedule });
+                    }}
+                    accessibilityLabel="Add new schedules automatically"
+                  />
+                </View>
+              </GlassCard>
+
               {error ? (
                 <Text
                   style={[
@@ -429,6 +456,13 @@ const styles = StyleSheet.create({
     gap: SPACING.sm + 2,
     paddingHorizontal: SPACING.sm + 2,
     paddingVertical: SPACING.sm + 4,
+  },
+  autoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.md,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.md,
   },
   waitingRow: {
     flexDirection: 'row',
