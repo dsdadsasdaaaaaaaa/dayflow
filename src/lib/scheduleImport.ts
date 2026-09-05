@@ -35,7 +35,13 @@ export interface ParsedEvent {
 
 export type ScheduleParse =
   | { ok: true; events: ParsedEvent[]; dropped: number }
-  | { ok: false; error: string };
+  /**
+   * `announcement` means the email was read fine and simply had no timetable
+   * in it. The school sends notices from the same address as the schedule,
+   * so this is a normal outcome, not a failure, and must not be reported as
+   * one — an error where nothing is wrong teaches people to ignore errors.
+   */
+  | { ok: false; error: string; announcement?: boolean };
 
 /** Longest email accepted. Beyond this the tail is almost always footer. */
 const MAX_INPUT = 24_000;
@@ -45,22 +51,50 @@ const TIMEOUT_MS = 60_000;
 
 function instruction(today: DayKey, weekday: string, zone: string): string {
   return [
-    'You read a school schedule email and return the timetable it describes as JSON.',
+    "You read a school's newsletter email and return the dated schedule it contains as JSON.",
     `Today is ${weekday} ${today} in the ${zone} timezone.`,
+    '',
+    'WHERE THE SCHEDULE IS. These newsletters carry one or more week GRIDS, under headings',
+    "like \"Next Week's Schedule\" or \"Looking Ahead\". A grid has a row of day headings",
+    '("Monday, September 7", "Tuesday, September 8", ...) and, under each, that day\'s entries.',
+    'Take every such grid in the email, not only the first: the later ones are real weeks too.',
+    'A cell may hold several separate entries; each one is its own event.',
+    '',
+    'HOW THE GRID ARRIVES. The email is flattened to text before you see it, and the flattening',
+    'keeps the table: ONE LINE PER TABLE ROW, cells separated by " | ", and entries within one',
+    'cell separated by "; ". So a grid reaches you looking like',
+    '  Monday, September 7 | Tuesday, September 8 | Wednesday, September 9',
+    '  Labour Day: School Closed | First Day of School: Special Schedule; 2:25 PM Dismissal | Welcome Back Carnival',
+    'and the third cell of a row belongs to the third day of the heading row. Count the',
+    'separators rather than guessing: a miscount puts a test on the wrong day. If a row has',
+    'fewer cells than the heading has days, the missing days simply have nothing on them.',
+    '',
+    'WHAT TO IGNORE. Everything outside those grids. School newsletters are mostly prose —',
+    'welcome notes, spotlights, fundraising, athletics, registration links, sign-offs, footers.',
+    'None of it belongs in a calendar even when it mentions a date in passing. An event only',
+    'counts if it appears inside a week grid, under a day.',
+    '',
+    'THE SAME ADDRESS ALSO SENDS PURE ANNOUNCEMENTS. If this email has no week grid at all,',
+    'return [] and nothing else. That is a correct answer, not a failure.',
     '',
     'Return ONLY a JSON array, no prose and no code fence. Each element:',
     '{"title": string, "date": "YYYY-MM-DD", "startMinutes": number|null, "durationMinutes": number, "location": string, "notes": string}',
     '',
     'Rules:',
-    '- title is the class or event as a person would name it, e.g. "AP Calculus" or "Assembly". Do not include the time or room in the title.',
-    '- date must be an actual calendar date. The email describes ONE upcoming week: resolve every weekday it names to the date in that week. If it does not say which week, use the week starting after today.',
-    '- startMinutes is minutes from midnight (540 = 9:00 AM). Use null ONLY for something with no time at all.',
-    '- durationMinutes is how long it runs. If only a start is given, use 60.',
-    '- location is the room or place, or "" if none is given.',
-    '- notes is anything a person would want to remember, such as "bring lab goggles", or "".',
-    '- Include classes, assemblies, tests, trips and deadlines. Skip anything that is not a scheduled event: greetings, reminders about behaviour, newsletter chatter, signatures, links.',
-    '- If the email contains no schedule at all, return [].',
-    '- Never invent a class that is not in the email. A missing entry is recoverable; an invented one is not.',
+    '- date comes from the day heading the entry sits under. The heading gives a weekday and',
+    '  a month/day; take the year from the email itself, minding a December-to-January roll.',
+    '- title is the entry as the school wrote it, e.g. "Labour Day: School Closed" or',
+    '  "Welcome Back Carnival". Keep their words: a person recognises those. Only drop a time',
+    '  that trails in brackets, e.g. "Curriculum Night (7:30 PM)" becomes "Curriculum Night".',
+    '- startMinutes is minutes from midnight (540 = 9:00 AM) when the entry names a time,',
+    '  including one written into its own name: "2:25 PM Dismissal" is 865, "Noon Dismissal"',
+    '  is 720, "10:30 AM Start" is 630. Use null when the entry names no time at all, which',
+    '  is normal for things like "School Closed" or "No Assessment Day".',
+    '- durationMinutes: 30 for a dismissal or a start time, 60 for anything else timed, 60',
+    '  when there is no time.',
+    '- location is a room or place if the entry names one, otherwise "".',
+    '- notes is "" unless the grid says something extra worth keeping.',
+    '- Never invent an entry. A missing one is recoverable; an invented one is not.',
   ].join('\n');
 }
 
@@ -276,12 +310,21 @@ export async function parseScheduleEmail(
   }
   const { events, dropped } = validateEvents(raw);
   if (events.length === 0) {
+    // An empty array that lost nothing on the way is the model saying there
+    // was no schedule here, which for this sender is an ordinary week.
+    if (Array.isArray(raw) && raw.length === 0) {
+      return {
+        ok: false,
+        announcement: true,
+        error: 'No schedule in this one — it looks like an announcement rather than a timetable.',
+      };
+    }
     return {
       ok: false,
       error:
         dropped > 0
-          ? 'Nothing in that email survived checking. Paste just the timetable and try again.'
-          : 'No classes found in that email.',
+          ? 'Nothing in that email survived checking. Paste just the schedule part and try again.'
+          : 'No dated schedule found in that email.',
     };
   }
   return { ok: true, events, dropped };

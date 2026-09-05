@@ -45,6 +45,8 @@ export default function ScheduleImportScreen() {
   const [email, setEmail] = useState('');
   const [reading, setReading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** An email with no timetable in it is normal, not a failure. */
+  const [announcement, setAnnouncement] = useState(false);
   const [events, setEvents] = useState<ParsedEvent[] | null>(null);
   const [dropped, setDropped] = useState(0);
   const [skipped, setSkipped] = useState<Record<string, boolean>>({});
@@ -106,11 +108,13 @@ export default function ScheduleImportScreen() {
     tapHaptic();
     setReading(true);
     setError(null);
+    setAnnouncement(false);
     setAdded(null);
     const result = await parseScheduleEmail(source ?? email);
     setReading(false);
     if (!result.ok) {
       setError(result.error);
+      setAnnouncement(result.announcement === true);
       setEvents(null);
       return;
     }
@@ -165,8 +169,9 @@ export default function ScheduleImportScreen() {
           {events == null ? (
             <>
               <Text style={[styles.blurb, { color: theme.textSecondary }]}>
-                Paste your school's schedule email and it will be read into your week.
-                Nothing is added until you have seen it.
+                Paste your school's newsletter and the schedule grids in it will be read
+                into your week. Everything else in the email is ignored, and nothing is
+                added until you have seen it.
               </Text>
 
               {waiting ? (
@@ -248,21 +253,26 @@ export default function ScheduleImportScreen() {
               </View>
 
               {error ? (
-                <Text style={[styles.error, { color: theme.danger }]}>{error}</Text>
+                <Text
+                  style={[
+                    styles.error,
+                    { color: announcement ? theme.textSecondary : theme.danger },
+                  ]}
+                >
+                  {error}
+                </Text>
               ) : null}
 
               {added != null ? (
                 <Text style={[styles.done, { color: theme.success }]}>
-                  {added === 1 ? 'Added 1 class to your week.' : `Added ${added} classes to your week.`}
+                  {added === 1 ? 'Added 1 item to your calendar.' : `Added ${added} items to your calendar.`}
                 </Text>
               ) : null}
             </>
           ) : (
             <>
               <Text style={[styles.blurb, { color: theme.textSecondary }]}>
-                {chosen.length === 1
-                  ? '1 class will be added.'
-                  : `${chosen.length} classes will be added.`}
+                {chosen.length === 1 ? '1 item will be added.' : `${chosen.length} items will be added.`}
                 {dropped > 0
                   ? ` ${dropped} line${dropped === 1 ? '' : 's'} could not be read and ${
                       dropped === 1 ? 'was' : 'were'
