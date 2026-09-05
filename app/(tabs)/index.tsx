@@ -26,7 +26,7 @@ import { consumePendingDay } from '../../src/components/week/dayHandoff';
 import { JumpDateSheet } from '../../src/components/week/JumpDateSheet';
 import { WeekEarningsChip } from '../../src/components/week/WeekEarningsChip';
 import {
-  computeColumns,
+  computeLanes,
   findGaps,
   mergeIntervals,
   MINUTE_SCALE,
@@ -34,6 +34,7 @@ import {
   type Interval,
 } from '../../src/components/timeline/layout';
 import { eventsForDay } from '../../src/lib/calendar';
+import { isSchoolTask } from '../../src/lib/timetableImport';
 import { addDays, isToday, minutesOfDay, todayKey } from '../../src/lib/dates';
 import { successHaptic, tapHaptic } from '../../src/lib/haptics';
 import { syncTaskNotifications } from '../../src/lib/notifications';
@@ -61,6 +62,8 @@ interface PositionedBlock {
   height: number;
   leftPct: number;
   widthPct: number;
+  /** Sharing the width with the school lane, so it renders compactly. */
+  narrow: boolean;
 }
 
 export default function TodayScreen() {
@@ -199,19 +202,22 @@ export default function TodayScreen() {
         (a, b) => a.start - b.start || b.end - b.start - (a.end - a.start)
       );
 
-    const placements = computeColumns(items.map(({ start, end }) => ({ start, end })));
-    const positioned: PositionedBlock[] = items.map((it, idx) => {
-      const { col, cols } = placements[idx];
-      const gapPct = cols > 1 ? 1 : 0;
-      return {
-        instance: it.instance,
-        layoutStart: it.start,
-        top: (it.start - winStart) * MINUTE_SCALE,
-        height: Math.max(MIN_BLOCK_HEIGHT, (it.end - it.start) * MINUTE_SCALE),
-        leftPct: (col / cols) * 100,
-        widthPct: 100 / cols - gapPct,
-      };
-    });
+    const placements = computeLanes(
+      items.map(({ start, end, instance }) => ({
+        start,
+        end,
+        school: isSchoolTask(instance.task),
+      }))
+    );
+    const positioned: PositionedBlock[] = items.map((it, idx) => ({
+      instance: it.instance,
+      layoutStart: it.start,
+      top: (it.start - winStart) * MINUTE_SCALE,
+      height: Math.max(MIN_BLOCK_HEIGHT, (it.end - it.start) * MINUTE_SCALE),
+      leftPct: placements[idx].leftPct,
+      widthPct: placements[idx].widthPct,
+      narrow: placements[idx].widthPct < 40,
+    }));
 
     // Occupied = tasks + timed calendar events, merged. Uses TRUE durations
     // (not the min layout height) so free-time and gap math stay honest.
@@ -539,6 +545,7 @@ export default function TodayScreen() {
                   height={b.height}
                   leftPct={b.leftPct}
                   widthPct={b.widthPct}
+                  narrow={b.narrow}
                   minStart={winStart}
                   maxStart={Math.max(
                     winStart,

@@ -5,6 +5,7 @@ import { fetchRelaySchedule } from './smsgate';
 import { loadSmsGateCredentials } from './smsgateCredentials';
 import { useSettings } from '../store/settings';
 import { useTasks } from '../store/tasks';
+import { SCHOOL_TAG } from './timetableImport';
 
 /**
  * Putting the school's week on the calendar without being asked.
@@ -112,6 +113,7 @@ export function addScheduleEvents(events: ParsedEvent[]): number {
       notes: [e.location, e.notes].filter(Boolean).join('\n'),
       icon: 'school-outline',
       color: 'sky',
+      tags: [SCHOOL_TAG],
     });
     added++;
   }

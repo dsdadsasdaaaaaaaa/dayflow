@@ -18,6 +18,21 @@ import type { BrainChoice } from './secretaryBrain';
  * dropped rather than guessed at.
  */
 
+/**
+ * Marks a task as coming from a timetable or a school newsletter.
+ *
+ * Two things need to recognise these later: the timeline, which gives them a
+ * lane of their own, and re-importing, which has to be able to replace the
+ * old week rather than lay a second one on top of it. Recognising them by
+ * their icon would break the moment someone picked a different icon.
+ */
+export const SCHOOL_TAG = 'school';
+
+/** Is this one of ours? Icon is the fallback for anything imported before the tag existed. */
+export function isSchoolTask(task: Pick<Task, 'tags' | 'icon'>): boolean {
+  return task.tags?.includes(SCHOOL_TAG) === true || task.icon === 'school-outline';
+}
+
 /** One class, on one weekday, every week. */
 export interface ParsedClass {
   /** Course as a person says it, e.g. "Chemistry". */

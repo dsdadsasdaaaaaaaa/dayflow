@@ -8,6 +8,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
@@ -19,8 +20,10 @@ import { formatMinutes } from '../src/lib/dates';
 import { selectionHaptic, successHaptic, tapHaptic } from '../src/lib/haptics';
 import {
   classNote,
+  isSchoolTask,
   nextWeekday,
   parseTimetable,
+  SCHOOL_TAG,
   weeklyOn,
   type ParsedClass,
 } from '../src/lib/timetableImport';
@@ -41,7 +44,24 @@ export default function TimetableImportScreen() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const addTask = useTasks((s) => s.addTask);
+  const deleteTask = useTasks((s) => s.deleteTask);
   const tasks = useTasks((s) => s.tasks);
+  const [replace, setReplace] = useState(true);
+
+  /**
+   * Classes already on the calendar from an earlier import.
+   *
+   * Worth knowing about because the usual reason for importing twice is that
+   * the first lot got dragged out of place by accident, and adding a correct
+   * copy alongside a wrong one helps nobody.
+   */
+  const existing = useMemo(
+    () =>
+      Object.values(tasks).filter(
+        (t) => isSchoolTask(t) && (t.recurrence?.weekdays?.length ?? 0) > 0
+      ),
+    [tasks]
+  );
 
   const [raw, setRaw] = useState('');
   const [reading, setReading] = useState(false);
@@ -67,7 +87,12 @@ export default function TimetableImportScreen() {
   const isDuplicate = (c: ParsedClass) =>
     alreadyThere.has(`${c.weekday}|${c.startMinutes}|${c.title.trim().toLowerCase()}`);
 
-  const chosen = (classes ?? []).filter((c) => !skipped[keyOf(c)] && !isDuplicate(c));
+  // When replacing, everything goes back in: what is already there is about
+  // to be removed, so calling it a duplicate would silently drop it.
+  const replacing = replace && existing.length > 0;
+  const chosen = (classes ?? []).filter(
+    (c) => !skipped[keyOf(c)] && (replacing || !isDuplicate(c))
+  );
 
   const days = useMemo(() => {
     const byDay = new Map<number, ParsedClass[]>();
@@ -97,6 +122,7 @@ export default function TimetableImportScreen() {
   }
 
   function addAll() {
+    if (replacing) for (const t of existing) deleteTask(t.id);
     for (const c of chosen) {
       addTask({
         title: c.title,
@@ -111,6 +137,7 @@ export default function TimetableImportScreen() {
         notes: classNote(c),
         icon: 'school-outline',
         color: 'sky',
+        tags: [SCHOOL_TAG],
       });
     }
     successHaptic();
@@ -217,6 +244,31 @@ export default function TimetableImportScreen() {
                   : ''}
               </Text>
 
+              {existing.length > 0 ? (
+                <GlassCard padding={0}>
+                  <View style={styles.replaceRow}>
+                    <View style={styles.flex}>
+                      <Text style={[styles.className, { color: theme.text }]}>
+                        Replace the timetable I already have
+                      </Text>
+                      <Text style={[styles.classMeta, { color: theme.textTertiary }]}>
+                        {replace
+                          ? `The ${existing.length} class${existing.length === 1 ? '' : 'es'} already on your calendar will be removed first, so anything nudged out of place goes back to what the timetable says.`
+                          : `Your ${existing.length} existing class${existing.length === 1 ? '' : 'es'} stay as they are, and only classes not already there get added.`}
+                      </Text>
+                    </View>
+                    <Switch
+                      value={replace}
+                      onValueChange={(v) => {
+                        selectionHaptic();
+                        setReplace(v);
+                      }}
+                      accessibilityLabel="Replace the timetable I already have"
+                    />
+                  </View>
+                </GlassCard>
+              ) : null}
+
               {days.map(([day, items]) => (
                 <View key={day} style={styles.day}>
                   <Text style={[styles.dayLabel, { color: theme.textSecondary }]}>
@@ -224,7 +276,7 @@ export default function TimetableImportScreen() {
                   </Text>
                   <GlassCard padding={6}>
                     {items.map((c, i) => {
-                      const dupe = isDuplicate(c);
+                      const dupe = !replacing && isDuplicate(c);
                       const off = dupe || skipped[keyOf(c)];
                       const note = classNote(c);
                       return (
@@ -359,6 +411,13 @@ const styles = StyleSheet.create({
     gap: SPACING.sm + 2,
     paddingHorizontal: SPACING.sm + 2,
     paddingVertical: SPACING.sm + 4,
+  },
+  replaceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.md,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.md,
   },
   className: { fontSize: 15, fontWeight: '600' },
   classMeta: { fontSize: 12, marginTop: 1 },

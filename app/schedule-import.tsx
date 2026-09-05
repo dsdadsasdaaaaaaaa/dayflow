@@ -23,6 +23,7 @@ import { parseScheduleEmail, type ParsedEvent } from '../src/lib/scheduleImport'
 import { lastScheduleStatus, type ScheduleStatus } from '../src/lib/scheduleAuto';
 import { fetchRelaySchedule, type RelaySchedule } from '../src/lib/smsgate';
 import { loadSmsGateCredentials } from '../src/lib/smsgateCredentials';
+import { SCHOOL_TAG } from '../src/lib/timetableImport';
 import { useSettings } from '../src/store/settings';
 import { useTasks } from '../src/store/tasks';
 import { SPACING, useTheme } from '../src/theme';
@@ -151,6 +152,7 @@ export default function ScheduleImportScreen() {
         notes: [e.location, e.notes].filter(Boolean).join('\n'),
         icon: 'school-outline',
         color: 'indigo',
+        tags: [SCHOOL_TAG],
       });
     }
     successHaptic();

@@ -26,6 +26,16 @@ interface Props {
   compact?: boolean;
   /** Fixed height (timeline positioning). Omit for natural height. */
   height?: number;
+  /**
+   * Rendered in a narrow lane, so there is no room for the icon rail.
+   *
+   * The rail is a fixed 46pt. In a lane a third of the screen wide that is
+   * half the block, and every title came out as two words and an ellipsis —
+   * which is no use for telling one class from another at a glance. In a
+   * lane the colour already says what the icon would, so the rail goes and
+   * the words get the space.
+   */
+  narrow?: boolean;
 }
 
 export function TaskCard({
@@ -37,6 +47,7 @@ export function TaskCard({
   onLongPress,
   compact = false,
   height,
+  narrow = false,
 }: Props) {
   const theme = useTheme();
   const currency = useSettings((s) => s.settings.currencySymbol);
@@ -77,21 +88,25 @@ export function TaskCard({
           },
         ]}
       >
-        <View style={[styles.rail, !short && styles.railTop]}>
-          <View
-            style={[
-              styles.iconCircle,
-              {
-                width: iconSize,
-                height: iconSize,
-                borderRadius: iconSize / 2,
-                backgroundColor: c.solid,
-              },
-            ]}
-          >
-            <Ionicons name={task.icon as never} size={short ? 12 : 16} color="#fff" />
+        {narrow ? (
+          <View style={[styles.narrowStripe, { backgroundColor: c.solid }]} />
+        ) : (
+          <View style={[styles.rail, !short && styles.railTop]}>
+            <View
+              style={[
+                styles.iconCircle,
+                {
+                  width: iconSize,
+                  height: iconSize,
+                  borderRadius: iconSize / 2,
+                  backgroundColor: c.solid,
+                },
+              ]}
+            >
+              <Ionicons name={task.icon as never} size={short ? 12 : 16} color="#fff" />
+            </View>
           </View>
-        </View>
+        )}
 
         {short ? (
           <View style={styles.shortBody}>
@@ -108,15 +123,29 @@ export function TaskCard({
             ) : null}
           </View>
         ) : (
-          <View style={styles.body}>
+          <View style={[styles.body, narrow && styles.bodyNarrow]}>
             {timeCaption ? (
-              <Text style={[styles.caption, { color: theme.textTertiary }]} numberOfLines={1}>
-                {timeCaption}
+              <Text
+                style={[
+                  styles.caption,
+                  narrow && styles.captionNarrow,
+                  { color: theme.textTertiary },
+                ]}
+                numberOfLines={1}
+              >
+                {narrow && task.startMinutes != null
+                  ? formatMinutes(task.startMinutes)
+                  : timeCaption}
               </Text>
             ) : null}
             <Text
-              numberOfLines={height >= 84 ? 2 : 1}
-              style={[styles.title, { color: theme.text }, completed && styles.titleDone]}
+              numberOfLines={narrow ? (height >= 56 ? 2 : 1) : height >= 84 ? 2 : 1}
+              style={[
+                styles.title,
+                narrow && styles.titleNarrow,
+                { color: theme.text },
+                completed && styles.titleDone,
+              ]}
             >
               {task.title}
             </Text>
@@ -287,6 +316,12 @@ const styles = StyleSheet.create({
   iconCompact: { width: 32, height: 32, borderRadius: 16 },
 
   title: { fontSize: 15, fontWeight: '700' },
+  titleNarrow: { fontSize: 13, fontWeight: '700', lineHeight: 16 },
+  captionNarrow: { fontSize: 10 },
+  bodyNarrow: { paddingLeft: 10, paddingRight: 8, paddingVertical: 6 },
+  // What is left of the icon rail once there is no room for it: the colour,
+  // which is the part that was doing the identifying anyway.
+  narrowStripe: { width: 3, borderRadius: 2, marginLeft: 5, marginVertical: 6 },
   titleShort: { fontSize: 13, flexShrink: 1 },
   titleDone: { textDecorationLine: 'line-through' },
   metaRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },

@@ -29,6 +29,8 @@ interface Props {
   /** Column placement inside the block area, in percent. */
   leftPct: number;
   widthPct: number;
+  /** Rendered in the narrow school lane — see TaskCard's `narrow`. */
+  narrow?: boolean;
   /** Start-minute clamp range for dragging. */
   minStart: number;
   maxStart: number;
@@ -58,6 +60,7 @@ export const DraggableTaskBlock = memo(function DraggableTaskBlock({
   height,
   leftPct,
   widthPct,
+  narrow = false,
   minStart,
   maxStart,
   onPress,
@@ -272,6 +275,7 @@ export const DraggableTaskBlock = memo(function DraggableTaskBlock({
           onToggle={() => onToggle(instance)}
           onPress={() => onPress(instance)}
           height={displayHeight}
+          narrow={narrow}
         />
         <GestureDetector gesture={resizePan}>
           <Animated.View style={styles.resizeZone}>

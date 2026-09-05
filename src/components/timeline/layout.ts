@@ -56,6 +56,73 @@ export function computeColumns(items: Interval[]): ColumnPlacement[] {
   return result;
 }
 
+/**
+ * Share of the width a school day gets when it has to share.
+ *
+ * Classes are a backdrop rather than a to-do list: they are fixed, there are
+ * eight of them, and their only real job is to show what the day is already
+ * spent on. Packing them into the same columns as tasks made both unreadable
+ * — a class squeezed to half width, a task squeezed to the other half, and
+ * every title truncated to two words. Giving the timetable a narrow lane of
+ * its own leaves the middle for the things a person actually acts on.
+ */
+export const SCHOOL_LANE_PCT = 30;
+
+export interface LanedItem extends Interval {
+  /** True for a class or other timetable entry. */
+  school: boolean;
+}
+
+/**
+ * Place items in two lanes: the school day down one side, everything else
+ * in the space that remains.
+ *
+ * Each lane packs its own overlaps, so a class running long still sits beside
+ * the class it overlaps rather than beside a task. When a day has only one
+ * kind on it there is nothing to separate, and that kind takes the full
+ * width — a Saturday should not be three-quarters of empty gutter.
+ */
+export function computeLanes(items: LanedItem[]): (ColumnPlacement & {
+  leftPct: number;
+  widthPct: number;
+})[] {
+  const schoolIdx = items.map((it, i) => (it.school ? i : -1)).filter((i) => i >= 0);
+  const otherIdx = items.map((it, i) => (it.school ? -1 : i)).filter((i) => i >= 0);
+  const split = schoolIdx.length > 0 && otherIdx.length > 0;
+
+  const place = (idx: number[], originPct: number, spanPct: number) => {
+    const cols = computeColumns(idx.map((i) => items[i]));
+    return idx.map((i, n) => {
+      const { col, cols: total } = cols[n];
+      const gapPct = total > 1 ? 1 : 0;
+      return {
+        i,
+        col,
+        cols: total,
+        leftPct: originPct + (col / total) * spanPct,
+        widthPct: spanPct / total - gapPct,
+      };
+    });
+  };
+
+  const placed = split
+    ? [
+        ...place(schoolIdx, 0, SCHOOL_LANE_PCT),
+        ...place(otherIdx, SCHOOL_LANE_PCT, 100 - SCHOOL_LANE_PCT),
+      ]
+    : place(
+        items.map((_, i) => i),
+        0,
+        100
+      );
+
+  const out = items.map(() => ({ col: 0, cols: 1, leftPct: 0, widthPct: 100 }));
+  for (const p of placed) {
+    out[p.i] = { col: p.col, cols: p.cols, leftPct: p.leftPct, widthPct: p.widthPct };
+  }
+  return out;
+}
+
 /** Merge possibly-overlapping intervals (input sorted by start). */
 export function mergeIntervals(items: Interval[]): Interval[] {
   const merged: Interval[] = [];
