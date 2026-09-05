@@ -27,11 +27,17 @@
  */
 
 /**
- * Who the newsletter comes from. TanenbaumCHAT sends through Constant
- * Contact, so the visible address is a ccsend.com one; matching on the
- * school's own domain catches both that and anything sent directly.
+ * Who the newsletter comes from.
+ *
+ * Not the school's domain, which is the obvious answer and the wrong one:
+ * they send through Constant Contact, so the actual From is
+ * "TanenbaumCHAT <info-tanenbaumchat.org@shared1.ccsend.com>" and the school
+ * domain only appears inside the local part. Matching the bare word catches
+ * the display name and that address both, and would still catch a message
+ * sent directly from the school. Whatever it lets through, nothing is
+ * forwarded unless it also contains a schedule grid.
  */
-var SENDER = 'tanenbaumchat.org';
+var SENDER = 'tanenbaumchat';
 
 /**
  * Phrases that mean this email actually contains a timetable.
