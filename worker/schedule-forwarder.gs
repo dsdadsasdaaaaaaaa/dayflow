@@ -190,7 +190,11 @@ function htmlToText(html) {
       // function exists to prevent.
       .replace(/(?:;\s*)+/g, '; ')
       // "Monday,<br>September 7" is one heading, not two things.
-      .replace(/,;\s*/g, ', ')
+      .replace(/,\s*;\s*/g, ', ')
+      // "Grade 9 Parent Welcome<br>(7:00 PM)" is one entry with its time on
+      // the next line, not an entry called "(7:00 PM)". Put the time back on
+      // the thing it belongs to before anything reads the two as separate.
+      .replace(/;\s*(\(\s*(?:\d{1,2}(?::\d{2})?\s*[ap]\.?m\.?|noon)\s*\))/gi, ' $1')
       .replace(/;\s*\|/g, ' |')
       .split('\n')
       .map(function (line) {

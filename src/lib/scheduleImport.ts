@@ -185,6 +185,18 @@ export function validateEvents(raw: unknown): { events: ParsedEvent[]; dropped: 
       dropped++;
       continue;
     }
+    // A title that is nothing but a clock time is a line break landing in the
+    // wrong place, not an event. "(7:00 PM)" on its own names nothing, and
+    // putting it on the calendar would be worse than losing it. Counted as
+    // letters rather than as a run of them, so "P.E." still passes.
+    const named = title
+      .replace(/\b\d{1,2}(?::\d{2})?\s*[ap]\.?m\.?/gi, '')
+      .replace(/\bnoon\b/gi, '')
+      .replace(/[^a-z]/gi, '');
+    if (named.length < 2) {
+      dropped++;
+      continue;
+    }
     const rawStart = r.startMinutes;
     const timed = typeof rawStart === 'number' && Number.isFinite(rawStart);
     if (rawStart != null && !timed) {
