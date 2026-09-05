@@ -129,12 +129,14 @@ function modelsToTry(): string[] {
 async function postTurn(
   apiKey: string,
   messages: ClaudeMessage[],
-  tools: ToolSpec[]
+  tools: ToolSpec[],
+  /** Overrides for callers that are not the secretary — see askOnce. */
+  override?: { system?: string; maxTokens?: number; temperature?: number }
 ): Promise<{ ok: true; data: ClaudeResponse } | { ok: false; error: string }> {
   const body: Record<string, unknown> = {
-    max_tokens: MAX_TOKENS,
-    temperature: 0.4,
-    system: systemInstructionNow(),
+    max_tokens: override?.maxTokens ?? MAX_TOKENS,
+    temperature: override?.temperature ?? 0.4,
+    system: override?.system ?? systemInstructionNow(),
     messages,
   };
   if (tools.length > 0) {
@@ -201,6 +203,33 @@ async function postTurn(
  *
  * `history` must already be redacted (last turn = the current question).
  */
+/**
+ * One question, one answer, no tools — for callers that just want a document
+ * read and returned as JSON.
+ *
+ * Exists so those callers do not name a model themselves. Choosing one and
+ * falling back when it is retired lives in postTurn, and this is how the rest
+ * of the app borrows it rather than pinning an id that will stop working.
+ */
+export async function askOnce(
+  apiKey: string,
+  system: string,
+  user: string
+): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  const res = await postTurn(apiKey, [{ role: 'user', content: user }], [], {
+    system,
+    maxTokens: 8192,
+    temperature: 0,
+  });
+  if (!res.ok) return res;
+  const text = (res.data.content ?? [])
+    .filter(isText)
+    .map((b) => b.text)
+    .join('')
+    .trim();
+  return text ? { ok: true, text } : { ok: false, error: 'Claude answered with nothing.' };
+}
+
 export async function askSecretary(
   apiKey: string,
   history: ChatTurn[],

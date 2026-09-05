@@ -1,5 +1,7 @@
 import type { DayKey } from '../types';
 import { todayKey } from './dates';
+import { askOnce as askClaudeOnce } from './claude';
+import { askOnce as askGeminiOnce } from './gemini';
 import { loadBrain, type BrainChoice } from './secretaryBrain';
 
 /**
@@ -45,9 +47,6 @@ export type ScheduleParse =
 
 /** Longest email accepted. Beyond this the tail is almost always footer. */
 const MAX_INPUT = 24_000;
-
-const CLAUDE_ENDPOINT = 'https://api.anthropic.com/v1/messages';
-const TIMEOUT_MS = 60_000;
 
 function instruction(today: DayKey, weekday: string, zone: string): string {
   return [
@@ -336,16 +335,6 @@ export function readScheduleGrid(text: string, today: DayKey = todayKey()): Pars
   return out;
 }
 
-async function withTimeout(url: string, init: RequestInit): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 /**
  * One question to whichever model is connected, and its answer as text.
  *
@@ -365,72 +354,14 @@ export async function askModel(
       error: 'Connect Claude or Gemini in Settings first — reading this needs one of them.',
     };
   }
-  try {
-    const text =
-      chosen.id === 'claude'
-        ? await askClaude(chosen.apiKey, system, user)
-        : await askGemini(chosen.apiKey, system, user);
-    return { ok: true, text };
-  } catch (e) {
-    const aborted = e instanceof Error && e.name === 'AbortError';
-    return {
-      ok: false,
-      error: aborted
-        ? 'The model did not answer in time. Try again, or paste less of it.'
-        : e instanceof Error
-          ? e.message
-          : 'Could not reach the model.',
-    };
-  }
-}
-
-async function askClaude(key: string, system: string, email: string): Promise<string> {
-  const res = await withTimeout(CLAUDE_ENDPOINT, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': key,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-5',
-      max_tokens: 4096,
-      system,
-      messages: [{ role: 'user', content: email }],
-    }),
-  });
-  const body = (await res.json()) as {
-    content?: { type: string; text?: string }[];
-    error?: { message?: string };
-  };
-  if (!res.ok) throw new Error(body.error?.message ?? `Claude error (${res.status}).`);
-  return (body.content ?? [])
-    .filter((b) => b.type === 'text')
-    .map((b) => b.text ?? '')
-    .join('');
-}
-
-async function askGemini(key: string, system: string, email: string): Promise<string> {
-  const res = await withTimeout(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(key)}`,
-    {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: system }] },
-        contents: [{ role: 'user', parts: [{ text: email }] }],
-        // Asking for JSON rather than hoping for it. The validator still
-        // runs: a well-formed document can describe a nonsense timetable.
-        generationConfig: { responseMimeType: 'application/json', temperature: 0 },
-      }),
-    }
-  );
-  const body = (await res.json()) as {
-    candidates?: { content?: { parts?: { text?: string }[] } }[];
-    error?: { message?: string };
-  };
-  if (!res.ok) throw new Error(body.error?.message ?? `Gemini error (${res.status}).`);
-  return (body.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? '').join('');
+  // Note what is NOT here: a model id. Naming one is how this feature would
+  // quietly die — the id gets copied from documentation, the vendor retires
+  // it, and months later the import stops working with no visible cause.
+  // Both clients already walk a list of ids and fall back to asking the API
+  // what it actually serves; this borrows that rather than repeating it.
+  return chosen.id === 'claude'
+    ? askClaudeOnce(chosen.apiKey, system, user)
+    : askGeminiOnce(chosen.apiKey, system, user);
 }
 
 /**

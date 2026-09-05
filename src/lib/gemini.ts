@@ -66,7 +66,12 @@ let resolvedModel: string | null = null;
 /** Set once every known name has been refused, so discovery runs only once. */
 let exhausted = false;
 
-const MODEL_CACHE_KEY = 'dayflow-gemini-model';
+/**
+ * Bumped when the way a model is chosen changes, so the next launch settles
+ * the question again instead of living on an answer reached under the old
+ * rules. Cheap: one extra request, once.
+ */
+const MODEL_CACHE_KEY = 'dayflow-gemini-model-v2';
 
 /** Restore the last known-good model; safe to call more than once. */
 async function loadResolvedModel(): Promise<void> {
@@ -140,9 +145,22 @@ async function discoverModels(apiKey: string): Promise<string[]> {
       .filter(Boolean)
       // Skip previews and specialist variants; we want the plain chat models.
       .filter((n) => !/embedding|aqa|vision|image|tts|live|preview/i.test(n));
-    // Flash first (cheap, fast, tool-capable), newest-looking first.
-    const flash = usable.filter((n) => /flash/i.test(n)).sort().reverse();
-    const rest = usable.filter((n) => !/flash/i.test(n)).sort().reverse();
+    // Flash first (cheap, fast, tool-capable), newest first. Ordered by the
+    // version numbers in the name rather than alphabetically, because a plain
+    // string sort puts gemini-3.7 above gemini-3.10 and would pick the older
+    // model every time the minor version passed nine.
+    const byVersion = (a: string, b: string) => {
+      const nums = (n: string) => (n.match(/\d+/g) ?? []).map(Number);
+      const x = nums(a);
+      const y = nums(b);
+      for (let i = 0; i < Math.max(x.length, y.length); i++) {
+        const diff = (y[i] ?? -1) - (x[i] ?? -1);
+        if (diff !== 0) return diff;
+      }
+      return a.localeCompare(b);
+    };
+    const flash = usable.filter((n) => /flash/i.test(n)).sort(byVersion);
+    const rest = usable.filter((n) => !/flash/i.test(n)).sort(byVersion);
     return [...flash, ...rest];
   } catch {
     return [];
@@ -286,12 +304,14 @@ async function attempt(
 async function postTurn(
   apiKey: string,
   contents: GeminiContent[],
-  tools: ToolSpec[]
+  tools: ToolSpec[],
+  /** Overrides for callers that are not the secretary — see askOnce. */
+  override?: { system?: string; generationConfig?: Record<string, unknown> }
 ): Promise<{ ok: true; data: GeminiResponse } | { ok: false; error: string }> {
   const body: Record<string, unknown> = {
-    system_instruction: { parts: [{ text: systemInstructionNow() }] },
+    system_instruction: { parts: [{ text: override?.system ?? systemInstructionNow() }] },
     contents,
-    generationConfig: { temperature: 0.4, maxOutputTokens: 800 },
+    generationConfig: override?.generationConfig ?? { temperature: 0.4, maxOutputTokens: 800 },
   };
   if (tools.length > 0) {
     body.tools = [
@@ -307,6 +327,18 @@ async function postTurn(
 
   await loadResolvedModel();
   let candidates = modelsToTry();
+  // Nothing cached yet, so nothing is known to work: ask the API what this
+  // key can actually serve instead of guessing from a list written months
+  // ago. A hardcoded list can only ever name models that existed when it was
+  // written, so on a fresh install it is guaranteed to be behind — the
+  // endpoint is the only thing that knows what "latest" means today. The
+  // list stays as the fallback for when discovery itself is unavailable.
+  if (!resolvedModel) {
+    const found = await discoverModels(apiKey);
+    if (found.length > 0) {
+      candidates = [...found, ...candidates.filter((m) => !found.includes(m))];
+    }
+  }
   // If every name we know has already been refused this session, ask the API
   // what it actually has before giving up.
   if (exhausted) {
@@ -347,6 +379,35 @@ async function postTurn(
     }
   }
   return { ok: false, error: lastError };
+}
+
+/**
+ * One question, one answer, no tools — for callers that just want a document
+ * read and returned as JSON.
+ *
+ * Exists so those callers do not name a model. Every one that has tried has
+ * got it wrong eventually: the id is copied from documentation, Google
+ * retires it, and the feature dies quietly months later. Everything about
+ * choosing and remembering a working model lives in postTurn, and this is how
+ * the rest of the app borrows it.
+ */
+export async function askOnce(
+  apiKey: string,
+  system: string,
+  user: string,
+  generationConfig: Record<string, unknown> = { temperature: 0, maxOutputTokens: 8192 }
+): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  const res = await postTurn(apiKey, [{ role: 'user', parts: [{ text: user }] }], [], {
+    system,
+    generationConfig,
+  });
+  if (!res.ok) return res;
+  const parts = res.data.candidates?.[0]?.content?.parts ?? [];
+  const text = parts
+    .map((p) => p.text ?? '')
+    .join('')
+    .trim();
+  return text ? { ok: true, text } : { ok: false, error: 'Gemini answered with nothing.' };
 }
 
 /**
