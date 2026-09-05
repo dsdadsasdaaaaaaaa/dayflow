@@ -155,6 +155,11 @@ function forwardLatestSchedule() {
 function htmlToText(html) {
   return (
     String(html || '')
+      // Zero-width junk first, before anything tries to match around it.
+      // Constant Contact sprinkles U+FEFF through these emails, and a
+      // "Monday,<FEFF><br>September 7" defeats every tidy-up below by
+      // sitting invisibly between the comma and the break.
+      .replace(/[\uFEFF\u200B\u200C\u200D\u2060]/g, '')
       .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, ' ')
       // A line break INSIDE a cell must not become a line break in the text.
       // The grid's meaning is positional — third cell means Wednesday — and a
@@ -177,13 +182,16 @@ function htmlToText(html) {
       .replace(/&quot;|&[lr]dquo;/gi, '"')
       .replace(/&[a-z]+;|&#\d+;/gi, ' ')
       .replace(/[ \t]+/g, ' ')
-      // Tidy the separators back down: empty cells and repeated semicolons
-      // are an artefact of the layout, not something the reader should see.
+      // Tidy the separators back down. Repeated semicolons are an artefact
+      // of the layout and mean nothing. Repeated PIPES are not: an empty
+      // cell is a position, and a grid whose Wednesday is blank still has a
+      // Wednesday. Collapsing "| |" into "|" would slide every day after it
+      // one column to the left, which is the exact failure this whole
+      // function exists to prevent.
       .replace(/(?:;\s*)+/g, '; ')
       // "Monday,<br>September 7" is one heading, not two things.
       .replace(/,;\s*/g, ', ')
       .replace(/;\s*\|/g, ' |')
-      .replace(/\|(\s*\|)+/g, '|')
       .split('\n')
       .map(function (line) {
         return line.replace(/^[\s;|]+/, '').replace(/[\s;|]+$/, '');
