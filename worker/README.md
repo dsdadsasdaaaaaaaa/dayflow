@@ -90,3 +90,16 @@ curl -X POST -H "Authorization: Bearer $SHARED_SECRET" \
 
 It reports how many records it started and finished with, and is safe to run
 more than once.
+
+## The weekly school schedule email
+
+DayFlow cannot watch a mailbox and this relay cannot receive email, so the
+fetching is done by a short Apps Script running inside the Google account that
+already has the mail — the one place that needs no credentials, because it is
+already signed in as you. It posts the newest schedule email to
+`POST /schedule/<secret>`; the app reads it from `GET /schedule`.
+
+Only the newest is kept. A schedule is a statement about one week, and last
+week's is not history, it is just wrong.
+
+Setup is in the header comment of `schedule-forwarder.gs`.

@@ -28,6 +28,9 @@ const KEEP = 3000;
 /** One KV key holding the whole inbox as JSON. */
 const INBOX_KEY = 'inbox';
 
+/** The most recent school schedule email, waiting to be read by the app. */
+const SCHEDULE_KEY = 'schedule';
+
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -189,6 +192,45 @@ export default {
         .slice(0, limit)
         .map((m) => ({ ...m, storedAt: arrival(m) }));
       return json({ messages });
+    }
+
+    // --- the school's weekly schedule email --------------------------------
+    // Posted by a small Apps Script running in the user's own mailbox (see
+    // worker/schedule-forwarder.gs), because a phone app cannot read email
+    // and this relay cannot receive any. Only the newest is kept: a schedule
+    // is a statement about one week, and last week's is not history, it is
+    // just wrong.
+    if (request.method === 'POST' && url.pathname.startsWith('/schedule/')) {
+      const given = decodeURIComponent(url.pathname.slice('/schedule/'.length));
+      if (!secretMatches(given, secret)) return json({ error: 'forbidden' }, 403);
+      let payload = null;
+      try {
+        payload = await request.json();
+      } catch {
+        return json({ error: 'body was not JSON' }, 400);
+      }
+      const body = String(payload?.body ?? payload?.text ?? '').slice(0, 40000);
+      if (!body.trim()) return json({ error: 'no email body' }, 400);
+      await env.INBOX.put(
+        SCHEDULE_KEY,
+        JSON.stringify({
+          body,
+          subject: String(payload?.subject ?? '').slice(0, 300),
+          from: String(payload?.from ?? '').slice(0, 300),
+          sentAt: Number(payload?.sentAt) || Date.now(),
+          storedAt: Date.now(),
+        })
+      );
+      return json({ ok: true, stored: body.length });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/schedule') {
+      const auth = request.headers.get('authorization') ?? '';
+      if (!secretMatches(auth.replace(/^Bearer\s+/i, ''), secret)) {
+        return json({ error: 'forbidden' }, 403);
+      }
+      const stored = await env.INBOX.get(SCHEDULE_KEY, 'json');
+      return json({ schedule: stored ?? null });
     }
 
     if (request.method === 'GET' && url.pathname === '/health') {

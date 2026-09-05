@@ -613,3 +613,41 @@ export async function verifySmsGateCredentials(
   }
   return { ok: true };
 }
+
+/** A school schedule email the relay is holding, waiting to be read. */
+export interface RelaySchedule {
+  body: string;
+  subject: string;
+  from: string;
+  sentAt: number;
+  storedAt: number;
+}
+
+/**
+ * The newest schedule email the relay has, or null.
+ *
+ * Lives here because the relay credentials do: the same Worker and the same
+ * secret the SIM line already uses, so wiring the schedule up costs the user
+ * nothing they have not already set up. Failures are swallowed into null —
+ * this is a convenience on a screen that works perfectly well by pasting,
+ * and an error banner about a relay would be noise on it.
+ */
+export async function fetchRelaySchedule(
+  creds: SmsGateCredentials
+): Promise<RelaySchedule | null> {
+  if (!creds.inboxUrl || !creds.inboxSecret) return null;
+  try {
+    const res = await withTimeout(
+      `${inbox(creds)}/schedule`,
+      { headers: { Authorization: `Bearer ${creds.inboxSecret}` } },
+      READ_TIMEOUT_MS,
+      'reading the relay'
+    );
+    if (!res.ok) return null;
+    const body = (await res.json()) as { schedule?: RelaySchedule | null };
+    const found = body.schedule;
+    return found && typeof found.body === 'string' && found.body.trim() ? found : null;
+  } catch {
+    return null;
+  }
+}

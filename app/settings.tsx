@@ -667,6 +667,16 @@ export default function SettingsScreen() {
               router.push('/settings-messaging');
             }}
           />
+          <SettingsRow
+            icon="school"
+            tint={taskColor('sky').solid}
+            label="Import schedule"
+            sublabel="Read a school schedule email into your week"
+            onPress={() => {
+              tapHaptic();
+              router.push('/schedule-import');
+            }}
+          />
           <View style={styles.block}>
             <Text style={[styles.blockLabel, { color: theme.textTertiary }]}>
               Currency symbol
