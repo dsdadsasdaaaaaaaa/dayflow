@@ -243,6 +243,99 @@ export function validateEvents(raw: unknown): { events: ParsedEvent[]; dropped: 
   };
 }
 
+const MONTHS = [
+  'january', 'february', 'march', 'april', 'may', 'june',
+  'july', 'august', 'september', 'october', 'november', 'december',
+];
+
+const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+/** "Monday, September 7" -> { month: 8, day: 7 }, or null if it is not a day heading. */
+function dayHeading(cell: string): { month: number; day: number } | null {
+  const clean = cell.replace(/[;|]/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+  const match = /^([a-z]+)\.?,?\s+([a-z]+)\.?\s+(\d{1,2})\b/.exec(clean);
+  if (!match) return null;
+  if (!WEEKDAYS.some((d) => d.startsWith(match[1]) && match[1].length >= 3)) return null;
+  const month = MONTHS.findIndex((m) => m.startsWith(match[2]) && match[2].length >= 3);
+  if (month < 0) return null;
+  const day = Number(match[3]);
+  return day >= 1 && day <= 31 ? { month, day } : null;
+}
+
+/** A dismissal or a start time is a moment; everything else gets an hour. */
+function durationFor(title: string): number {
+  return /\b(dismissal|start)\b/i.test(title) ? 30 : 60;
+}
+
+/**
+ * Read the grid without asking anyone.
+ *
+ * Once the email has been flattened the schedule is not prose any more: it
+ * is a heading row of dates and an entry row beneath it, cells separated by
+ * "|" and entries within a cell by ";". That is a table, and reading a table
+ * is arithmetic rather than judgement — so in the ordinary case this does it
+ * outright, with no model, no network and nothing to be plausibly wrong
+ * about. The model stays for the case this cannot recognise, which is where
+ * judgement was actually needed.
+ *
+ * Returns [] when it cannot see a grid it trusts, which is the signal to ask.
+ */
+export function readScheduleGrid(text: string, today: DayKey = todayKey()): ParsedEvent[] {
+  const lines = text.split('\n');
+  const emailYear = Number(/\b(20\d{2})\b/.exec(text)?.[1]) || Number(today.slice(0, 4));
+  const out: ParsedEvent[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const cells = lines[i].split('|');
+    if (cells.length < 3) continue;
+    const days = cells.map(dayHeading);
+    // A row of dates, not a layout table that happens to have three columns.
+    if (days.filter(Boolean).length < 3) continue;
+
+    // The entries sit on the next line with content. A grid whose entry row
+    // is missing is a heading with nothing under it, which is not an error.
+    let j = i + 1;
+    while (j < lines.length && !lines[j].trim()) j++;
+    if (j >= lines.length) break;
+    const entryCells = lines[j].split('|');
+    // Another heading row means this week simply had nothing scheduled.
+    if (entryCells.map(dayHeading).filter(Boolean).length >= 3) continue;
+
+    for (let c = 0; c < days.length; c++) {
+      const day = days[c];
+      const cell = entryCells[c];
+      if (!day || !cell) continue;
+      // The email names a month and a day but not a year. Take the year from
+      // the email, and roll forward when that would put a September notice
+      // about January in the past — a newsletter is always about what is
+      // coming, never about ten months ago.
+      let year = emailYear;
+      const asKey = (y: number) =>
+        `${y}-${String(day.month + 1).padStart(2, '0')}-${String(day.day).padStart(2, '0')}`;
+      if (asKey(year) < today) {
+        const monthsBack = (Number(today.slice(5, 7)) - 1 - day.month + 12) % 12;
+        if (monthsBack > 6) year += 1;
+      }
+      for (const entry of cell.split(';')) {
+        const title = entry.replace(/\s+/g, ' ').trim();
+        if (!title) continue;
+        out.push({
+          title,
+          date: asKey(year),
+          // Left for the validator to fill from the entry's own words, which
+          // is the same clock every other path is held to.
+          startMinutes: null,
+          durationMinutes: durationFor(title),
+          location: '',
+          notes: '',
+        });
+      }
+    }
+    i = j;
+  }
+  return out;
+}
+
 async function withTimeout(url: string, init: RequestInit): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -250,6 +343,44 @@ async function withTimeout(url: string, init: RequestInit): Promise<Response> {
     return await fetch(url, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * One question to whichever model is connected, and its answer as text.
+ *
+ * Shared with the timetable reader: both are "read this table, give me
+ * JSON", and the part worth having in one place is the transport — the
+ * key, the timeout, the two vendors' differing shapes — not the prompt.
+ */
+export async function askModel(
+  system: string,
+  user: string,
+  brain?: BrainChoice | null
+): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  const chosen = brain ?? (await loadBrain());
+  if (!chosen) {
+    return {
+      ok: false,
+      error: 'Connect Claude or Gemini in Settings first — reading this needs one of them.',
+    };
+  }
+  try {
+    const text =
+      chosen.id === 'claude'
+        ? await askClaude(chosen.apiKey, system, user)
+        : await askGemini(chosen.apiKey, system, user);
+    return { ok: true, text };
+  } catch (e) {
+    const aborted = e instanceof Error && e.name === 'AbortError';
+    return {
+      ok: false,
+      error: aborted
+        ? 'The model did not answer in time. Try again, or paste less of it.'
+        : e instanceof Error
+          ? e.message
+          : 'Could not reach the model.',
+    };
   }
 }
 
@@ -315,37 +446,12 @@ export async function parseScheduleEmail(
   const text = email.trim();
   if (!text) return { ok: false, error: 'There was nothing in that email to read.' };
 
-  const chosen = brain ?? (await loadBrain());
-  if (!chosen) {
-    return {
-      ok: false,
-      error: 'Connect Claude or Gemini in Settings first — reading the email needs one of them.',
-    };
-  }
-
   const today = todayKey();
   const weekday = new Date().toLocaleDateString('en-US', { weekday: 'long' });
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local';
-  const system = instruction(today, weekday, zone);
-  const input = text.slice(0, MAX_INPUT);
-
-  let answer: string;
-  try {
-    answer =
-      chosen.id === 'claude'
-        ? await askClaude(chosen.apiKey, system, input)
-        : await askGemini(chosen.apiKey, system, input);
-  } catch (e) {
-    const aborted = e instanceof Error && e.name === 'AbortError';
-    return {
-      ok: false,
-      error: aborted
-        ? 'Reading the email timed out. Try again, or paste just the timetable part.'
-        : e instanceof Error
-          ? e.message
-          : 'Could not reach the model.',
-    };
-  }
+  const asked = await askModel(instruction(today, weekday, zone), text.slice(0, MAX_INPUT), brain);
+  if (!asked.ok) return { ok: false, error: asked.error };
+  const answer = asked.text;
 
   const raw = extractJson(answer);
   if (raw == null) {

@@ -106,7 +106,12 @@ export function TodayHeader({
           {title}
         </Text>
         <View style={styles.subtitleRow}>
-          <Text style={[styles.subtitle, { color: theme.textSecondary }]}>{dateLine}</Text>
+          <Text
+            style={[styles.subtitle, { color: theme.textSecondary }]}
+            numberOfLines={1}
+          >
+            {dateLine}
+          </Text>
           {onPressTitle ? (
             <Ionicons name="chevron-down" size={13} color={theme.textTertiary} />
           ) : null}
@@ -201,15 +206,26 @@ const styles = StyleSheet.create({
   wrap: {
     flexDirection: 'row',
     alignItems: 'center',
+    // Wrap rather than squeeze. Seven controls at a fixed 36pt come to more
+    // than a phone is wide once the "Today" pill joins them, and a title on
+    // flex:1 beside them does not truncate — it is shrunk to nothing, and
+    // "September 8" renders one letter per line down the side of the screen.
+    // Letting the row wrap gives the actions their own line when they cannot
+    // share one, and keeps them beside the title on anything wider.
+    flexWrap: 'wrap',
     paddingHorizontal: 16,
     paddingBottom: 10,
     gap: 12,
   },
-  textCol: { flex: 1 },
+  // A basis wide enough for the longest weekday at this size, so the title
+  // claims its space first and the actions are what moves.
+  textCol: { flexGrow: 1, flexBasis: 190, minWidth: 150 },
   title: { fontSize: 34, fontWeight: '800', letterSpacing: -0.8 },
   subtitle: { fontSize: 13, fontWeight: '500' },
   subtitleRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 2 },
-  actions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  // Pushed right on a line of their own; still hard against the title's
+  // right edge when both fit.
+  actions: { flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: 'auto' },
   iconBtn: {
     width: 36,
     height: 36,

@@ -27,6 +27,42 @@ import { useTasks } from '../store/tasks';
 /** Which schedule has already been dealt with, by the relay's own stamp. */
 const CURSOR_KEY = 'dayflow.schedule.importedAt';
 
+/**
+ * What happened last time, in a sentence.
+ *
+ * A background job that fails silently is indistinguishable from one that
+ * was never asked to run, and "nothing appeared on my calendar" is not a
+ * diagnosis. Every outcome — including the boring ones — gets written down
+ * so the import screen can say which of them it was.
+ */
+const STATUS_KEY = 'dayflow.schedule.lastStatus';
+
+export interface ScheduleStatus {
+  at: number;
+  text: string;
+  ok: boolean;
+}
+
+async function note(text: string, ok: boolean): Promise<void> {
+  try {
+    await AsyncStorage.setItem(STATUS_KEY, JSON.stringify({ at: Date.now(), text, ok }));
+  } catch {
+    // Losing the note costs a diagnosis, never a message.
+  }
+}
+
+/** What the last automatic run did, for the import screen to show. */
+export async function lastScheduleStatus(): Promise<ScheduleStatus | null> {
+  try {
+    const raw = await AsyncStorage.getItem(STATUS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as ScheduleStatus;
+    return typeof parsed?.text === 'string' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 async function lastHandled(): Promise<number> {
   try {
     return Number((await AsyncStorage.getItem(CURSOR_KEY)) ?? '0') || 0;
@@ -93,22 +129,39 @@ export async function autoImportSchedule(): Promise<number> {
   if (!useSettings.getState().settings.autoImportSchedule) return 0;
 
   const creds = await loadSmsGateCredentials();
-  if (!creds) return 0;
+  if (!creds) {
+    await note('The relay is not set up, so there is nowhere to collect a schedule from.', false);
+    return 0;
+  }
   const waiting = await fetchRelaySchedule(creds);
-  if (!waiting) return 0;
-  if (waiting.storedAt <= (await lastHandled())) return 0;
+  if (!waiting) {
+    await note('No schedule email has reached the relay yet.', false);
+    return 0;
+  }
+  if (waiting.storedAt <= (await lastHandled())) {
+    await note(`Already read "${waiting.subject || 'the last schedule'}".`, true);
+    return 0;
+  }
 
   const parsed = await parseScheduleEmail(waiting.body);
   if (!parsed.ok) {
     // An email with no timetable in it is a finished job, not a failure to
     // retry every fifteen minutes for a week.
     if (parsed.announcement) await markHandled(waiting.storedAt);
+    await note(parsed.error, parsed.announcement === true);
     return 0;
   }
 
   const added = addScheduleEvents(parsed.events);
   await markHandled(waiting.storedAt);
-  if (added === 0) return 0;
+  if (added === 0) {
+    await note(
+      `Read ${parsed.events.length} item${parsed.events.length === 1 ? '' : 's'}; all of them were already on your calendar.`,
+      true
+    );
+    return 0;
+  }
+  await note(`Added ${added} item${added === 1 ? '' : 's'} from "${waiting.subject}".`, true);
 
   await Notifications.scheduleNotificationAsync({
     content: {

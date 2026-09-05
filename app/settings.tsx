@@ -677,6 +677,16 @@ export default function SettingsScreen() {
               router.push('/schedule-import');
             }}
           />
+          <SettingsRow
+            icon="grid"
+            tint={taskColor('sky').solid}
+            label="Import timetable"
+            sublabel="Turn your class timetable into a repeating week"
+            onPress={() => {
+              tapHaptic();
+              router.push('/timetable-import');
+            }}
+          />
           <View style={styles.block}>
             <Text style={[styles.blockLabel, { color: theme.textTertiary }]}>
               Currency symbol

@@ -20,6 +20,7 @@ import { GlassCard } from '../src/components/glass/GlassCard';
 import { formatDayShort, formatMinutes } from '../src/lib/dates';
 import { selectionHaptic, successHaptic, tapHaptic } from '../src/lib/haptics';
 import { parseScheduleEmail, type ParsedEvent } from '../src/lib/scheduleImport';
+import { lastScheduleStatus, type ScheduleStatus } from '../src/lib/scheduleAuto';
 import { fetchRelaySchedule, type RelaySchedule } from '../src/lib/smsgate';
 import { loadSmsGateCredentials } from '../src/lib/smsgateCredentials';
 import { useSettings } from '../src/store/settings';
@@ -56,6 +57,7 @@ export default function ScheduleImportScreen() {
   const [skipped, setSkipped] = useState<Record<string, boolean>>({});
   const [added, setAdded] = useState<number | null>(null);
   const [waiting, setWaiting] = useState<RelaySchedule | null>(null);
+  const [status, setStatus] = useState<ScheduleStatus | null>(null);
 
   /**
    * A schedule email the relay is already holding. This is the automatic
@@ -65,6 +67,9 @@ export default function ScheduleImportScreen() {
    */
   useEffect(() => {
     let alive = true;
+    lastScheduleStatus().then((s) => {
+      if (alive) setStatus(s);
+    });
     loadSmsGateCredentials()
       .then((creds) => (creds ? fetchRelaySchedule(creds) : null))
       .then((found) => {
@@ -255,6 +260,17 @@ export default function ScheduleImportScreen() {
                   )}
                 </Pressable>
               </View>
+
+              {status ? (
+                <Text
+                  style={[
+                    styles.error,
+                    { color: status.ok ? theme.textTertiary : theme.danger },
+                  ]}
+                >
+                  {`Last automatic check: ${status.text}`}
+                </Text>
+              ) : null}
 
               <GlassCard padding={0}>
                 <View style={styles.autoRow}>
