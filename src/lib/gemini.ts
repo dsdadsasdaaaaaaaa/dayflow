@@ -395,11 +395,19 @@ export async function askOnce(
   apiKey: string,
   system: string,
   user: string,
-  generationConfig: Record<string, unknown> = { temperature: 0, maxOutputTokens: 8192 }
+  opts: { json?: boolean } = {}
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
   const res = await postTurn(apiKey, [{ role: 'user', parts: [{ text: user }] }], [], {
     system,
-    generationConfig,
+    generationConfig: {
+      temperature: 0,
+      maxOutputTokens: 8192,
+      // Asking for JSON rather than hoping for it. Losing this in a refactor
+      // is what turned a working import into "that answer was not a
+      // schedule": told to answer in prose or JSON as it saw fit, the model
+      // reasonably chose prose.
+      ...(opts.json ? { responseMimeType: 'application/json' } : {}),
+    },
   });
   if (!res.ok) return res;
   const parts = res.data.candidates?.[0]?.content?.parts ?? [];

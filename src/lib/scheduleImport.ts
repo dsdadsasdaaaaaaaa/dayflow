@@ -100,24 +100,56 @@ function instruction(today: DayKey, weekday: string, zone: string): string {
   ].join('\n');
 }
 
-/** Read JSON out of an answer that may still have arrived wrapped in prose. */
+/**
+ * Read JSON out of an answer, however it arrived.
+ *
+ * Models are told to return a bare array and mostly do. The failures are all
+ * packaging rather than content — a code fence, a sentence of preamble, the
+ * array wrapped in an object, a trailing comma — and throwing away a correct
+ * schedule because of the wrapper it came in is its own bug.
+ */
 export function extractJson(text: string): unknown {
+  const attempts: string[] = [];
   const trimmed = text.trim();
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    // Models are told not to fence, and mostly do not. When one does, the
-    // array is still in there and throwing away a correct answer over its
-    // packaging would be its own bug.
-    const start = trimmed.indexOf('[');
-    const end = trimmed.lastIndexOf(']');
-    if (start < 0 || end <= start) return null;
-    try {
-      return JSON.parse(trimmed.slice(start, end + 1));
-    } catch {
-      return null;
+  attempts.push(trimmed);
+
+  // ```json ... ``` and friends.
+  const fenced = /```(?:json|javascript)?\s*([\s\S]*?)```/i.exec(trimmed);
+  if (fenced) attempts.push(fenced[1].trim());
+
+  // The outermost array, wherever it starts.
+  const open = trimmed.indexOf('[');
+  const close = trimmed.lastIndexOf(']');
+  if (open >= 0 && close > open) attempts.push(trimmed.slice(open, close + 1));
+
+  // An object with the array inside it, e.g. {"events": [...]}.
+  const objOpen = trimmed.indexOf('{');
+  const objClose = trimmed.lastIndexOf('}');
+  if (objOpen >= 0 && objClose > objOpen) attempts.push(trimmed.slice(objOpen, objClose + 1));
+
+  for (const candidate of attempts) {
+    for (const body of [candidate, candidate.replace(/,\s*([\]}])/g, '$1')]) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        continue;
+      }
+      if (Array.isArray(parsed)) return parsed;
+      // One array inside an object is the answer; anything else is not.
+      if (parsed && typeof parsed === 'object') {
+        const arrays = Object.values(parsed as Record<string, unknown>).filter(Array.isArray);
+        if (arrays.length === 1) return arrays[0];
+      }
     }
   }
+  return null;
+}
+
+/** The first line or so of an answer, for an error that can be acted on. */
+function snippet(text: string): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim();
+  return oneLine.length > 160 ? `${oneLine.slice(0, 160)}…` : oneLine;
 }
 
 /** Is this a real calendar date, not just four digits and two dashes? */
@@ -360,8 +392,8 @@ export async function askModel(
   // Both clients already walk a list of ids and fall back to asking the API
   // what it actually serves; this borrows that rather than repeating it.
   return chosen.id === 'claude'
-    ? askClaudeOnce(chosen.apiKey, system, user)
-    : askGeminiOnce(chosen.apiKey, system, user);
+    ? askClaudeOnce(chosen.apiKey, system, user, { json: true })
+    : askGeminiOnce(chosen.apiKey, system, user, { json: true });
 }
 
 /**
@@ -380,13 +412,34 @@ export async function parseScheduleEmail(
   const today = todayKey();
   const weekday = new Date().toLocaleDateString('en-US', { weekday: 'long' });
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local';
-  const asked = await askModel(instruction(today, weekday, zone), text.slice(0, MAX_INPUT), brain);
-  if (!asked.ok) return { ok: false, error: asked.error };
-  const answer = asked.text;
+  const system = instruction(today, weekday, zone);
+  const input = text.slice(0, MAX_INPUT);
 
-  const raw = extractJson(answer);
+  const asked = await askModel(system, input, brain);
+  if (!asked.ok) return { ok: false, error: asked.error };
+
+  let raw = extractJson(asked.text);
   if (raw == null) {
-    return { ok: false, error: 'That answer was not a schedule. Try again, or paste less of the email.' };
+    // One retry, saying plainly what was wrong with the last answer. Models
+    // fix this immediately when told; failing the whole import over a
+    // sentence of preamble would be a waste of a correct reading.
+    const again = await askModel(
+      `${system}\n\nYour previous answer was not valid JSON. Reply with the JSON array ALONE: no explanation, no code fence, nothing before the "[" or after the "]".`,
+      input,
+      brain
+    );
+    if (again.ok) raw = extractJson(again.text);
+    if (raw == null) {
+      return {
+        ok: false,
+        // Quoting it, because "that was not a schedule" is unactionable —
+        // whether the model refused, asked a question or ran out of room is
+        // the whole diagnosis, and it was being thrown away.
+        error: `The model did not answer with a schedule. It said: "${snippet(
+          again.ok ? again.text : asked.text
+        )}"`,
+      };
+    }
   }
   const { events, dropped } = validateEvents(raw);
   if (events.length === 0) {

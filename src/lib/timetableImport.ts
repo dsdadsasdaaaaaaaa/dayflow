@@ -1,6 +1,6 @@
 import type { DayKey, Task } from '../types';
 import { addDays, fromDayKey, todayKey } from './dates';
-import { askModel, timeInText } from './scheduleImport';
+import { askModel, extractJson, timeInText } from './scheduleImport';
 import type { BrainChoice } from './secretaryBrain';
 
 /**
@@ -158,19 +158,16 @@ export async function parseTimetable(
   const asked = await askModel(SYSTEM, input.slice(0, MAX_INPUT), brain);
   if (!asked.ok) return { ok: false, error: asked.error };
 
-  let raw: unknown = null;
-  try {
-    raw = JSON.parse(asked.text.trim());
-  } catch {
-    const start = asked.text.indexOf('[');
-    const end = asked.text.lastIndexOf(']');
-    if (start >= 0 && end > start) {
-      try {
-        raw = JSON.parse(asked.text.slice(start, end + 1));
-      } catch {
-        raw = null;
-      }
-    }
+  let raw = extractJson(asked.text);
+  if (raw == null) {
+    // Same one retry as the newsletter reader, for the same reason: a
+    // sentence of preamble is not worth losing a correct reading over.
+    const again = await askModel(
+      `${SYSTEM}\n\nYour previous answer was not valid JSON. Reply with the JSON array ALONE: no explanation, no code fence, nothing before the "[" or after the "]".`,
+      input.slice(0, MAX_INPUT),
+      brain
+    );
+    if (again.ok) raw = extractJson(again.text);
   }
   if (raw == null) {
     return { ok: false, error: 'That did not come back as a timetable. Try pasting just the grid.' };

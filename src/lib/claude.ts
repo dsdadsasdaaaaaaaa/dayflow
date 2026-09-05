@@ -214,19 +214,28 @@ async function postTurn(
 export async function askOnce(
   apiKey: string,
   system: string,
-  user: string
+  user: string,
+  opts: { json?: boolean } = {}
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
-  const res = await postTurn(apiKey, [{ role: 'user', content: user }], [], {
+  const messages: ClaudeMessage[] = [{ role: 'user', content: user }];
+  // Putting the opening bracket in the model's own mouth. It can only
+  // continue from there, so there is no room for "Here is the schedule you
+  // asked for:" in front of it — the single most common way a JSON answer
+  // arrives unparseable.
+  if (opts.json) messages.push({ role: 'assistant', content: '[' });
+  const res = await postTurn(apiKey, messages, [], {
     system,
     maxTokens: 8192,
     temperature: 0,
   });
   if (!res.ok) return res;
-  const text = (res.data.content ?? [])
+  const body = (res.data.content ?? [])
     .filter(isText)
     .map((b) => b.text)
     .join('')
     .trim();
+  // The prefill is not echoed back, so it has to be put in front again.
+  const text = opts.json && body && !body.startsWith('[') ? `[${body}` : body;
   return text ? { ok: true, text } : { ok: false, error: 'Claude answered with nothing.' };
 }
 
