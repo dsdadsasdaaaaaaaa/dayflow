@@ -14,9 +14,11 @@
  *      under Settings -> Forwarding.)
  *   2. In your PERSONAL account, go to script.google.com -> New project.
  *   3. Paste this whole file in, replacing what is there.
- *   4. Run `forwardLatestSchedule` once. Google will ask for permission to
- *      read your Gmail; that permission is used by this script only. Check
- *      the log — it says which email it found and whether the relay took it.
+ *   4. Press Run. Google will ask for permission to read your Gmail; that
+ *      permission is used by this script only. Check the log — it names the
+ *      email it found and says whether the relay took it. (The dropdown
+ *      beside Run should say forwardLatestSchedule; it is first in the file
+ *      so that it is the default.)
  *   5. Triggers (the clock icon) -> Add trigger -> forwardLatestSchedule,
  *      time-driven, week timer, Saturday morning. The newsletter goes out
  *      Friday afternoon, so by then it is always waiting.
@@ -49,6 +51,63 @@ var SECRET = '473b71b56fd1d8224a42965ff4a15c2b515d4973a4fbcba0';
 var DAYS = 10;
 
 /**
+ * ---------------------------------------------------------------------------
+ * THIS is the function to run. The editor's Run button uses whichever function
+ * comes first in the file, so this one does — running a helper on its own only
+ * produces "Cannot read properties of undefined".
+ * ---------------------------------------------------------------------------
+ */
+function forwardLatestSchedule() {
+  var threads = GmailApp.search('from:(' + SENDER + ') newer_than:' + DAYS + 'd', 0, 15);
+  var messages = [];
+  for (var t = 0; t < threads.length; t++) {
+    messages = messages.concat(threads[t].getMessages());
+  }
+  if (!messages.length) {
+    Logger.log('Nothing from ' + SENDER + ' in the last ' + DAYS + ' days.');
+    return;
+  }
+  messages.sort(function (a, b) {
+    return b.getDate().getTime() - a.getDate().getTime();
+  });
+
+  var chosen = null;
+  var body = '';
+  for (var m = 0; m < messages.length; m++) {
+    var text = readBody(messages[m]);
+    if (looksLikeSchedule(text)) {
+      chosen = messages[m];
+      body = text;
+      break;
+    }
+  }
+  if (!chosen) {
+    // Better to leave last week's schedule in place than to overwrite it
+    // with a notice about a bake sale.
+    Logger.log(
+      'Found ' + messages.length + ' email(s), none with a schedule grid. Leaving the relay as it is.'
+    );
+    return;
+  }
+
+  var res = UrlFetchApp.fetch(RELAY + '/schedule/' + encodeURIComponent(SECRET), {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify({
+      body: body,
+      subject: chosen.getSubject(),
+      from: chosen.getFrom(),
+      sentAt: chosen.getDate().getTime(),
+    }),
+    muteHttpExceptions: true,
+  });
+  Logger.log(
+    'Sent "' + chosen.getSubject() + '" (' + body.length + ' chars). ' +
+      'Relay answered ' + res.getResponseCode() + ': ' + res.getContentText()
+  );
+}
+
+/**
  * HTML to text, keeping the table shape.
  *
  * This is the part that decides whether an entry lands on the right day. The
@@ -60,7 +119,7 @@ var DAYS = 10;
  */
 function htmlToText(html) {
   return (
-    html
+    String(html || '')
       .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, ' ')
       // A line break INSIDE a cell must not become a line break in the text.
       // The grid's meaning is positional — third cell means Wednesday — and a
@@ -116,54 +175,4 @@ function readBody(message) {
     if (text.length > 40) return text;
   }
   return message.getPlainBody();
-}
-
-function forwardLatestSchedule() {
-  var threads = GmailApp.search('from:(' + SENDER + ') newer_than:' + DAYS + 'd', 0, 15);
-  var messages = [];
-  for (var t = 0; t < threads.length; t++) {
-    messages = messages.concat(threads[t].getMessages());
-  }
-  if (!messages.length) {
-    Logger.log('Nothing from ' + SENDER + ' in the last ' + DAYS + ' days.');
-    return;
-  }
-  messages.sort(function (a, b) {
-    return b.getDate().getTime() - a.getDate().getTime();
-  });
-
-  var chosen = null;
-  var body = '';
-  for (var m = 0; m < messages.length; m++) {
-    var text = readBody(messages[m]);
-    if (looksLikeSchedule(text)) {
-      chosen = messages[m];
-      body = text;
-      break;
-    }
-  }
-  if (!chosen) {
-    // Better to leave last week's schedule in place than to overwrite it
-    // with a notice about a bake sale.
-    Logger.log(
-      'Found ' + messages.length + ' email(s), none with a schedule grid. Leaving the relay as it is.'
-    );
-    return;
-  }
-
-  var res = UrlFetchApp.fetch(RELAY + '/schedule/' + encodeURIComponent(SECRET), {
-    method: 'post',
-    contentType: 'application/json',
-    payload: JSON.stringify({
-      body: body,
-      subject: chosen.getSubject(),
-      from: chosen.getFrom(),
-      sentAt: chosen.getDate().getTime(),
-    }),
-    muteHttpExceptions: true,
-  });
-  Logger.log(
-    'Sent "' + chosen.getSubject() + '" (' + body.length + ' chars). ' +
-      'Relay answered ' + res.getResponseCode() + ': ' + res.getContentText()
-  );
 }
