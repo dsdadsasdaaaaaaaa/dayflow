@@ -64,15 +64,43 @@ var DAYS = 10;
  * ---------------------------------------------------------------------------
  */
 function forwardLatestSchedule() {
-  var threads = GmailApp.search('from:(' + SENDER + ') newer_than:' + DAYS + 'd', 0, 15);
+  // Look for the SCHEDULE, not for the sender.
+  //
+  // Who an email is from turns out not to survive the trip. Forwarded by a
+  // Gmail filter it keeps the school's address; forwarded by hand it arrives
+  // from you, and a sender search then matches nothing while looking exactly
+  // like broken forwarding. The school also sends through Constant Contact,
+  // so even the untouched article is from a ccsend.com address. What does not
+  // change is that a schedule email contains a schedule, so that is the
+  // question asked first; the sender is only a fallback.
+  var queries = [];
+  for (var q = 0; q < SCHEDULE_MARKERS.length; q++) {
+    queries.push('"' + SCHEDULE_MARKERS[q] + '" newer_than:' + DAYS + 'd');
+  }
+  queries.push('from:(' + SENDER + ') newer_than:' + DAYS + 'd');
+  queries.push('(' + SENDER + ') newer_than:' + DAYS + 'd');
+
   var messages = [];
-  for (var t = 0; t < threads.length; t++) {
-    messages = messages.concat(threads[t].getMessages());
+  var seen = {};
+  for (var i = 0; i < queries.length; i++) {
+    var threads = GmailApp.search(queries[i], 0, 15);
+    for (var t = 0; t < threads.length; t++) {
+      var inThread = threads[t].getMessages();
+      for (var m = 0; m < inThread.length; m++) {
+        var id = inThread[m].getId();
+        if (seen[id]) continue;
+        seen[id] = true;
+        messages.push(inThread[m]);
+      }
+    }
   }
   if (!messages.length) {
-    Logger.log('Nothing from ' + SENDER + ' in the last ' + DAYS + ' days.');
+    Logger.log(
+      'No candidate emails in the last ' + DAYS + ' days. Tried: ' + queries.join('  /  ')
+    );
     return;
   }
+  Logger.log('Checking ' + messages.length + ' email(s) for a schedule grid.');
   messages.sort(function (a, b) {
     return b.getDate().getTime() - a.getDate().getTime();
   });
@@ -91,7 +119,8 @@ function forwardLatestSchedule() {
     // Better to leave last week's schedule in place than to overwrite it
     // with a notice about a bake sale.
     Logger.log(
-      'Found ' + messages.length + ' email(s), none with a schedule grid. Leaving the relay as it is.'
+      'Found ' + messages.length + ' email(s), none containing a schedule grid. ' +
+        'Newest was "' + messages[0].getSubject() + '". Leaving the relay as it is.'
     );
     return;
   }
