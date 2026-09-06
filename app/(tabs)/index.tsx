@@ -1,6 +1,7 @@
+import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AppState, ScrollView, StyleSheet, View } from 'react-native';
+import { AppState, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { EmptyState } from '../../src/components/EmptyState';
 import { Fab } from '../../src/components/Fab';
@@ -13,6 +14,7 @@ import { GapButton } from '../../src/components/timeline/GapButton';
 import { HourGrid, GUTTER_WIDTH } from '../../src/components/timeline/HourGrid';
 import { LiveMeetingBanner } from '../../src/components/timeline/LiveMeetingBanner';
 import { NowLine } from '../../src/components/timeline/NowLine';
+import { SchoolBand } from '../../src/components/timeline/SchoolBand';
 import {
   ReplanChip,
   ReplanSheet,
@@ -28,6 +30,7 @@ import { WeekEarningsChip } from '../../src/components/week/WeekEarningsChip';
 import {
   computeLanes,
   findGaps,
+  SCHOOL_LANE_PCT,
   mergeIntervals,
   MINUTE_SCALE,
   MIN_BLOCK_HEIGHT,
@@ -161,12 +164,19 @@ export default function TodayScreen() {
     const all = instancesForDay(tasks, selectedDay);
     const allDay = all.filter((i) => i.task.allDay || i.task.startMinutes == null);
     const timed = all.filter((i) => !i.task.allDay && i.task.startMinutes != null);
+    // Classes are not things you do, they are where you have to be. Counting
+    // them made the summary read "0 of 8 done, 8h 34m planned" on a day whose
+    // actual plan was one errand — a number that is true, useless, and
+    // discouraging. The day's own tally counts what is left to the person.
+    const mine = all.filter((i) => !isSchoolTask(i.task));
+    const mineTimed = timed.filter((i) => !isSchoolTask(i.task));
     return {
       all,
       allDay,
       timed,
-      doneCount: all.filter((i) => i.completed).length,
-      plannedMinutes: timed.reduce((sum, i) => sum + i.task.durationMinutes, 0),
+      doneCount: mine.filter((i) => i.completed).length,
+      totalCount: mine.length,
+      plannedMinutes: mineTimed.reduce((sum, i) => sum + i.task.durationMinutes, 0),
     };
   }, [tasks, selectedDay]);
 
@@ -188,10 +198,43 @@ export default function TodayScreen() {
     [events, winStart, winEnd]
   );
 
+  /**
+   * Days whose classes the user has opened up. Collapsed is the default and
+   * the point: a timetable is the same eight blocks every week, and drawing
+   * them full size buries the two things that are actually different about
+   * today. Per day rather than global, so opening Monday does not commit
+   * anyone to opening every Monday.
+   */
+  const [expandedSchool, setExpandedSchool] = useState<Record<DayKey, boolean>>({});
+
   // Overlap clusters → side-by-side columns; plus gap detection + free time.
-  const { blocks, gaps, freeMinutes } = useMemo(() => {
+  const { blocks, gaps, freeMinutes, schoolBand, schoolExpandedTop } = useMemo(() => {
     const maxStart = Math.max(winStart, winEnd - MIN_LAYOUT_MINUTES);
-    const items = visibleTimed
+    // Three or more classes is a school day rather than a couple of lessons,
+    // and a school day is worth one block instead of eight.
+    const schoolInstances = visibleTimed
+      .filter((i) => isSchoolTask(i.task) && i.task.startMinutes != null)
+      .sort((a, b) => (a.task.startMinutes ?? 0) - (b.task.startMinutes ?? 0));
+    const collapse = schoolInstances.length >= 3 && !expandedSchool[selectedDay];
+    const band = collapse
+      ? {
+          classes: schoolInstances,
+          start: Math.max(winStart, schoolInstances[0].task.startMinutes as number),
+          end: Math.min(
+            winEnd,
+            Math.max(
+              ...schoolInstances.map(
+                (i) => (i.task.startMinutes as number) + i.task.durationMinutes
+              )
+            )
+          ),
+        }
+      : null;
+    const laidOut = collapse
+      ? visibleTimed.filter((i) => !isSchoolTask(i.task) || i.task.startMinutes == null)
+      : visibleTimed;
+
+    const items = laidOut
       .map((instance) => {
         const raw = instance.task.startMinutes ?? winStart;
         const start = Math.min(Math.max(raw, winStart), maxStart);
@@ -250,8 +293,14 @@ export default function TodayScreen() {
       free = Math.max(0, Math.round(f));
     }
 
-    return { blocks: positioned, gaps: gapList, freeMinutes: free };
-  }, [visibleTimed, timedEvents, winStart, winEnd, todaySelected, nowMin]);
+    // Where to hang the "hide" chip when the classes are showing.
+    const expandedTop =
+      !collapse && schoolInstances.length >= 3
+        ? (Math.max(winStart, schoolInstances[0].task.startMinutes as number) - winStart) *
+          MINUTE_SCALE
+        : null;
+    return { schoolBand: band, schoolExpandedTop: expandedTop, blocks: positioned, gaps: gapList, freeMinutes: free };
+  }, [visibleTimed, timedEvents, winStart, winEnd, todaySelected, nowMin, expandedSchool, selectedDay]);
 
   // ── Replan: unfinished non-recurring tasks scheduled before today ─────────
   // todayK is read on every render (the 30s now-tick re-renders us), so the
@@ -463,7 +512,7 @@ export default function TodayScreen() {
       />
       <SummaryRow
         doneCount={dayData.doneCount}
-        totalCount={dayData.all.length}
+        totalCount={dayData.totalCount}
         plannedMinutes={dayData.plannedMinutes}
         freeMinutes={freeMinutes}
         right={<WeekEarningsChip onPress={() => router.push('/stats')} />}
@@ -536,6 +585,47 @@ export default function TodayScreen() {
                   />
                 );
               })}
+              {schoolBand ? (
+                <SchoolBand
+                  top={(schoolBand.start - winStart) * MINUTE_SCALE}
+                  height={Math.max(
+                    MIN_BLOCK_HEIGHT,
+                    (schoolBand.end - schoolBand.start) * MINUTE_SCALE
+                  )}
+                  widthPct={blocks.length > 0 ? SCHOOL_LANE_PCT : 100}
+                  classes={schoolBand.classes}
+                  startMinutes={schoolBand.start}
+                  endMinutes={schoolBand.end}
+                  nowMinutes={todaySelected ? nowMin : null}
+                  onPress={() => {
+                    tapHaptic();
+                    setExpandedSchool((m) => ({ ...m, [selectedDay]: true }));
+                  }}
+                />
+              ) : null}
+              {schoolExpandedTop != null ? (
+                <Pressable
+                  onPress={() => {
+                    tapHaptic();
+                    setExpandedSchool((m) => ({ ...m, [selectedDay]: false }));
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Hide the school day"
+                  style={({ pressed }) => [
+                    styles.hideSchool,
+                    {
+                      top: Math.max(0, schoolExpandedTop - 24),
+                      backgroundColor: theme.surface,
+                      opacity: pressed ? 0.7 : 1,
+                    },
+                  ]}
+                >
+                  <Ionicons name="chevron-collapse-outline" size={12} color={theme.textSecondary} />
+                  <Text style={[styles.hideSchoolLabel, { color: theme.textSecondary }]}>
+                    Hide school
+                  </Text>
+                </Pressable>
+              ) : null}
               {blocks.map((b) => (
                 <DraggableTaskBlock
                   key={b.instance.task.id}
@@ -624,6 +714,18 @@ export default function TodayScreen() {
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
+  hideSchool: {
+    position: 'absolute',
+    left: 0,
+    zIndex: 5,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+  },
+  hideSchoolLabel: { fontSize: 11, fontWeight: '700' },
   grid: { marginTop: 6 },
   scrollEdge: {
     borderBottomWidth: StyleSheet.hairlineWidth,
