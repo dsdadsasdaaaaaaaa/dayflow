@@ -70,8 +70,19 @@ interface ConversationRow {
   text: string;
 }
 /** Messages returned per get_conversation call. */
-const DEFAULT_CONVERSATION_LIMIT = 20;
-const MAX_CONVERSATION_LIMIT = 50;
+/**
+ * How much of a thread get_conversation hands back.
+ *
+ * Twenty messages was a window, not a conversation. Asking about someone
+ * whose history runs to eighty and getting the last twenty meant the
+ * assistant confidently described a relationship it had seen a quarter of —
+ * the price agreed in March, the reason they stopped coming, the day they
+ * said never works, all just outside the frame and invisible as an absence.
+ * Reading a whole thread is one tool call either way, so the default is now
+ * most threads entire and the ceiling is the whole thing.
+ */
+const DEFAULT_CONVERSATION_LIMIT = 80;
+const MAX_CONVERSATION_LIMIT = 500;
 
 // -------------------------------------------------------------- proposals
 
@@ -229,7 +240,7 @@ const NOTES_TOOL: ToolSpec = {
 const CONVERSATION_TOOL: ToolSpec = {
   name: 'get_conversation',
   description:
-    "The actual back-and-forth with one client, newest last, by label. The user has explicitly allowed you to read their messages. Names, phone numbers and emails inside the text are still replaced with labels or hidden. Every row names its speaker: the client label for their messages, or the word you for the ones the user sent. Check it on every row. Half of any thread was written by the user, so crediting the client with what the user wrote, or the reverse, produces confident nonsense. Use this to understand what was actually said — what they asked for, what they agreed to, why they went quiet — instead of guessing from timing alone. Quote at most a short phrase back; summarize rather than reciting.",
+    "The whole back-and-forth with one person, newest last, by label. It works for anyone in the inbox, saved client or not. Reading a thread entire costs the same one call as reading the end of it, so read it entire — raise `limit` and take the lot when a thread is long. What matters is usually not in the last few messages: the price agreed months ago, the reason they stopped coming, the day they said never works. The user has explicitly allowed you to read their messages. Names, phone numbers and emails inside the text are still replaced with labels or hidden. Every row names its speaker: the client label for their messages, or the word you for the ones the user sent. Check it on every row. Half of any thread was written by the user, so crediting the client with what the user wrote, or the reverse, produces confident nonsense. Use this to understand what was actually said — what they asked for, what they agreed to, why they went quiet — instead of guessing from timing alone. Quote at most a short phrase back; summarize rather than reciting.",
   parameters: {
     type: 'object',
     properties: {
@@ -239,7 +250,7 @@ const CONVERSATION_TOOL: ToolSpec = {
       },
       limit: {
         type: 'integer',
-        description: `How many recent messages to read (default ${DEFAULT_CONVERSATION_LIMIT}, max ${MAX_CONVERSATION_LIMIT}).`,
+        description: `How many of the most recent messages to read (default ${DEFAULT_CONVERSATION_LIMIT}, max ${MAX_CONVERSATION_LIMIT}, which is effectively the whole thread). Prefer the maximum for anything you are about to draft from or make a claim about.`,
       },
     },
     required: ['client'],
@@ -1161,9 +1172,16 @@ function toolGetConversation(
 }
 
 /** Caps for the whole-inbox tools. Bulk reading is useful; unbounded is not. */
-const MAX_SCAN_THREADS = 40;
-const MAX_SCAN_PER_THREAD = 8;
-const MAX_SEARCH_HITS = 40;
+/**
+ * Ceilings for the inbox-wide tools.
+ *
+ * Raised for the same reason as the conversation limit: these are what the
+ * assistant reaches for when a question spans people, and a capped answer to
+ * "who is waiting on me" is a wrong answer wearing a caveat.
+ */
+const MAX_SCAN_THREADS = 150;
+const MAX_SCAN_PER_THREAD = 25;
+const MAX_SEARCH_HITS = 150;
 const SCAN_DEFAULT_DAYS = 30;
 
 /** One conversation, flattened, with everything the tools need to describe it. */
@@ -1371,16 +1389,42 @@ function toolSearchMessages(
  * have covered ten other people. Tiering this way roughly triples how many
  * clients fit in the same space.
  */
+/** Quote the whole thread, however long it is. */
+const FULL_THREAD = Number.MAX_SAFE_INTEGER;
+
 const DIGEST_TIERS = [
-  { withinDays: 3, messages: 5, label: 'active' },
-  { withinDays: 14, messages: 3, label: 'recent' },
-  { withinDays: 30, messages: 1, label: 'cooling' },
+  // A fortnight, in full. Summarizing this window was costing exactly the
+  // thing the assistant is for: a stranger's three messages got clipped to
+  // one, the assistant never saw them ask about Thursday, and a booking that
+  // was there to be made was not suggested. Everything inside two weeks is
+  // now quoted whole.
+  { withinDays: 14, messages: FULL_THREAD, label: 'last two weeks, in full' },
+  { withinDays: 30, messages: 2, label: 'cooling' },
 ] as const;
 
 /** Beyond the last tier: named and summarized, but never quoted. */
 const DIGEST_DORMANT_DAYS = 240;
-const DIGEST_MAX_THREADS = 60;
-const DIGEST_BODY_CHARS = 170;
+/**
+ * Threads quoted before the rest are only named.
+ *
+ * Generous on purpose. The old cap of sixty was written when each thread
+ * cost three lines; the reason to have a cap at all is a runaway, not
+ * tidiness, and a conversation dropped here is one the assistant will never
+ * think to go looking for.
+ */
+const DIGEST_MAX_THREADS = 200;
+const DIGEST_BODY_CHARS = 240;
+
+/**
+ * Ceiling on the whole picture, in characters.
+ *
+ * "Every chat from the past fortnight" is the instruction, and on an ordinary
+ * fortnight it is easily met. This exists for the fortnight that is not
+ * ordinary — an imported history, a group blast, a bot loop — where the
+ * alternative to a limit is a request too large to send at all. When it
+ * bites, the digest says so rather than quietly ending early.
+ */
+const DIGEST_CHAR_BUDGET = 120_000;
 
 const DAY_MS = 24 * 3_600_000;
 
@@ -1470,6 +1514,8 @@ export function buildInboxDigest(map: PseudonymMap): string | null {
   let omitted = 0;
 
   let filtered = 0;
+  let trimmed = 0;
+  let budget = DIGEST_CHAR_BUDGET;
   for (const t of walkAllThreads(map)) {
     const last = t.messages[t.messages.length - 1];
     if (!last) continue;
@@ -1499,13 +1545,24 @@ export function buildInboxDigest(map: PseudonymMap): string | null {
       continue;
     }
 
-    quoted.push(`${head} — ${tier.label}:`);
-    for (const m of t.messages.slice(-tier.messages)) {
+    // Whether they are owed a reply, said outright rather than left to be
+    // worked out from who spoke last. Someone who reached out and was never
+    // answered is the single most actionable row in here, and the most
+    // easily missed when it looks like every other row.
+    const owedReply = last.direction === 'in';
+    quoted.push(`${head}${owedReply ? ' — UNANSWERED, they wrote last' : ''} — ${tier.label}:`);
+    const window = tier.messages === FULL_THREAD ? t.messages : t.messages.slice(-tier.messages);
+    for (const m of window) {
       const speaker = m.direction === 'in' ? t.label : 'you';
       const text = redactText(m.body.trim(), map).slice(0, DIGEST_BODY_CHARS);
-      if (text) {
-        quoted.push(`  ${speaker} (${quietFor(now - m.sentAt)} ago): ${text}`);
+      if (!text) continue;
+      const line = `  ${speaker} (${quietFor(now - m.sentAt)} ago): ${text}`;
+      if (budget - line.length < 0) {
+        trimmed++;
+        break;
       }
+      budget -= line.length;
+      quoted.push(line);
     }
   }
 
@@ -1520,10 +1577,14 @@ export function buildInboxDigest(map: PseudonymMap): string | null {
   return [
     todayLine(map),
     'CURRENT INBOX (loaded automatically, not something the user typed).',
-    `Recent conversations in more detail, older ones in less: up to ${DIGEST_TIERS[0].messages} messages for anything from the last ${DIGEST_TIERS[0].withinDays} days, fewer as they get older, and a single summary line past a month. Each quoted line names who wrote it: a client label, or "you" for the user.`,
+    `EVERY conversation from the last ${DIGEST_TIERS[0].withinDays} days is quoted here IN FULL — every message, both directions. Older ones are thinner: two messages up to a month, a single summary line beyond that. Each quoted line names who wrote it: a client label, or "you" for the user.`,
+    'Rows marked UNANSWERED are people who wrote and were never replied to. Treat those as the first thing worth raising, whether or not they are a saved client.',
     omitted > 0
       ? `${omitted} further conversations did not fit — use scan_conversations or search_messages if the answer may involve them.`
       : 'This covers every conversation with any activity in the past few months.',
+    trimmed > 0
+      ? `${trimmed} conversation${trimmed === 1 ? ' was' : 's were'} cut short to fit. Read them with get_conversation before relying on them.`
+      : '',
     filtered > 0
       ? `${filtered} more were left out as blocked contacts or automated senders. They are still reachable through search_messages if a question genuinely needs them.`
       : '',
