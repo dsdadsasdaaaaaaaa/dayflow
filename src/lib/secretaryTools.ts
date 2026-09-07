@@ -119,12 +119,12 @@ const READ_TOOLS: ToolSpec[] = [
   {
     name: 'list_clients',
     description:
-      'List every client with their booking rhythm and money position. Clients are identified by pseudonymous labels only. Returns meetings completed, days since last seen, median gap between meetings, typical rate, outstanding balance, and status. Status is one of: "client" (an established regular), "lead" (enquired, never booked), or "blocked" (the user deliberately cut this person off). NEVER suggest contacting, drafting to, or booking anyone whose status is "blocked", and do not include them in lists of people to reach out to. If the user asks about them directly, answer, but say plainly that they are blocked.',
+      'Everyone the user deals with, by pseudonymous label: booked clients first, then everyone who has only ever exchanged messages. Booked rows carry meetings completed, days since last seen, median gap, typical rate and outstanding balance. Rows with neverBooked true have never had a meeting — they texted this number and that is all. They are real people and usually the most valuable ones to raise: they carry lastMessageDaysAgo and awaitingReply, and awaitingReply true means they wrote and nobody answered, which is a booking sitting unclaimed. Status is "client" (an established regular), "lead" (enquired, never booked), "unknown" (messaged, never saved as a contact), or "blocked". NEVER suggest contacting, drafting to, or booking anyone whose status is "blocked", and leave them out of any list of people to reach out to. If asked about them directly, answer, but say plainly that they are blocked.',
   },
   {
     name: 'find_rebook_candidates',
     description:
-      'Regular clients who are overdue against their own booking rhythm and have nothing on the books. Use this to answer "who should I reach out to". Returns the label, days since last meeting, their median gap and how many days overdue they are.',
+      'Who to reach out to, in two groups. `candidates` are regular clients overdue against their own booking rhythm with nothing on the books: label, days since last meeting, median gap, days overdue. `unclaimed` are people who have messaged but never booked — prospects, enquiries, one-offs who never came back — with lastMessageDaysAgo and awaitingReply. Answer with BOTH. awaitingReply true means they wrote and were never answered, which is the strongest reason on this list: a regular who is two days late will probably come anyway, while someone who asked a question three weeks ago and heard nothing is a booking already lost unless something is done.',
     parameters: {
       type: 'object',
       properties: {
@@ -502,7 +502,51 @@ interface ClientRow {
   medianGapDays: number | null;
   typicalRate: number;
   outstanding: number;
-  status: ClientStatus;
+  status: ClientStatus | 'unknown';
+  /** True for someone who has only ever messaged — no booking, ever. */
+  neverBooked: boolean;
+  /** Days since anything was said either way; null for booked clients. */
+  lastMessageDaysAgo: number | null;
+  /** They wrote last and nobody answered. */
+  awaitingReply: boolean;
+}
+
+/**
+ * Everyone the user has ever exchanged a message with who is not a booked
+ * client — and the reason they are worth naming.
+ *
+ * clientProfiles is built from MEETINGS, so it contains only people who have
+ * been booked. That made the roster a list of past customers rather than a
+ * list of people, and anyone who texted asking about a booking simply was
+ * not in it: not filtered out, never present. The assistant then answered
+ * "who should I contact" perfectly correctly from a set that excluded every
+ * prospect.
+ */
+function inboxOnlyRows(map: PseudonymMap, known: Set<string>): ClientRow[] {
+  const now = Date.now();
+  const rows: ClientRow[] = [];
+  for (const t of walkAllThreads(map)) {
+    if (known.has(t.label)) continue;
+    if (t.status === 'blocked' || looksAutomated(t)) continue;
+    const last = t.messages[t.messages.length - 1];
+    if (!last) continue;
+    known.add(t.label);
+    rows.push({
+      label: t.label,
+      meetingsDone: 0,
+      lastSeenDaysAgo: null,
+      medianGapDays: null,
+      typicalRate: 0,
+      outstanding: 0,
+      status: t.status,
+      neverBooked: true,
+      lastMessageDaysAgo: Math.floor((now - last.sentAt) / DAY_MS),
+      awaitingReply: last.direction === 'in',
+    });
+  }
+  return rows.sort(
+    (a, b) => (a.lastMessageDaysAgo ?? 1e9) - (b.lastMessageDaysAgo ?? 1e9)
+  );
 }
 
 function toolListClients(map: PseudonymMap): { clients: ClientRow[] } {
@@ -512,7 +556,7 @@ function toolListClients(map: PseudonymMap): { clients: ClientRow[] } {
   const today = todayKey();
   const rhythm = rhythmByClient();
 
-  const clients = clientProfiles(tasks, log)
+  const booked = clientProfiles(tasks, log)
     .slice(0, MAX_ROWS)
     .map((p) => ({
       label: map.toPseudo(p.name),
@@ -522,8 +566,12 @@ function toolListClients(map: PseudonymMap): { clients: ClientRow[] } {
       typicalRate: p.rate,
       outstanding: p.outstanding,
       status: effectiveStatus(meta, p.name, p.meetingsDone > 0),
+      neverBooked: false,
+      lastMessageDaysAgo: null,
+      awaitingReply: false,
     }));
-  return { clients };
+  const known = new Set(booked.map((c) => c.label));
+  return { clients: [...booked, ...inboxOnlyRows(map, known).slice(0, MAX_ROWS)] };
 }
 
 interface RebookRow {
@@ -536,7 +584,7 @@ interface RebookRow {
 function toolFindRebookCandidates(
   map: PseudonymMap,
   args: Record<string, unknown>
-): { forDate: DayKey; candidates: RebookRow[] } {
+): { forDate: DayKey; candidates: RebookRow[]; unclaimed: ClientRow[] } {
   const tasks = useTasks.getState().tasks;
   const log = useMeetingSession.getState().log;
   const meta = useClientMeta.getState().meta;
@@ -550,7 +598,21 @@ function toolFindRebookCandidates(
       medianGapDays: round1(r.medianDays),
       overdueDays: r.overdueDays,
     }));
-  return { forDate: coerceDay(args.forDate), candidates };
+
+  // The other half of "who should I reach out to", and the half that was
+  // missing. This tool only knew regulars overdue against their own rhythm —
+  // which is a real answer to a narrower question, and left every person who
+  // enquired and was never booked out of the one thing meant to surface
+  // them. Someone who wrote three weeks ago and got no reply is a better
+  // prospect than a regular who is two days late.
+  const known = new Set(
+    clientProfiles(tasks, log).map((p) => map.toPseudo(p.name))
+  );
+  const unclaimed = inboxOnlyRows(map, known)
+    .filter((r) => r.awaitingReply || (r.lastMessageDaysAgo ?? 0) >= 2)
+    .slice(0, MAX_ROWS);
+
+  return { forDate: coerceDay(args.forDate), candidates, unclaimed };
 }
 
 interface AvailabilityDay {
