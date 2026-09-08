@@ -29,6 +29,7 @@ import { GoalStepper } from '../src/components/settings/GoalStepper';
 import { ImportBackupModal } from '../src/components/settings/ImportBackupModal';
 import { SecretarySection } from '../src/components/settings/SecretarySection';
 import { SettingsRow } from '../src/components/settings/SettingsRow';
+import { shareAuditExport } from '../src/lib/auditExport';
 import { SettingsSection } from '../src/components/settings/SettingsSection';
 import { Stepper } from '../src/components/settings/Stepper';
 import {
@@ -675,6 +676,16 @@ export default function SettingsScreen() {
             onPress={() => {
               tapHaptic();
               router.push('/schedule-import');
+            }}
+          />
+          <SettingsRow
+            icon="bug"
+            tint={taskColor('amber').solid}
+            label="Export for review"
+            sublabel="Your schedule and settings as a file, with names, numbers and messages left out"
+            onPress={() => {
+              tapHaptic();
+              void shareAuditExport();
             }}
           />
           <SettingsRow

@@ -40,6 +40,18 @@ const DISMISSAL = /\bdismissal\b/i;
 const START = /\bstart\b/i;
 
 /**
+ * Is this entry a statement about the day's hours rather than an event?
+ *
+ * "2:25 PM Dismissal" and "10:30 AM Start" are rules: they change when
+ * school ends or begins and are applied to the timetable. They are not
+ * something to attend at 2:25, so they belong on the all-day shelf as a
+ * note about the day, not on the timeline as a half-hour block.
+ */
+export function isRuleMarker(title: string): boolean {
+  return CLOSED.test(title) || DISMISSAL.test(title) || START.test(title);
+}
+
+/**
  * Read the newsletter's entries as amendments, keyed by day.
  *
  * Only entries that state a rule outright are used. Anything else — an

@@ -6,6 +6,7 @@ import { loadSmsGateCredentials } from './smsgateCredentials';
 import { useSettings } from '../store/settings';
 import { useTasks } from '../store/tasks';
 import { applySchoolDayRules, deriveDayRules, rememberDayRules } from './schoolDay';
+import { isRuleMarker } from './schoolDay';
 import { SCHOOL_TAG } from './timetableImport';
 
 /**
@@ -113,8 +114,8 @@ export function addScheduleEvents(events: ParsedEvent[]): number {
     addTask({
       title: e.title,
       date: e.date,
-      allDay: e.startMinutes == null,
-      startMinutes: e.startMinutes,
+      allDay: e.startMinutes == null || isRuleMarker(e.title),
+      startMinutes: isRuleMarker(e.title) ? null : e.startMinutes,
       durationMinutes: e.durationMinutes,
       notes: [e.location, e.notes].filter(Boolean).join('\n'),
       icon: 'school-outline',

@@ -37,6 +37,7 @@ import {
   type Interval,
 } from '../../src/components/timeline/layout';
 import { eventsForDay } from '../../src/lib/calendar';
+import { isRuleMarker } from '../../src/lib/schoolDay';
 import { isSchoolTask } from '../../src/lib/timetableImport';
 import { addDays, isToday, minutesOfDay, todayKey } from '../../src/lib/dates';
 import { successHaptic, tapHaptic } from '../../src/lib/haptics';
@@ -198,24 +199,18 @@ export default function TodayScreen() {
     [events, winStart, winEnd]
   );
 
-  /**
-   * Days whose classes the user has opened up. Collapsed is the default and
-   * the point: a timetable is the same eight blocks every week, and drawing
-   * them full size buries the two things that are actually different about
-   * today. Per day rather than global, so opening Monday does not commit
-   * anyone to opening every Monday.
-   */
-  const [expandedSchool, setExpandedSchool] = useState<Record<DayKey, boolean>>({});
-
   // Overlap clusters → side-by-side columns; plus gap detection + free time.
-  const { blocks, gaps, freeMinutes, schoolBand, schoolExpandedTop } = useMemo(() => {
+  const { blocks, gaps, freeMinutes, schoolBand } = useMemo(() => {
     const maxStart = Math.max(winStart, winEnd - MIN_LAYOUT_MINUTES);
     // Three or more classes is a school day rather than a couple of lessons,
     // and a school day is worth one block instead of eight.
+    // The timetable only — the weekly repeats. A newsletter marker like
+    // "2:25 PM Dismissal" is school-tagged and timed too, but it is not a
+    // period, and counting it stretched the band past the bell it announced.
     const schoolInstances = visibleTimed
-      .filter((i) => isSchoolTask(i.task) && i.task.startMinutes != null)
+      .filter((i) => isSchoolTask(i.task) && i.task.recurrence != null && i.task.startMinutes != null)
       .sort((a, b) => (a.task.startMinutes ?? 0) - (b.task.startMinutes ?? 0));
-    const collapse = schoolInstances.length >= 3 && !expandedSchool[selectedDay];
+    const collapse = schoolInstances.length >= 3;
     const band = collapse
       ? {
           classes: schoolInstances,
@@ -230,9 +225,14 @@ export default function TodayScreen() {
           ),
         }
       : null;
-    const laidOut = collapse
-      ? visibleTimed.filter((i) => !isSchoolTask(i.task) || i.task.startMinutes == null)
-      : visibleTimed;
+    // A dismissal or start marker imported before markers were shelved is
+    // still a timed task; the band already ends at the bell it announces, so
+    // drawing it as a block says the same thing twice.
+    const laidOut = visibleTimed.filter(
+      (i) =>
+        !(collapse && schoolInstances.includes(i)) &&
+        !(isSchoolTask(i.task) && !i.task.recurrence && isRuleMarker(i.task.title))
+    );
 
     const items = laidOut
       .map((instance) => {
@@ -245,22 +245,36 @@ export default function TodayScreen() {
         (a, b) => a.start - b.start || b.end - b.start - (a.end - a.start)
       );
 
+    // A task during school hours sits in a lane to the right of the band,
+    // over it, so the period labels on the left stay readable and the task
+    // is still plainly a task. A task at seven in the evening has nothing
+    // to share with the school day and gets the whole width — the previous
+    // rule laned everything if anything overlapped, which squeezed a 4:30
+    // finish to a sliver because of a gym session at half past five.
+    const overlapsBand = (start: number, end: number) =>
+      band != null && start < band.end && end > band.start;
     const placements = computeLanes(
       items.map(({ start, end, instance }) => ({
         start,
         end,
-        school: isSchoolTask(instance.task),
+        school: !band && isSchoolTask(instance.task),
       }))
     );
-    const positioned: PositionedBlock[] = items.map((it, idx) => ({
-      instance: it.instance,
-      layoutStart: it.start,
-      top: (it.start - winStart) * MINUTE_SCALE,
-      height: Math.max(MIN_BLOCK_HEIGHT, (it.end - it.start) * MINUTE_SCALE),
-      leftPct: placements[idx].leftPct,
-      widthPct: placements[idx].widthPct,
-      narrow: placements[idx].widthPct < 40,
-    }));
+    const positioned: PositionedBlock[] = items.map((it, idx) => {
+      const laned = overlapsBand(it.start, it.end);
+      const base = placements[idx];
+      const span = laned ? 100 - SCHOOL_LANE_PCT - 4 : 100;
+      const origin = laned ? SCHOOL_LANE_PCT + 4 : 0;
+      return {
+        instance: it.instance,
+        layoutStart: it.start,
+        top: (it.start - winStart) * MINUTE_SCALE,
+        height: Math.max(MIN_BLOCK_HEIGHT, (it.end - it.start) * MINUTE_SCALE),
+        leftPct: origin + (base.leftPct / 100) * span,
+        widthPct: (base.widthPct / 100) * span,
+        narrow: (base.widthPct / 100) * span < 40,
+      };
+    });
 
     // Occupied = tasks + timed calendar events, merged. Uses TRUE durations
     // (not the min layout height) so free-time and gap math stay honest.
@@ -293,14 +307,8 @@ export default function TodayScreen() {
       free = Math.max(0, Math.round(f));
     }
 
-    // Where to hang the "hide" chip when the classes are showing.
-    const expandedTop =
-      !collapse && schoolInstances.length >= 3
-        ? (Math.max(winStart, schoolInstances[0].task.startMinutes as number) - winStart) *
-          MINUTE_SCALE
-        : null;
-    return { schoolBand: band, schoolExpandedTop: expandedTop, blocks: positioned, gaps: gapList, freeMinutes: free };
-  }, [visibleTimed, timedEvents, winStart, winEnd, todaySelected, nowMin, expandedSchool, selectedDay]);
+    return { schoolBand: band, blocks: positioned, gaps: gapList, freeMinutes: free };
+  }, [visibleTimed, timedEvents, winStart, winEnd, todaySelected, nowMin]);
 
   // ── Replan: unfinished non-recurring tasks scheduled before today ─────────
   // todayK is read on every render (the 30s now-tick re-renders us), so the
@@ -592,39 +600,13 @@ export default function TodayScreen() {
                     MIN_BLOCK_HEIGHT,
                     (schoolBand.end - schoolBand.start) * MINUTE_SCALE
                   )}
-                  widthPct={blocks.length > 0 ? SCHOOL_LANE_PCT : 100}
+                  widthPct={100}
                   classes={schoolBand.classes}
                   startMinutes={schoolBand.start}
                   endMinutes={schoolBand.end}
                   nowMinutes={todaySelected ? nowMin : null}
-                  onPress={() => {
-                    tapHaptic();
-                    setExpandedSchool((m) => ({ ...m, [selectedDay]: true }));
-                  }}
+                  onPressClass={openEditor}
                 />
-              ) : null}
-              {schoolExpandedTop != null ? (
-                <Pressable
-                  onPress={() => {
-                    tapHaptic();
-                    setExpandedSchool((m) => ({ ...m, [selectedDay]: false }));
-                  }}
-                  accessibilityRole="button"
-                  accessibilityLabel="Hide the school day"
-                  style={({ pressed }) => [
-                    styles.hideSchool,
-                    {
-                      top: Math.max(0, schoolExpandedTop - 24),
-                      backgroundColor: theme.surface,
-                      opacity: pressed ? 0.7 : 1,
-                    },
-                  ]}
-                >
-                  <Ionicons name="chevron-collapse-outline" size={12} color={theme.textSecondary} />
-                  <Text style={[styles.hideSchoolLabel, { color: theme.textSecondary }]}>
-                    Hide school
-                  </Text>
-                </Pressable>
               ) : null}
               {blocks.map((b) => (
                 <DraggableTaskBlock

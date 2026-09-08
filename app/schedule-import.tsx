@@ -24,6 +24,7 @@ import { alreadyHandled, lastScheduleStatus, type ScheduleStatus } from '../src/
 import { fetchRelaySchedule, type RelaySchedule } from '../src/lib/smsgate';
 import { loadSmsGateCredentials } from '../src/lib/smsgateCredentials';
 import { applySchoolDayRules, deriveDayRules, rememberDayRules } from '../src/lib/schoolDay';
+import { isRuleMarker } from '../src/lib/schoolDay';
 import { SCHOOL_TAG } from '../src/lib/timetableImport';
 import { useSettings } from '../src/store/settings';
 import { useTasks } from '../src/store/tasks';
@@ -157,8 +158,8 @@ export default function ScheduleImportScreen() {
       addTask({
         title: e.title,
         date: e.date,
-        allDay: e.startMinutes == null,
-        startMinutes: e.startMinutes,
+        allDay: e.startMinutes == null || isRuleMarker(e.title),
+        startMinutes: isRuleMarker(e.title) ? null : e.startMinutes,
         durationMinutes: e.durationMinutes,
         notes: [e.location, e.notes].filter(Boolean).join('\n'),
         icon: 'school-outline',
