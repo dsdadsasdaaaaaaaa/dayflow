@@ -21,9 +21,11 @@ import { selectionHaptic, successHaptic, tapHaptic } from '../src/lib/haptics';
 import {
   classNote,
   isSchoolTask,
+  isTimetableTask,
   nextWeekday,
   parseTimetable,
   SCHOOL_TAG,
+  TIMETABLE_TAG,
   weeklyOn,
   type ParsedClass,
 } from '../src/lib/timetableImport';
@@ -56,13 +58,7 @@ export default function TimetableImportScreen() {
    * the first lot got dragged out of place by accident, and adding a correct
    * copy alongside a wrong one helps nobody.
    */
-  const existing = useMemo(
-    () =>
-      Object.values(tasks).filter(
-        (t) => isSchoolTask(t) && (t.recurrence?.weekdays?.length ?? 0) > 0
-      ),
-    [tasks]
-  );
+  const existing = useMemo(() => Object.values(tasks).filter(isTimetableTask), [tasks]);
 
   const [raw, setRaw] = useState('');
   const [reading, setReading] = useState(false);
@@ -123,7 +119,20 @@ export default function TimetableImportScreen() {
   }
 
   function addAll() {
-    if (replacing) for (const t of existing) deleteTask(t.id);
+    if (replacing) {
+      for (const t of existing) deleteTask(t.id);
+      // Single days that were split off a class — by a drag, or by an early
+      // bell cutting a period short — are one-offs with a class's name and
+      // no repeat. They are part of the old timetable too, and leaving them
+      // put two Business Leaderships on Labour Day after the last replace.
+      // A newsletter item never shares a name with a class, so the incoming
+      // class names are a safe test.
+      const classNames = new Set(chosen.map((c) => c.title.trim().toLowerCase()));
+      for (const t of Object.values(tasks)) {
+        if (t.recurrence || !isSchoolTask(t)) continue;
+        if (classNames.has(t.title.trim().toLowerCase())) deleteTask(t.id);
+      }
+    }
     for (const c of chosen) {
       addTask({
         title: c.title,
@@ -138,7 +147,7 @@ export default function TimetableImportScreen() {
         notes: classNote(c),
         icon: 'school-outline',
         color: 'sky',
-        tags: [SCHOOL_TAG],
+        tags: [SCHOOL_TAG, TIMETABLE_TAG],
       });
     }
     // Classes that have just arrived know nothing about closures the

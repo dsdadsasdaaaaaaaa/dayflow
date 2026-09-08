@@ -28,6 +28,24 @@ import type { BrainChoice } from './secretaryBrain';
  */
 export const SCHOOL_TAG = 'school';
 
+/**
+ * Marks a task as a timetable class specifically — as opposed to a newsletter
+ * item, which is also school. Replacing a timetable must remove the old
+ * classes and nothing else, and "school" alone could not tell a class from
+ * "Terry Fox Walk".
+ */
+export const TIMETABLE_TAG = 'timetable';
+
+/** Is this a class from the timetable, repeating or a detached single day? */
+export function isTimetableTask(task: Pick<Task, 'tags' | 'icon' | 'recurrence'>): boolean {
+  if (task.tags?.includes(TIMETABLE_TAG)) return true;
+  // Classes imported before the tag existed carry only the icon and a
+  // weekly repeat. Their detached single days carry the icon alone, and are
+  // told apart from newsletter items by the caller, which knows the class
+  // names it is about to write.
+  return isSchoolTask(task) && (task.recurrence?.weekdays?.length ?? 0) > 0;
+}
+
 /** Is this one of ours? Icon is the fallback for anything imported before the tag existed. */
 export function isSchoolTask(task: Pick<Task, 'tags' | 'icon'>): boolean {
   return task.tags?.includes(SCHOOL_TAG) === true || task.icon === 'school-outline';

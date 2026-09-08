@@ -3,7 +3,7 @@ import type { DayKey, Task } from '../types';
 import { taskOccursOn } from './recurrence';
 import type { ParsedEvent } from './scheduleImport';
 import { timeInText } from './scheduleImport';
-import { isSchoolTask } from './timetableImport';
+import { isSchoolTask, SCHOOL_TAG, TIMETABLE_TAG } from './timetableImport';
 import { useTasks } from '../store/tasks';
 
 /**
@@ -175,7 +175,11 @@ export function applySchoolDayRules(rules: Map<DayKey, DayRule>): SchoolDayChang
       // real length, then cut it to the bell.
       const detached = useTasks.getState().detachOccurrence(task.id, day);
       if (detached) {
-        useTasks.getState().updateTask(detached.id, { durationMinutes: action.to });
+        useTasks.getState().updateTask(detached.id, {
+          durationMinutes: action.to,
+          // Still a class, still the timetable's, so a replace sweeps it.
+          tags: Array.from(new Set([...(detached.tags ?? []), SCHOOL_TAG, TIMETABLE_TAG])),
+        });
         changes.shortened++;
         touched = true;
       }

@@ -4,6 +4,7 @@ import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  Linking,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -27,6 +28,7 @@ import {
   type ClientStatus,
 } from '../../store/clientMeta';
 import { useMeetingSession } from '../../store/meetingSession';
+import { normalizePhone } from '../../lib/smsCredentials';
 import { useSettings } from '../../store/settings';
 import { useTasks } from '../../store/tasks';
 import {
@@ -53,6 +55,22 @@ export function startClientCall(
   clientName?: string | null
 ): void {
   const label = clientName ?? formatPhoneDisplay(number);
+  // The phone's own dialer: one tap, the OS asks to confirm, the call
+  // happens. Chosen over the Twilio bridge by default because the bridge
+  // needed a working deployment, a forwarding number and two rings to do
+  // what the dialer does in one, and when any of that was off the user got
+  // an error instead of a call.
+  if (useSettings.getState().settings.callMethod !== 'twilio') {
+    const target = normalizePhone(number);
+    if (!target) {
+      Alert.alert('No number', `There is no phone number saved for ${label}.`);
+      return;
+    }
+    Linking.openURL(`tel:${target}`).catch(() =>
+      Alert.alert('Could not open the dialer', 'This device cannot place calls.')
+    );
+    return;
+  }
   if (!callingEnabled) {
     Alert.alert('Calling is off', 'Turn on calling in Settings → Calling & voicemail first.');
     return;

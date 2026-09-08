@@ -37,6 +37,65 @@ type Busy = 'enable' | 'save' | 'off' | null;
  * number to their own cell, with voicemail fallback. Rides the messaging
  * credentials (keychain) — nothing works until messaging is connected.
  */
+
+/**
+ * Which line a tap on "Call" uses.
+ *
+ * Shown above everything else because it decides whether the rest of the
+ * section applies at all: with the phone's own dialer there is no
+ * forwarding, no voicemail and nothing to deploy.
+ */
+function CallMethodRow() {
+  const theme = useTheme();
+  const method = useSettings((s) => s.settings.callMethod);
+  const update = useSettings((s) => s.update);
+  const options: { key: 'phone' | 'twilio'; label: string; hint: string }[] = [
+    {
+      key: 'phone',
+      label: 'My phone',
+      hint: 'Opens the dialer. Instant, nothing to set up. Clients see this phone\'s number.',
+    },
+    {
+      key: 'twilio',
+      label: 'Work number',
+      hint: 'Rings you first, then bridges through the work number. Clients see the work number.',
+    },
+  ];
+  return (
+    <View style={styles.methodWrap}>
+      <Text style={[styles.fieldLabel, { color: theme.textTertiary }]}>Place calls with</Text>
+      <View style={[styles.methodRow, { backgroundColor: theme.surface }]}>
+        {options.map((o) => {
+          const on = method === o.key;
+          return (
+            <Pressable
+              key={o.key}
+              onPress={() => {
+                selectionHaptic();
+                update({ callMethod: o.key });
+              }}
+              accessibilityRole="button"
+              accessibilityState={{ selected: on }}
+              accessibilityLabel={`Place calls with ${o.label}`}
+              style={[
+                styles.methodOption,
+                on && { backgroundColor: theme.accent },
+              ]}
+            >
+              <Text style={[styles.methodLabel, { color: on ? '#fff' : theme.textSecondary }]}>
+                {o.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+      <Text style={[styles.fieldHint, { color: theme.textTertiary }]}>
+        {options.find((o) => o.key === method)?.hint}
+      </Text>
+    </View>
+  );
+}
+
 export function CallingSection() {
   const theme = useTheme();
 
@@ -242,6 +301,7 @@ export function CallingSection() {
   if (enabled) {
     return (
       <SettingsSection title="Calling & voicemail" caption={CAPTION_ENABLED}>
+        <CallMethodRow />
         <SettingsRow
           icon="call"
           tint={taskColor('emerald').solid}
@@ -296,6 +356,7 @@ export function CallingSection() {
 
   return (
     <SettingsSection title="Calling & voicemail" caption={CAPTION_PITCH}>
+      <CallMethodRow />
       <View style={styles.form}>
         {fields}
         <Pressable
@@ -329,6 +390,10 @@ export function CallingSection() {
 }
 
 const styles = StyleSheet.create({
+  methodWrap: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 4, gap: 6 },
+  methodRow: { flexDirection: 'row', borderRadius: 12, padding: 3, gap: 3 },
+  methodOption: { flex: 1, paddingVertical: 8, borderRadius: 9, alignItems: 'center' },
+  methodLabel: { fontSize: 13, fontWeight: '700' },
   captionRow: {
     paddingHorizontal: 14,
     paddingVertical: 14,

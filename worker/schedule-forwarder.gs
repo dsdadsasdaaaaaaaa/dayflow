@@ -191,6 +191,11 @@ function htmlToText(html) {
       .replace(/(?:;\s*)+/g, '; ')
       // "Monday,<br>September 7" is one heading, not two things.
       .replace(/,\s*;\s*/g, ', ')
+      // Nor is "First Day of School:<br>Special Schedule". A trailing colon
+      // is a label waiting for its value, and the value is the next line;
+      // splitting there made two entries out of one, the first of them a
+      // title with nothing after the colon.
+      .replace(/:\s*;\s*/g, ': ')
       // "Grade 9 Parent Welcome<br>(7:00 PM)" is one entry with its time on
       // the next line, not an entry called "(7:00 PM)". Put the time back on
       // the thing it belongs to before anything reads the two as separate.
