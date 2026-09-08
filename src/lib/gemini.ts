@@ -198,6 +198,8 @@ interface GeminiFunctionCall {
 
 interface GeminiPart {
   text?: string;
+  /** A document or image, base64. */
+  inlineData?: { mimeType: string; data: string };
   functionCall?: GeminiFunctionCall;
   functionResponse?: { name: string; response: Record<string, unknown> };
 }
@@ -395,9 +397,12 @@ export async function askOnce(
   apiKey: string,
   system: string,
   user: string,
-  opts: { json?: boolean } = {}
+  opts: { json?: boolean; document?: { mime: string; data: string } } = {}
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
-  const res = await postTurn(apiKey, [{ role: 'user', parts: [{ text: user }] }], [], {
+  const userParts: GeminiPart[] = opts.document
+    ? [{ inlineData: { mimeType: opts.document.mime, data: opts.document.data } }, { text: user }]
+    : [{ text: user }];
+  const res = await postTurn(apiKey, [{ role: 'user', parts: userParts }], [], {
     system,
     generationConfig: {
       temperature: 0,

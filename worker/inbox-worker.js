@@ -31,6 +31,21 @@ const INBOX_KEY = 'inbox';
 /** The most recent school schedule email, waiting to be read by the app. */
 const SCHEDULE_KEY = 'schedule';
 
+/**
+ * A number the app wants the work phone to dial.
+ *
+ * The work number lives in the Android's SIM, and caller ID comes from the
+ * line a call leaves on, so a call that shows the work number has to leave
+ * from the Android. The app cannot reach the Android directly; it leaves
+ * the number here, and an automation on the Android collects it and dials.
+ * Consumed on read, so a number is dialled once.
+ */
+const CALL_KEY = 'call';
+
+/** Attachments the forwarder sends with a schedule: bell-schedule PDFs. */
+const MAX_ATTACHMENTS = 8;
+const MAX_ATTACHMENT_BYTES = 700_000;
+
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -211,6 +226,16 @@ export default {
       }
       const body = String(payload?.body ?? payload?.text ?? '').slice(0, 40000);
       if (!body.trim()) return json({ error: 'no email body' }, 400);
+      // The bell-schedule PDFs the newsletter links to. They are images, so
+      // they travel as base64 for the app to hand to a model that can see.
+      const attachments = (Array.isArray(payload?.attachments) ? payload.attachments : [])
+        .slice(0, MAX_ATTACHMENTS)
+        .map((a) => ({
+          name: String(a?.name ?? '').slice(0, 200),
+          mime: String(a?.mime ?? 'application/pdf').slice(0, 100),
+          data: String(a?.data ?? '').slice(0, MAX_ATTACHMENT_BYTES * 1.4),
+        }))
+        .filter((a) => a.data.length > 0);
       await env.INBOX.put(
         SCHEDULE_KEY,
         JSON.stringify({
@@ -219,9 +244,10 @@ export default {
           from: String(payload?.from ?? '').slice(0, 300),
           sentAt: Number(payload?.sentAt) || Date.now(),
           storedAt: Date.now(),
+          attachments,
         })
       );
-      return json({ ok: true, stored: body.length });
+      return json({ ok: true, stored: body.length, attachments: attachments.length });
     }
 
     if (request.method === 'GET' && url.pathname === '/schedule') {
@@ -231,6 +257,40 @@ export default {
       }
       const stored = await env.INBOX.get(SCHEDULE_KEY, 'json');
       return json({ schedule: stored ?? null });
+    }
+
+    // --- remote dial ----------------------------------------------------------
+    // The app leaves a number; the Android collects it. The secret is in the
+    // path on both because the Android side is an automation app that can
+    // set a URL and not much else.
+    if (request.method === 'POST' && url.pathname.startsWith('/call/')) {
+      const given = decodeURIComponent(url.pathname.slice('/call/'.length));
+      if (!secretMatches(given, secret)) return json({ error: 'forbidden' }, 403);
+      let payload = null;
+      try {
+        payload = await request.json();
+      } catch {
+        return json({ error: 'body was not JSON' }, 400);
+      }
+      const to = String(payload?.to ?? '').replace(/[^\d+]/g, '');
+      if (!/^\+?\d{7,15}$/.test(to)) return json({ error: 'not a phone number' }, 400);
+      await env.INBOX.put(CALL_KEY, JSON.stringify({ to, at: Date.now() }));
+      return json({ ok: true, to });
+    }
+    if (request.method === 'GET' && url.pathname.startsWith('/call/')) {
+      const given = decodeURIComponent(url.pathname.slice('/call/'.length));
+      if (!secretMatches(given, secret)) return new Response('', { status: 403 });
+      const pending = await env.INBOX.get(CALL_KEY, 'json');
+      // Plain text, the number alone or nothing: the Android side is an
+      // automation that can dial a variable but cannot parse JSON.
+      if (!pending?.to) return new Response('', { headers: { 'content-type': 'text/plain' } });
+      // A number older than two minutes is a call nobody is waiting for any
+      // more; dialling it now would surprise everyone involved.
+      await env.INBOX.delete(CALL_KEY);
+      if (Date.now() - pending.at > 120_000) {
+        return new Response('', { headers: { 'content-type': 'text/plain' } });
+      }
+      return new Response(pending.to, { headers: { 'content-type': 'text/plain' } });
     }
 
     if (request.method === 'GET' && url.pathname === '/health') {

@@ -29,6 +29,8 @@ import {
 } from '../../store/clientMeta';
 import { useMeetingSession } from '../../store/meetingSession';
 import { normalizePhone } from '../../lib/smsCredentials';
+import { requestWorkPhoneCall } from '../../lib/smsgate';
+import { loadSmsGateCredentials } from '../../lib/smsgateCredentials';
 import { useSettings } from '../../store/settings';
 import { useTasks } from '../../store/tasks';
 import {
@@ -60,15 +62,39 @@ export function startClientCall(
   // needed a working deployment, a forwarding number and two rings to do
   // what the dialer does in one, and when any of that was off the user got
   // an error instead of a call.
-  if (useSettings.getState().settings.callMethod !== 'twilio') {
-    const target = normalizePhone(number);
-    if (!target) {
-      Alert.alert('No number', `There is no phone number saved for ${label}.`);
-      return;
-    }
+  const method = useSettings.getState().settings.callMethod;
+  const target = normalizePhone(number);
+  if (!target) {
+    Alert.alert('No number', `There is no phone number saved for ${label}.`);
+    return;
+  }
+  if (method === 'phone') {
     Linking.openURL(`tel:${target}`).catch(() =>
       Alert.alert('Could not open the dialer', 'This device cannot place calls.')
     );
+    return;
+  }
+  if (method !== 'twilio') {
+    // The work phone dials. Caller ID comes from the line a call leaves on,
+    // and the work number's line is in the Android, so the call has to
+    // leave from there. The relay carries the number over; an automation
+    // on the Android picks it up and dials within a few seconds.
+    void (async () => {
+      const creds = await loadSmsGateCredentials();
+      if (!creds) {
+        Alert.alert('No work phone', 'Connect the free SIM line in Settings first.');
+        return;
+      }
+      const res = await requestWorkPhoneCall(creds, target);
+      if (res.ok) {
+        Alert.alert(
+          'Calling from your work phone',
+          `It will ring ${label} in a few seconds. Pick up the work phone to talk.`
+        );
+      } else {
+        Alert.alert('Could not reach the work phone', res.error);
+      }
+    })();
     return;
   }
   if (!callingEnabled) {

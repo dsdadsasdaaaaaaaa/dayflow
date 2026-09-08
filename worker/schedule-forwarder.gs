@@ -125,6 +125,7 @@ function forwardLatestSchedule() {
     return;
   }
 
+  var attachments = bellSchedules(chosen.getBody());
   var res = UrlFetchApp.fetch(RELAY + '/schedule/' + encodeURIComponent(SECRET), {
     method: 'post',
     contentType: 'application/json',
@@ -133,11 +134,13 @@ function forwardLatestSchedule() {
       subject: chosen.getSubject(),
       from: chosen.getFrom(),
       sentAt: chosen.getDate().getTime(),
+      attachments: attachments,
     }),
     muteHttpExceptions: true,
   });
   Logger.log(
-    'Sent "' + chosen.getSubject() + '" (' + body.length + ' chars). ' +
+    'Sent "' + chosen.getSubject() + '" (' + body.length + ' chars, ' +
+      attachments.length + ' bell schedule(s)). ' +
       'Relay answered ' + res.getResponseCode() + ': ' + res.getContentText()
   );
 }
@@ -227,4 +230,42 @@ function readBody(message) {
     if (text.length > 40) return text;
   }
   return message.getPlainBody();
+}
+
+
+/**
+ * The bell-schedule documents the newsletter links to.
+ *
+ * "Special Schedule" in the grid is a link, and behind it is a one-page PDF
+ * of that day's periods and times — the only place the school says which
+ * classes run and for how long on a day that is not normal. It is an image,
+ * not text, so it goes to the relay as bytes for the app to show a model.
+ * Only links inside the grid whose text talks about the schedule are
+ * followed; the newsletter has forty links and the rest are not this.
+ */
+function bellSchedules(html) {
+  var out = [];
+  var seen = {};
+  var re = /<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  var m;
+  while ((m = re.exec(html)) !== null && out.length < 8) {
+    var text = m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!/schedule|start|dismissal/i.test(text)) continue;
+    var href = m[1].replace(/&amp;/g, '&');
+    if (seen[href]) continue;
+    seen[href] = true;
+    try {
+      var res = UrlFetchApp.fetch(href, { followRedirects: true, muteHttpExceptions: true });
+      if (res.getResponseCode() !== 200) continue;
+      var blob = res.getBlob();
+      var mime = String(blob.getContentType() || '');
+      if (mime.indexOf('pdf') === -1 && mime.indexOf('image') === -1) continue;
+      var bytes = blob.getBytes();
+      if (bytes.length > 700000) continue;
+      out.push({ name: text, mime: mime, data: Utilities.base64Encode(bytes) });
+    } catch (e) {
+      Logger.log('Could not fetch "' + text + '": ' + e);
+    }
+  }
+  return out;
 }

@@ -5,6 +5,7 @@ import { fetchRelaySchedule } from './smsgate';
 import { loadSmsGateCredentials } from './smsgateCredentials';
 import { useSettings } from '../store/settings';
 import { useTasks } from '../store/tasks';
+import { applySpecialDay, parseBellSchedule, rememberBellSchedule } from './bellSchedule';
 import { applySchoolDayRules, deriveDayRules, rememberDayRules } from './schoolDay';
 import { isRuleMarker } from './schoolDay';
 import { SCHOOL_TAG } from './timetableImport';
@@ -102,6 +103,31 @@ function keyOf(e: ParsedEvent): string {
   return `${e.date}|${e.startMinutes ?? 'all'}|${e.title.trim().toLowerCase()}`;
 }
 
+/**
+ * Every bell-schedule sheet that came with the newsletter, read and applied.
+ *
+ * Returns how many days were rebuilt. A sheet that will not read is skipped
+ * rather than failing the import: the grid's own rules have already run,
+ * so the day is at worst shortened correctly and not rebuilt precisely.
+ */
+export async function applyBellSheets(
+  attachments: { name: string; mime: string; data: string }[] | undefined
+): Promise<{ days: number; failed: number }> {
+  let days = 0;
+  let failed = 0;
+  for (const doc of attachments ?? []) {
+    const parsed = await parseBellSchedule({ mime: doc.mime, data: doc.data });
+    if (!parsed.ok) {
+      failed++;
+      continue;
+    }
+    await rememberBellSchedule(parsed.schedule);
+    applySpecialDay(parsed.schedule);
+    days++;
+  }
+  return { days, failed };
+}
+
 /** Add these to the calendar, skipping any that are already on it. */
 export function addScheduleEvents(events: ParsedEvent[]): number {
   const have = existingKeys();
@@ -169,14 +195,21 @@ export async function autoImportSchedule(): Promise<number> {
   const rules = deriveDayRules(parsed.events);
   await rememberDayRules(rules);
   const amended = applySchoolDayRules(rules);
+  // Then the sheets, which are more precise than the rules: a rule shortens
+  // the day, a sheet says exactly which block runs when.
+  const sheets = await applyBellSheets(waiting.attachments);
 
   await markHandled(waiting.storedAt);
   const amendment =
-    amended.skipped + amended.shortened > 0
+    (amended.skipped + amended.shortened > 0
       ? ` Cleared ${amended.skipped} class${amended.skipped === 1 ? '' : 'es'} that are not happening` +
         (amended.shortened > 0 ? ` and cut ${amended.shortened} short` : '') +
         `, across ${amended.days} day${amended.days === 1 ? '' : 's'}.`
-      : '';
+      : '') +
+    (sheets.days > 0
+      ? ` Rebuilt ${sheets.days} special-schedule day${sheets.days === 1 ? '' : 's'} from the school's own bell sheets.`
+      : '') +
+    (sheets.failed > 0 ? ` ${sheets.failed} bell sheet${sheets.failed === 1 ? '' : 's'} could not be read.` : '');
   if (added === 0) {
     await note(
       `Read ${parsed.events.length} item${parsed.events.length === 1 ? '' : 's'}; all were already on your calendar.${amendment}`,

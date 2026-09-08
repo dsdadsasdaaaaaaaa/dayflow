@@ -621,6 +621,8 @@ export interface RelaySchedule {
   from: string;
   sentAt: number;
   storedAt: number;
+  /** Bell-schedule documents the newsletter linked to, base64. */
+  attachments?: { name: string; mime: string; data: string }[];
 }
 
 /**
@@ -649,5 +651,41 @@ export async function fetchRelaySchedule(
     return found && typeof found.body === 'string' && found.body.trim() ? found : null;
   } catch {
     return null;
+  }
+}
+
+
+/**
+ * Ask the work phone to dial a number.
+ *
+ * Leaves the number at the relay; an automation on the Android collects it
+ * within a few seconds and places the call from the SIM, so the client sees
+ * the work number. Nothing here rings anything — it is a note on a
+ * noticeboard, and the Android is the one reading it.
+ */
+export async function requestWorkPhoneCall(
+  creds: SmsGateCredentials,
+  to: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!creds.inboxUrl || !creds.inboxSecret) {
+    return { ok: false, error: 'The relay is not set up, so the work phone cannot be reached.' };
+  }
+  const target = normalizePhone(to);
+  if (!target) return { ok: false, error: 'That number does not look valid.' };
+  try {
+    const res = await withTimeout(
+      `${inbox(creds)}/call/${encodeURIComponent(creds.inboxSecret)}`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ to: target }),
+      },
+      READ_TIMEOUT_MS,
+      'reaching the relay'
+    );
+    if (!res.ok) return { ok: false, error: `The relay refused the call (${res.status}).` };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : 'Could not reach the relay.' };
   }
 }

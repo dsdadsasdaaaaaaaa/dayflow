@@ -227,13 +227,14 @@ export interface Settings {
   /**
    * How a tap on "Call" places the call.
    *
-   * 'phone' hands the number to the phone's own dialer, which is instant,
-   * never fails, and needs nothing set up — at the cost that the client sees
-   * the phone's own number rather than the work one. 'twilio' rings the user
-   * first and bridges them through the work number, which is the reverse
-   * trade: the right caller ID, a slower and more fragile call.
+   * 'work' sends the number to the work phone — the Android holding the
+   * SIM — which dials it, so the client sees the work number. Caller ID
+   * comes from the line a call leaves on, and that line is in the Android;
+   * this is the only way to show the work number without a paid bridge.
+   * 'phone' hands the number to this phone's own dialer instead: instant,
+   * but the client sees this phone's number.
    */
-  callMethod: 'phone' | 'twilio';
+  callMethod: 'work' | 'phone' | 'twilio';
   /** Calling & voicemail through the user's own Twilio number. */
   callingEnabled: boolean;
   /** The user's personal cell (E.164) inbound calls forward to. Empty = straight to voicemail. */

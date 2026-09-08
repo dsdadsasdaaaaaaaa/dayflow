@@ -103,3 +103,27 @@ Only the newest is kept. A schedule is a statement about one week, and last
 week's is not history, it is just wrong.
 
 Setup is in the header comment of `schedule-forwarder.gs`.
+
+## Calling from the work number
+
+Caller ID comes from the line a call leaves on, and the work number's line is
+the SIM in the Android. So a call that shows the work number has to leave
+from the Android. DayFlow leaves the number at the relay; the Android
+collects it and dials; you talk on the Android.
+
+Set up once, on the Android, in **MacroDroid** (free on the Play Store):
+
+1. Add Macro → name it *DayFlow call*.
+2. **Trigger:** Regular Interval → every **10 seconds**. (Or *Interval* under
+   Date/Time; MacroDroid may warn about battery — the request is tiny.)
+3. **Action 1:** HTTP Request (GET) →
+   `https://dayflow-inbox.giveawaybot1225.workers.dev/call/YOUR_SHARED_SECRET`
+   → *Save response to variable* → name it `number` (a string).
+4. **Action 2:** Condition → `number` is not empty (Variable → *number* →
+   *Not equal to* → leave the value blank).
+5. **Action 3** (inside the condition): Make Call → number → `{lv=number}`.
+6. Enable the macro. Grant the phone permission when asked.
+
+The relay hands a number out once and forgets it, and ignores any older than
+two minutes, so the phone never dials something stale. Test it: tap Call in
+DayFlow; within ten seconds the Android should ring the client.

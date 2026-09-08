@@ -30,7 +30,7 @@ export const DEFAULT_SETTINGS: Settings = {
     'Running about 10 minutes late, be there soon.',
   ],
   photoQuickReplies: [],
-  callMethod: 'phone',
+  callMethod: 'work',
   callingEnabled: false,
   callForwardTo: '',
   callShowWorkNumber: false,

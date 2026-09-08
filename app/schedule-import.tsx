@@ -20,7 +20,12 @@ import { GlassCard } from '../src/components/glass/GlassCard';
 import { formatDayShort, formatMinutes } from '../src/lib/dates';
 import { selectionHaptic, successHaptic, tapHaptic } from '../src/lib/haptics';
 import { parseScheduleEmail, type ParsedEvent } from '../src/lib/scheduleImport';
-import { alreadyHandled, lastScheduleStatus, type ScheduleStatus } from '../src/lib/scheduleAuto';
+import {
+  alreadyHandled,
+  applyBellSheets,
+  lastScheduleStatus,
+  type ScheduleStatus,
+} from '../src/lib/scheduleAuto';
 import { fetchRelaySchedule, type RelaySchedule } from '../src/lib/smsgate';
 import { loadSmsGateCredentials } from '../src/lib/smsgateCredentials';
 import { applySchoolDayRules, deriveDayRules, rememberDayRules } from '../src/lib/schoolDay';
@@ -172,6 +177,9 @@ export default function ScheduleImportScreen() {
     const rules = deriveDayRules(chosen);
     void rememberDayRules(rules);
     const amended = applySchoolDayRules(rules);
+    // The bell sheets came with the relay's copy of the email, not with
+    // pasted text, so they apply when that is what was read.
+    if (waiting && email === waiting.body) void applyBellSheets(waiting.attachments);
     successHaptic();
     setAdded(chosen.length);
     setAmended(amended.skipped);

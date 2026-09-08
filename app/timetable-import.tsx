@@ -20,6 +20,7 @@ import { formatMinutes } from '../src/lib/dates';
 import { selectionHaptic, successHaptic, tapHaptic } from '../src/lib/haptics';
 import {
   classNote,
+  classTags,
   isSchoolTask,
   isTimetableTask,
   nextWeekday,
@@ -29,6 +30,7 @@ import {
   weeklyOn,
   type ParsedClass,
 } from '../src/lib/timetableImport';
+import { applyStoredBellSchedules } from '../src/lib/bellSchedule';
 import { applyStoredRules } from '../src/lib/schoolDay';
 import { useTasks } from '../src/store/tasks';
 import { SPACING, useTheme } from '../src/theme';
@@ -147,14 +149,14 @@ export default function TimetableImportScreen() {
         notes: classNote(c),
         icon: 'school-outline',
         color: 'sky',
-        tags: [SCHOOL_TAG, TIMETABLE_TAG],
+        tags: classTags(c),
       });
     }
     // Classes that have just arrived know nothing about closures the
     // newsletter announced before them, so every remembered amendment is
     // re-applied. Without this, importing in the other order puts a full day
     // of school back on the day the school is shut.
-    void applyStoredRules();
+    void applyStoredRules().then(() => applyStoredBellSchedules());
     successHaptic();
     setAdded(chosen.length);
     setClasses(null);

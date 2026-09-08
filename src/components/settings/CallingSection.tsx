@@ -49,16 +49,16 @@ function CallMethodRow() {
   const theme = useTheme();
   const method = useSettings((s) => s.settings.callMethod);
   const update = useSettings((s) => s.update);
-  const options: { key: 'phone' | 'twilio'; label: string; hint: string }[] = [
+  const options: { key: 'work' | 'phone'; label: string; hint: string }[] = [
     {
-      key: 'phone',
-      label: 'My phone',
-      hint: 'Opens the dialer. Instant, nothing to set up. Clients see this phone\'s number.',
+      key: 'work',
+      label: 'Work phone',
+      hint: 'Your work phone dials them and you talk on it. Clients see the work number. Needs the MacroDroid macro on the work phone — see worker/README.md.',
     },
     {
-      key: 'twilio',
-      label: 'Work number',
-      hint: 'Rings you first, then bridges through the work number. Clients see the work number.',
+      key: 'phone',
+      label: 'This phone',
+      hint: 'Opens the dialer here. Instant, but clients see this phone\'s number.',
     },
   ];
   return (

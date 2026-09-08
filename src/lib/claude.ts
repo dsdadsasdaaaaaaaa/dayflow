@@ -211,13 +211,36 @@ async function postTurn(
  * falling back when it is retired lives in postTurn, and this is how the rest
  * of the app borrows it rather than pinning an id that will stop working.
  */
+export interface AskDocument {
+  /** e.g. 'application/pdf' or 'image/png'. */
+  mime: string;
+  /** Base64, no data-URL prefix. */
+  data: string;
+}
+
 export async function askOnce(
   apiKey: string,
   system: string,
   user: string,
-  opts: { json?: boolean } = {}
+  opts: { json?: boolean; document?: AskDocument } = {}
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
-  const messages: ClaudeMessage[] = [{ role: 'user', content: user }];
+  // A document travels as its own content block ahead of the question, so
+  // the model reads the thing before it reads what is being asked of it.
+  const content: unknown = opts.document
+    ? [
+        opts.document.mime === 'application/pdf'
+          ? {
+              type: 'document',
+              source: { type: 'base64', media_type: 'application/pdf', data: opts.document.data },
+            }
+          : {
+              type: 'image',
+              source: { type: 'base64', media_type: opts.document.mime, data: opts.document.data },
+            },
+        { type: 'text', text: user },
+      ]
+    : user;
+  const messages: ClaudeMessage[] = [{ role: 'user', content: content as ClaudeMessage['content'] }];
   // Putting the opening bracket in the model's own mouth. It can only
   // continue from there, so there is no room for "Here is the schedule you
   // asked for:" in front of it — the single most common way a JSON answer

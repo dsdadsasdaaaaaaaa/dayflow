@@ -65,6 +65,12 @@ export interface ParsedClass {
   code: string;
   /** The school's own period label, when it numbers them. */
   period: string;
+  /**
+   * The block this course runs in. The school schedules blocks into period
+   * slots, not courses, and a special day's sheet names blocks — so without
+   * this a special day cannot say which class is which.
+   */
+  block: number | null;
 }
 
 export type TimetableParse =
@@ -81,7 +87,7 @@ const SYSTEM = [
   '',
   'Return ONLY a JSON array, no prose and no code fence. Each element is one class on one day:',
   '{"title": string, "weekday": 0-6, "startMinutes": number, "durationMinutes": number,',
-  ' "room": string, "teacher": string, "code": string, "period": string}',
+  ' "room": string, "teacher": string, "code": string, "period": string, "block": number|null}',
   '',
   'Rules:',
   '- One element per cell. A class taught on Monday, Wednesday and Friday is THREE elements,',
@@ -93,6 +99,8 @@ const SYSTEM = [
   '  add 12 hours for PM except noon itself: 1:25 PM is 805, 12:40 PM is 760, 8:30 AM is 510.',
   '  A period listed as 8:30 AM to 9:29 AM is startMinutes 510 and durationMinutes 59.',
   '- room, teacher, code and period are "" when the grid does not give them.',
+  '- block is the number after the word "Block" in the cell ("Block 6" is 6), or null if',
+  '  the cell has none. Keep it: the school reschedules by block on special days.',
   '- Include lunch and any free or support period that occupies a slot: they are part of the',
   '  day and leaving them out makes the day look emptier than it is.',
   '- An empty cell is a free slot. Skip it — do not invent a class to fill it.',
@@ -136,6 +144,8 @@ export function validateClasses(raw: unknown): { classes: ParsedClass[]; dropped
     // because the class is real even when the arithmetic around it is not.
     const durationMinutes = Math.min(300, Math.max(5, rawDuration || 60));
     const period = str(r.period, 20);
+    const rawBlock = typeof r.block === 'number' ? Math.round(r.block) : NaN;
+    const block = Number.isFinite(rawBlock) && rawBlock >= 1 && rawBlock <= 20 ? rawBlock : null;
     // The period label often states the times outright; where it does, that
     // is the school's own clock and it beats the model's arithmetic — the
     // same rule the newsletter reader is held to.
@@ -149,6 +159,7 @@ export function validateClasses(raw: unknown): { classes: ParsedClass[]; dropped
       teacher: str(r.teacher, 60),
       code: str(r.code, 20),
       period,
+      block,
     });
   }
   const seen = new Set<string>();
@@ -218,4 +229,9 @@ export function weeklyOn(weekday: number): Task['recurrence'] {
 /** Room, teacher and code, as a note a person would actually read. */
 export function classNote(c: ParsedClass): string {
   return [c.room, c.teacher, c.code].filter(Boolean).join(' · ');
+}
+
+/** The tags a class is written with, block included when known. */
+export function classTags(c: ParsedClass): string[] {
+  return [SCHOOL_TAG, TIMETABLE_TAG, ...(c.block != null ? [`block:${c.block}`] : [])];
 }

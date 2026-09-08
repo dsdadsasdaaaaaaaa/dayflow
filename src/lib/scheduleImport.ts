@@ -377,7 +377,8 @@ export function readScheduleGrid(text: string, today: DayKey = todayKey()): Pars
 export async function askModel(
   system: string,
   user: string,
-  brain?: BrainChoice | null
+  brain?: BrainChoice | null,
+  document?: { mime: string; data: string }
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
   const chosen = brain ?? (await loadBrain());
   if (!chosen) {
@@ -392,8 +393,8 @@ export async function askModel(
   // Both clients already walk a list of ids and fall back to asking the API
   // what it actually serves; this borrows that rather than repeating it.
   return chosen.id === 'claude'
-    ? askClaudeOnce(chosen.apiKey, system, user, { json: true })
-    : askGeminiOnce(chosen.apiKey, system, user, { json: true });
+    ? askClaudeOnce(chosen.apiKey, system, user, { json: true, document })
+    : askGeminiOnce(chosen.apiKey, system, user, { json: true, document });
 }
 
 /**
