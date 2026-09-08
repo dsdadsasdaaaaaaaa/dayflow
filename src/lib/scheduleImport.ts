@@ -48,6 +48,35 @@ export type ScheduleParse =
 /** Longest email accepted. Beyond this the tail is almost always footer. */
 const MAX_INPUT = 24_000;
 
+/**
+ * The shape the model is held to. Enforced server-side on Claude, so a reply
+ * cannot arrive as prose, in a fence, or with a field missing; read
+ * leniently on the way in regardless, for the other vendor.
+ */
+export const SCHEDULE_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    events: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          title: { type: 'string' },
+          date: { type: 'string' },
+          startMinutes: { type: ['integer', 'null'] },
+          durationMinutes: { type: 'integer' },
+          location: { type: 'string' },
+          notes: { type: 'string' },
+        },
+        required: ['title', 'date', 'startMinutes', 'durationMinutes', 'location', 'notes'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['events'],
+  additionalProperties: false,
+};
+
 function instruction(today: DayKey, weekday: string, zone: string): string {
   return [
     "You read a school's newsletter email and return the dated schedule it contains as JSON.",
@@ -75,9 +104,9 @@ function instruction(today: DayKey, weekday: string, zone: string): string {
     'counts if it appears inside a week grid, under a day.',
     '',
     'THE SAME ADDRESS ALSO SENDS PURE ANNOUNCEMENTS. If this email has no week grid at all,',
-    'return [] and nothing else. That is a correct answer, not a failure.',
+    'return {"events": []} and nothing else. That is a correct answer, not a failure.',
     '',
-    'Return ONLY a JSON array, no prose and no code fence. Each element:',
+    'Return ONLY JSON, no prose and no code fence: an object {"events": [...]} whose array holds one element per entry:',
     '{"title": string, "date": "YYYY-MM-DD", "startMinutes": number|null, "durationMinutes": number, "location": string, "notes": string}',
     '',
     'Rules:',
@@ -378,7 +407,8 @@ export async function askModel(
   system: string,
   user: string,
   brain?: BrainChoice | null,
-  document?: { mime: string; data: string }
+  document?: { mime: string; data: string },
+  schema?: Record<string, unknown>
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
   const chosen = brain ?? (await loadBrain());
   if (!chosen) {
@@ -393,8 +423,8 @@ export async function askModel(
   // Both clients already walk a list of ids and fall back to asking the API
   // what it actually serves; this borrows that rather than repeating it.
   return chosen.id === 'claude'
-    ? askClaudeOnce(chosen.apiKey, system, user, { json: true, document })
-    : askGeminiOnce(chosen.apiKey, system, user, { json: true, document });
+    ? askClaudeOnce(chosen.apiKey, system, user, { json: true, document, schema })
+    : askGeminiOnce(chosen.apiKey, system, user, { json: true, document, schema });
 }
 
 /**
@@ -416,7 +446,7 @@ export async function parseScheduleEmail(
   const system = instruction(today, weekday, zone);
   const input = text.slice(0, MAX_INPUT);
 
-  const asked = await askModel(system, input, brain);
+  const asked = await askModel(system, input, brain, undefined, SCHEDULE_SCHEMA);
   if (!asked.ok) return { ok: false, error: asked.error };
 
   let raw = extractJson(asked.text);
@@ -425,9 +455,11 @@ export async function parseScheduleEmail(
     // fix this immediately when told; failing the whole import over a
     // sentence of preamble would be a waste of a correct reading.
     const again = await askModel(
-      `${system}\n\nYour previous answer was not valid JSON. Reply with the JSON array ALONE: no explanation, no code fence, nothing before the "[" or after the "]".`,
+      `${system}\n\nYour previous answer was not valid JSON. Reply with the JSON ALONE: no explanation, no code fence, nothing around it.`,
       input,
-      brain
+      brain,
+      undefined,
+      SCHEDULE_SCHEMA
     );
     if (again.ok) raw = extractJson(again.text);
     if (raw == null) {

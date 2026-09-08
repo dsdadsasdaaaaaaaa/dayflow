@@ -146,7 +146,7 @@ async function postTurn(
   messages: ClaudeMessage[],
   tools: ToolSpec[],
   /** Overrides for callers that are not the secretary — see askOnce. */
-  override?: { system?: string; maxTokens?: number }
+  override?: { system?: string; maxTokens?: number; outputSchema?: Record<string, unknown> }
 ): Promise<{ ok: true; data: ClaudeResponse } | { ok: false; error: string }> {
   // Deliberately no temperature, top_p or top_k. The Claude 5 family (and
   // 4.7 onward) rejects sampling parameters outright with a 400, and the
@@ -166,6 +166,14 @@ async function postTurn(
     ],
     messages,
   };
+  // Structured output: the reply is constrained to this schema on the
+  // server, so the first text block is valid JSON in exactly this shape.
+  // This is what replaced the assistant prefill the Claude 5 family
+  // refuses, and it is stronger than the prefill ever was — no preamble,
+  // no fence, no field missing, nothing to read leniently.
+  if (override?.outputSchema) {
+    body.output_config = { format: { type: 'json_schema', schema: override.outputSchema } };
+  }
   if (tools.length > 0) {
     body.tools = tools.map((t) => ({
       name: t.name,
@@ -257,7 +265,7 @@ export async function askOnce(
   apiKey: string,
   system: string,
   user: string,
-  opts: { json?: boolean; document?: AskDocument } = {}
+  opts: { json?: boolean; document?: AskDocument; schema?: Record<string, unknown> } = {}
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
   // A document travels as its own content block ahead of the question, so
   // the model reads the thing before it reads what is being asked of it.
@@ -280,10 +288,12 @@ export async function askOnce(
   // answer is asked for in the instruction and read leniently instead, and
   // the readers retry once when it still arrives wrapped in prose.
   const res = await postTurn(apiKey, messages, [], {
-    system: opts.json
-      ? `${system}\n\nReply with the JSON alone: no preamble, no code fence, nothing before or after it.`
-      : system,
+    system:
+      opts.json && !opts.schema
+        ? `${system}\n\nReply with the JSON alone: no preamble, no code fence, nothing before or after it.`
+        : system,
     maxTokens: 8192,
+    outputSchema: opts.schema,
   });
   if (!res.ok) return res;
   const text = (res.data.content ?? [])

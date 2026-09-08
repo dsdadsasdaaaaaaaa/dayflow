@@ -79,13 +79,41 @@ export type TimetableParse =
 
 const MAX_INPUT = 24_000;
 
+/** Enforced server-side on Claude; see SCHEDULE_SCHEMA for why. */
+const TIMETABLE_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    classes: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          title: { type: 'string' },
+          weekday: { type: 'integer' },
+          startMinutes: { type: 'integer' },
+          durationMinutes: { type: 'integer' },
+          room: { type: 'string' },
+          teacher: { type: 'string' },
+          code: { type: 'string' },
+          period: { type: 'string' },
+          block: { type: ['integer', 'null'] },
+        },
+        required: ['title', 'weekday', 'startMinutes', 'durationMinutes', 'room', 'teacher', 'code', 'period', 'block'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['classes'],
+  additionalProperties: false,
+};
+
 const SYSTEM = [
   'You read a school timetable and return it as JSON.',
   '',
   'A timetable is a grid: rows are periods with their start and end times, columns are the',
   'days of the week. Each filled cell is one class, and it happens EVERY week on that day.',
   '',
-  'Return ONLY a JSON array, no prose and no code fence. Each element is one class on one day:',
+  'Return ONLY JSON, no prose and no code fence: an object {"classes": [...]} whose array holds one element per class on one day:',
   '{"title": string, "weekday": 0-6, "startMinutes": number, "durationMinutes": number,',
   ' "room": string, "teacher": string, "code": string, "period": string, "block": number|null}',
   '',
@@ -184,7 +212,7 @@ export async function parseTimetable(
 ): Promise<TimetableParse> {
   const input = text.trim();
   if (!input) return { ok: false, error: 'There was nothing there to read.' };
-  const asked = await askModel(SYSTEM, input.slice(0, MAX_INPUT), brain);
+  const asked = await askModel(SYSTEM, input.slice(0, MAX_INPUT), brain, undefined, TIMETABLE_SCHEMA);
   if (!asked.ok) return { ok: false, error: asked.error };
 
   let raw = extractJson(asked.text);
@@ -192,9 +220,11 @@ export async function parseTimetable(
     // Same one retry as the newsletter reader, for the same reason: a
     // sentence of preamble is not worth losing a correct reading over.
     const again = await askModel(
-      `${SYSTEM}\n\nYour previous answer was not valid JSON. Reply with the JSON array ALONE: no explanation, no code fence, nothing before the "[" or after the "]".`,
+      `${SYSTEM}\n\nYour previous answer was not valid JSON. Reply with the JSON ALONE: no explanation, no code fence, nothing around it.`,
       input.slice(0, MAX_INPUT),
-      brain
+      brain,
+      undefined,
+      TIMETABLE_SCHEMA
     );
     if (again.ok) raw = extractJson(again.text);
   }

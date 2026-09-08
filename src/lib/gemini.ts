@@ -397,7 +397,12 @@ export async function askOnce(
   apiKey: string,
   system: string,
   user: string,
-  opts: { json?: boolean; document?: { mime: string; data: string } } = {}
+  opts: {
+    json?: boolean;
+    document?: { mime: string; data: string };
+    /** Accepted for symmetry with Claude; Gemini's JSON mode does the equivalent job. */
+    schema?: Record<string, unknown>;
+  } = {}
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
   const userParts: GeminiPart[] = opts.document
     ? [{ inlineData: { mimeType: opts.document.mime, data: opts.document.data } }, { text: user }]

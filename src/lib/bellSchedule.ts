@@ -43,6 +43,31 @@ export interface BellSchedule {
 
 export type BellParse = { ok: true; schedule: BellSchedule } | { ok: false; error: string };
 
+/** Enforced server-side on Claude; see SCHEDULE_SCHEMA for why. */
+const BELL_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    date: { type: 'string' },
+    title: { type: 'string' },
+    rows: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          startMinutes: { type: 'integer' },
+          endMinutes: { type: 'integer' },
+          block: { type: ['integer', 'null'] },
+          label: { type: 'string' },
+        },
+        required: ['startMinutes', 'endMinutes', 'block', 'label'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['date', 'title', 'rows'],
+  additionalProperties: false,
+};
+
 const SYSTEM = [
   'You read a one-page school bell schedule and return it as JSON.',
   'The page names a date and lists rows of TIME, PERIOD and BLOCK. Some rows are not a',
@@ -118,7 +143,8 @@ export async function parseBellSchedule(doc: { mime: string; data: string }): Pr
     SYSTEM,
     `The current year is ${year}. Read the attached bell schedule.`,
     undefined,
-    doc
+    doc,
+    BELL_SCHEMA
   );
   if (!asked.ok) return { ok: false, error: asked.error };
   const raw = extractJson(asked.text) ?? extractObject(asked.text);
