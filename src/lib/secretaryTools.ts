@@ -1476,7 +1476,14 @@ const DIGEST_DORMANT_DAYS = 240;
  * think to go looking for.
  */
 const DIGEST_MAX_THREADS = 200;
-const DIGEST_BODY_CHARS = 240;
+/**
+ * Longest a single message is quoted. Was 240, a leftover from when the
+ * whole picture had to fit in a small window — it cut the second half off
+ * a long text, which is exactly the half where someone explains what they
+ * actually want. With a million tokens to spend there is no reason to cut
+ * a message at all; two thousand covers anything a phone will send.
+ */
+const DIGEST_BODY_CHARS = 2000;
 
 /**
  * Ceiling on the whole picture, in characters.
