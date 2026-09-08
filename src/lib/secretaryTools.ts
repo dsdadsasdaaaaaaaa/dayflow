@@ -1495,7 +1495,11 @@ const DIGEST_BODY_CHARS = 2000;
  * alternative to a limit is a request too large to send at all. When it
  * bites, the digest says so rather than quietly ending early.
  */
-const DIGEST_CHAR_BUDGET = 400_000;
+// Measured against the user's real inbox on 2026-09-08: 153 threads active
+// in three weeks, 5,363 messages, about 590,000 characters. The 400,000 that
+// was here cut a third of them off. 1.6M characters is roughly 400k tokens,
+// under half the window with the conversation and tool results on top.
+const DIGEST_CHAR_BUDGET = 1_600_000;
 
 const DAY_MS = 24 * 3_600_000;
 
