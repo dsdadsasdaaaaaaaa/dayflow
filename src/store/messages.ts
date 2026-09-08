@@ -29,7 +29,7 @@ import {
   type ProviderId,
 } from '../lib/messaging';
 import { loadSmsCredentials, normalizePhone } from '../lib/smsCredentials';
-import { resetRelayCursor } from '../lib/smsgate';
+import { listSmsGate, resetRelayCursor } from '../lib/smsgate';
 import { uploadPhotoAsset } from '../lib/twilioAssets';
 import { PERSIST_VERSION, migrateStore } from './persistVersion';
 import { useSettings } from './settings';
@@ -215,6 +215,18 @@ interface MessagesState {
    * arrives. This drops the mark for one pass.
    */
   resyncAll: () => Promise<void>;
+  /**
+   * Rebuild every message's timestamp from the relay, which is the only copy
+   * that was written when the message actually arrived.
+   *
+   * A phone that has been off comes back and stamps a whole backlog with the
+   * moment it woke up, so a morning of conversation reads as having happened
+   * in one minute at teatime. An ordinary re-sync cannot undo that: the good
+   * record comes back under a different id, the content filter sees a copy it
+   * already has and drops the correct one in favour of the wrong one.
+   * Returns how many it put right.
+   */
+  repairTimesFromRelay: () => Promise<{ fixed: number; added: number }>;
   /** Pin one conversation to a line; persists until changed. */
   setThreadRoute: (counterparty: string, route: ProviderId) => void;
   clearAll: () => void;
@@ -465,6 +477,52 @@ export const useMessages = create<MessagesState>()(
         // still skipped everything the relay had already handed over.
         resetRelayCursor();
         await get().sync();
+      },
+
+      repairTimesFromRelay: async () => {
+        const routes = await loadRoutes();
+        const creds = routes.smsgate;
+        if (!creds) return { fixed: 0, added: 0 };
+        resetRelayCursor();
+        // No time floor: the whole relay, so nothing is judged against a
+        // cursor that the bad timestamps may have pushed forward.
+        const fetched = await listSmsGate(creds, PAGE_SIZE, {});
+        let fixed = 0;
+        let added = 0;
+        set((s) => {
+          const messages = { ...s.messages };
+          // Content alone, deliberately without time: matching on time is
+          // what fails here, since the time is the thing that is wrong.
+          const byContent = new Map<string, string>();
+          for (const m of Object.values(messages)) {
+            byContent.set(
+              [m.direction, normalizePhone(m.counterparty), (m.body ?? '').trim()].join('|'),
+              m.sid
+            );
+          }
+          for (const truth of fetched) {
+            const key = [
+              truth.direction,
+              normalizePhone(truth.counterparty),
+              (truth.body ?? '').trim(),
+            ].join('|');
+            const localSid = messages[truth.sid] ? truth.sid : byContent.get(key);
+            if (!localSid) {
+              messages[truth.sid] = truth;
+              added++;
+              continue;
+            }
+            const local = messages[localSid];
+            if (local.sentAt === truth.sentAt && localSid === truth.sid) continue;
+            // Re-key onto the relay's id as well, so the next sync updates
+            // this record in place instead of finding it twice.
+            if (localSid !== truth.sid) delete messages[localSid];
+            messages[truth.sid] = { ...local, ...truth, mediaUrls: local.mediaUrls ?? truth.mediaUrls };
+            if (local.sentAt !== truth.sentAt) fixed++;
+          }
+          return { messages, lastSyncAt: Date.now() };
+        });
+        return { fixed, added };
       },
 
       setThreadRoute: (counterparty, route) =>

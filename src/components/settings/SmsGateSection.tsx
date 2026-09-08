@@ -49,6 +49,7 @@ export function SmsGateSection() {
   const theme = useTheme();
   const refreshConfigured = useMessages((s) => s.refreshConfigured);
   const resyncAll = useMessages((s) => s.resyncAll);
+  const repairTimes = useMessages((s) => s.repairTimesFromRelay);
 
   const [connected, setConnected] = useState<SmsGateCredentials | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -218,6 +219,34 @@ export function SmsGateSection() {
     }
   };
 
+  /**
+   * Put every timestamp back to what the relay says it was. The case for
+   * this is a phone that was off: it wakes, takes the backlog in one go, and
+   * stamps all of it with the minute it woke — so a morning of conversation
+   * reads as having happened at once, at teatime. A re-sync cannot undo that
+   * (the content filter keeps the copy it has), so this one trusts the
+   * relay outright.
+   */
+  const runRepair = async () => {
+    if (resyncing) return;
+    tapHaptic();
+    setResyncing(true);
+    try {
+      const { fixed, added } = await repairTimes();
+      successHaptic();
+      Alert.alert(
+        'Times repaired',
+        fixed > 0 || added > 0
+          ? `${fixed} message${fixed === 1 ? '' : 's'} put back to the time ${fixed === 1 ? 'it' : 'they'} actually arrived${
+              added > 0 ? `, and ${added} that were missing pulled in` : ''
+            }.`
+          : 'Every message already matched the relay. Nothing to change.'
+      );
+    } finally {
+      setResyncing(false);
+    }
+  };
+
   const disconnect = () => {
     Alert.alert(
       'Disconnect the free SIM line?',
@@ -266,6 +295,16 @@ export function SmsGateSection() {
             resyncing ? 'Pulling everything…' : 'Pull the full history, including imports'
           }
           onPress={runResync}
+          right={
+            resyncing ? <ActivityIndicator size="small" color={theme.textTertiary} /> : undefined
+          }
+        />
+        <SettingsRow
+          icon="time"
+          tint={taskColor('amber').solid}
+          label="Repair message times"
+          sublabel="If a backlog arrived stamped with one time, put every message back to when it really came"
+          onPress={runRepair}
           right={
             resyncing ? <ActivityIndicator size="small" color={theme.textTertiary} /> : undefined
           }

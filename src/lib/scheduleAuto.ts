@@ -73,6 +73,11 @@ async function lastHandled(): Promise<number> {
   }
 }
 
+/** Has this relay schedule already been put on the calendar? */
+export async function alreadyHandled(storedAt: number): Promise<boolean> {
+  return storedAt <= (await lastHandled());
+}
+
 async function markHandled(storedAt: number): Promise<void> {
   try {
     await AsyncStorage.setItem(CURSOR_KEY, String(storedAt));

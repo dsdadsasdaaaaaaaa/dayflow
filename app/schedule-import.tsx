@@ -20,7 +20,7 @@ import { GlassCard } from '../src/components/glass/GlassCard';
 import { formatDayShort, formatMinutes } from '../src/lib/dates';
 import { selectionHaptic, successHaptic, tapHaptic } from '../src/lib/haptics';
 import { parseScheduleEmail, type ParsedEvent } from '../src/lib/scheduleImport';
-import { lastScheduleStatus, type ScheduleStatus } from '../src/lib/scheduleAuto';
+import { alreadyHandled, lastScheduleStatus, type ScheduleStatus } from '../src/lib/scheduleAuto';
 import { fetchRelaySchedule, type RelaySchedule } from '../src/lib/smsgate';
 import { loadSmsGateCredentials } from '../src/lib/smsgateCredentials';
 import { applySchoolDayRules, deriveDayRules, rememberDayRules } from '../src/lib/schoolDay';
@@ -60,6 +60,13 @@ export default function ScheduleImportScreen() {
   const [added, setAdded] = useState<number | null>(null);
   const [amended, setAmended] = useState(0);
   const [waiting, setWaiting] = useState<RelaySchedule | null>(null);
+  /**
+   * Whether the waiting email is genuinely waiting, or has already been
+   * added by the automatic path. Showing it as unread forever made the
+   * screen look like it needed something from the user every time they
+   * opened it, which is the opposite of what "automatic" is for.
+   */
+  const [handled, setHandled] = useState(false);
   const [status, setStatus] = useState<ScheduleStatus | null>(null);
 
   /**
@@ -75,8 +82,10 @@ export default function ScheduleImportScreen() {
     });
     loadSmsGateCredentials()
       .then((creds) => (creds ? fetchRelaySchedule(creds) : null))
-      .then((found) => {
-        if (alive && found) setWaiting(found);
+      .then(async (found) => {
+        if (!alive || !found) return;
+        setWaiting(found);
+        setHandled(await alreadyHandled(found.storedAt));
       })
       .catch(() => {});
     return () => {
@@ -206,7 +215,11 @@ export default function ScheduleImportScreen() {
                 >
                   <GlassCard padding={0}>
                     <View style={styles.waitingRow}>
-                      <Ionicons name="mail-unread" size={22} color={theme.accent} />
+                      <Ionicons
+                        name={handled ? 'mail-open-outline' : 'mail-unread'}
+                        size={22}
+                        color={handled ? theme.textTertiary : theme.accent}
+                      />
                       <View style={styles.flex}>
                         <Text style={[styles.eventTitle, { color: theme.text }]} numberOfLines={1}>
                           {waiting.subject || 'Schedule email'}
@@ -217,7 +230,7 @@ export default function ScheduleImportScreen() {
                         >
                           {`Arrived ${formatDayShort(
                             new Date(waiting.sentAt).toISOString().slice(0, 10)
-                          )} · tap to read it`}
+                          )} · ${handled ? 'already on your calendar · tap to read it again' : 'tap to read it'}`}
                         </Text>
                       </View>
                       <Ionicons name="chevron-forward" size={18} color={theme.textTertiary} />
