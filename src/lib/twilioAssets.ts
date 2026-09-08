@@ -3,6 +3,16 @@ import { Platform } from 'react-native';
 import type { SmsCredentials } from './smsCredentials';
 
 /**
+ * Progress notes for a deploy that can take a minute, kept out of release
+ * builds: a shipped app has nobody reading its console, and every line
+ * written there is still a line of work on the JS thread.
+ */
+function log(...args: unknown[]): void {
+  if (__DEV__) console.log(...args);
+}
+
+
+/**
  * Twilio Serverless Assets pipeline — hosts outbound MMS photos on the
  * user's OWN Twilio account (no third-party hosting). Flow per upload:
  *
@@ -401,7 +411,7 @@ export async function prunePhotoAssets(
       if (keepPaths.has(name)) continue;
       if (await deleteAsset(creds, serviceSid, a.sid)) deleted++;
     }
-    if (deleted > 0) console.log('[twilioAssets] pruned', deleted, 'expired photo(s)');
+    if (deleted > 0) log('[twilioAssets] pruned', deleted, 'expired photo(s)');
     return deleted;
   } catch {
     return 0;
@@ -512,7 +522,7 @@ async function waitForBuild(
       `${SERVERLESS}/Services/${serviceSid}/Builds/${buildSid}/Status`
     );
     const status = str(res.json, 'status');
-    console.log('[twilioAssets] build status:', status ?? `(http ${res.status})`);
+    log('[twilioAssets] build status:', status ?? `(http ${res.status})`);
     if (status === 'completed') return 'completed';
     if (status === 'failed') return 'failed';
     await new Promise((r) => setTimeout(r, BUILD_POLL_INTERVAL_MS));
@@ -712,11 +722,11 @@ export async function uploadPhotoAsset(
     const path = assetPathFor(filename);
     const mimeType = mimeTypeForFilename(filename);
 
-    console.log('[twilioAssets] creating asset for', path);
+    log('[twilioAssets] creating asset for', path);
     const assetSid = await createAsset(creds, serviceSid, path.slice(1));
     if (!assetSid) return fail('Could not create the photo asset.');
 
-    console.log('[twilioAssets] uploading content');
+    log('[twilioAssets] uploading content');
     const version = await uploadAssetVersion(creds, serviceSid, assetSid, localUri, path, mimeType);
     if (!version) return fail('Photo upload failed. Check your connection and try again.');
 
@@ -731,7 +741,7 @@ export async function uploadPhotoAsset(
     if (!live.ok) return live;
     const versionSids = new Set<string>([version.versionSid, ...live.assetVersionSids]);
 
-    console.log(
+    log(
       '[twilioAssets] building with',
       versionSids.size,
       'asset +',
@@ -745,7 +755,7 @@ export async function uploadPhotoAsset(
     if (buildStatus === 'failed') return fail('Photo publish failed on Twilio.');
     if (buildStatus === 'timeout') return fail('Photo publish timed out. Try again in a minute.');
 
-    console.log('[twilioAssets] deploying build', buildSid);
+    log('[twilioAssets] deploying build', buildSid);
     const deployed = await createDeployment(creds, serviceSid, env.sid, buildSid);
     if (!deployed) return fail('Could not publish the photo.');
 
@@ -758,7 +768,7 @@ export async function uploadPhotoAsset(
         'The photo was uploaded but is not being served yet. Wait a moment and try again.'
       );
     }
-    console.log('[twilioAssets] photo live');
+    log('[twilioAssets] photo live');
     return { ok: true, url };
   } catch (e) {
     return fail(e instanceof Error ? e.message : 'Photo upload failed.');

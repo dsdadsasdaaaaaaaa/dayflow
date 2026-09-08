@@ -45,7 +45,10 @@ const AllDayChip = memo(function AllDayChip({
         <Ionicons name={instance.task.icon as never} size={12} color="#fff" />
       </View>
       <Text
-        numberOfLines={1}
+        // Two lines. Newsletter items arrive with names like "First Day of
+        // School: Special Schedule", and one clipped line left the part
+        // after the colon — the part that says what is different — unread.
+        numberOfLines={2}
         style={[
           styles.title,
           { color: theme.text },
@@ -120,9 +123,10 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingLeft: 8,
     paddingRight: 10,
-    height: 40,
+    minHeight: 40,
+    paddingVertical: 6,
     borderRadius: RADIUS.md,
-    maxWidth: 220,
+    maxWidth: 240,
     borderWidth: StyleSheet.hairlineWidth,
     overflow: 'hidden',
   },

@@ -360,6 +360,41 @@ export function collapseStoredDuplicates(
   return out;
 }
 
+/**
+ * Ceiling on how many messages are kept on the device.
+ *
+ * The whole map is serialized to storage on every change, so its size is a
+ * cost paid on every send, receive and sync. Unbounded, a year of a busy
+ * line reaches tens of thousands of records and a multi-megabyte write per
+ * new text. Six thousand is about a year at this user's volume, twice what
+ * the relay holds, and comfortably a single write. Trimming is by age, and
+ * never touches the newest message in any thread, so a conversation that
+ * went quiet a year ago still shows where it was left.
+ */
+const MAX_STORED_MESSAGES = 6000;
+
+/** Drop the oldest messages past the cap, keeping every thread's latest. */
+export function trimStoredMessages(
+  messages: Record<string, SmsMessage>
+): Record<string, SmsMessage> {
+  const all = Object.values(messages);
+  if (all.length <= MAX_STORED_MESSAGES) return messages;
+  const newestPerThread = new Map<string, string>();
+  for (const m of all) {
+    const key = normalizePhone(m.counterparty);
+    const held = newestPerThread.get(key);
+    if (!held || messages[held].sentAt < m.sentAt) newestPerThread.set(key, m.sid);
+  }
+  const pinned = new Set(newestPerThread.values());
+  const evictable = all
+    .filter((m) => !pinned.has(m.sid))
+    .sort((a, b) => a.sentAt - b.sentAt);
+  const drop = new Set(evictable.slice(0, all.length - MAX_STORED_MESSAGES).map((m) => m.sid));
+  const out: Record<string, SmsMessage> = {};
+  for (const [sid, m] of Object.entries(messages)) if (!drop.has(sid)) out[sid] = m;
+  return out;
+}
+
 export function mergeMessage(messages: Record<string, SmsMessage>, m: SmsMessage): void {
   if (useMessages.getState().hiddenSids[m.sid]) return;
   // Scheduled sends live in the `scheduled` map until they deliver; canceled
@@ -617,6 +652,7 @@ export const useMessages = create<MessagesState>()(
             if (idle) return s;
             const messages = { ...s.messages };
             for (const m of fetched) mergeMessage(messages, m);
+            const bounded = trimStoredMessages(messages);
             // Reconcile scheduled sends: a fetched record still "scheduled"
             // stays in the map; any other status (sent/delivered/canceled) —
             // or absence once its send time has passed — drops the entry and
@@ -633,7 +669,7 @@ export const useMessages = create<MessagesState>()(
               delete scheduled[sid];
             }
             return {
-              messages,
+              messages: bounded,
               scheduled,
               lastSyncAt: Date.now(),
               highWaterMark: capped

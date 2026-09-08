@@ -9,6 +9,16 @@ import {
 } from './twilioAssets';
 
 /**
+ * Progress notes for a deploy that can take a minute, kept out of release
+ * builds: a shipped app has nobody reading its console, and every line
+ * written there is still a line of work on the JS thread.
+ */
+function log(...args: unknown[]): void {
+  if (__DEV__) console.log(...args);
+}
+
+
+/**
  * Calling & voicemail on the user's OWN Twilio account, zero external
  * servers. One serverless Function (deployed into the same 'dayflow-media'
  * Service that hosts MMS photos) handles everything via ?step=:
@@ -492,7 +502,7 @@ async function waitForBuild(
       `${SERVERLESS}/Services/${serviceSid}/Builds/${buildSid}/Status`
     );
     const status = str(res.json, 'status');
-    console.log('[voiceApi] build status:', status ?? `(http ${res.status})`);
+    log('[voiceApi] build status:', status ?? `(http ${res.status})`);
     if (status === 'completed') return 'completed';
     if (status === 'failed') return 'failed';
     await new Promise((r) => setTimeout(r, BUILD_POLL_INTERVAL_MS));
@@ -550,7 +560,7 @@ async function deployVoiceFunction(
   const smsFunctionSid = await findOrCreateFunction(creds, serviceSid, SMS_FUNCTION_FRIENDLY_NAME);
   if (!smsFunctionSid) return fail('Could not set up message push on your Twilio account.');
 
-  console.log('[voiceApi] uploading function sources');
+  log('[voiceApi] uploading function sources');
   const versionSid = await uploadFunctionVersion(
     creds, serviceSid, functionSid, FUNCTION_PATH, VOICE_FUNCTION_SOURCE, 'dayflow-voice-function.js'
   );
@@ -571,7 +581,7 @@ async function deployVoiceFunction(
     ...live.functionVersionSids,
   ]);
 
-  console.log(
+  log(
     '[voiceApi] building with',
     functionVersionSids.size,
     'function +',
@@ -590,7 +600,7 @@ async function deployVoiceFunction(
   if (buildStatus === 'failed') return fail('Voice deploy failed on Twilio.');
   if (buildStatus === 'timeout') return fail('Voice deploy timed out. Try again in a minute.');
 
-  console.log('[voiceApi] deploying build', buildSid);
+  log('[voiceApi] deploying build', buildSid);
   const deployed = await createDeployment(creds, serviceSid, env.sid, buildSid);
   if (!deployed) return fail('Could not publish the voice setup.');
 

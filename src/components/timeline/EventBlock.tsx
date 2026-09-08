@@ -18,6 +18,10 @@ export const EventBlock = memo(function EventBlock({ event, top, height }: Props
   return (
     <Pressable
       onPress={() => {}}
+      accessibilityRole="text"
+      accessibilityLabel={`${event.title}, ${formatMinutes(event.startMinutes)} to ${formatMinutes(
+        event.endMinutes
+      )}, from your calendar`}
       style={[
         styles.block,
         {

@@ -16,6 +16,8 @@ import {
 } from '../src/lib/dates';
 import { selectionHaptic, tapHaptic } from '../src/lib/haptics';
 import { earningsForDays, formatMoney } from '../src/lib/meetings';
+import { isRuleMarker } from '../src/lib/schoolDay';
+import { isSchoolTask } from '../src/lib/timetableImport';
 import { useSettings } from '../src/store/settings';
 import { instancesForDay, useTasks } from '../src/store/tasks';
 import { SPACING, taskColor, useTheme } from '../src/theme';
@@ -81,6 +83,88 @@ function DayBlock({ inst, onPress }: { inst: TaskInstance; onPress: () => void }
 }
 
 /** Pushed week overview: 7 slim day columns of compact task blocks. */
+type ColumnItem =
+  | { kind: 'task'; inst: TaskInstance }
+  | { kind: 'school'; start: number; end: number; count: number };
+
+/**
+ * A day's column, with the timetable folded to one block.
+ *
+ * Seven columns of eight class cards each was the timeline's wall-of-school
+ * problem multiplied by seven, at a size where nothing in a card could be
+ * read anyway. In a week view the only thing a school day needs to say is
+ * where it sits and how long it is; the periods live on the day itself.
+ * The block goes where the first period would, so the column still reads
+ * in time order.
+ */
+function columnItems(instances: TaskInstance[]): ColumnItem[] {
+  const classes = instances.filter(
+    (i) => isSchoolTask(i.task) && i.task.recurrence != null && i.task.startMinutes != null
+  );
+  if (classes.length < 3) return instances.map((inst) => ({ kind: 'task', inst }));
+  const start = Math.min(...classes.map((i) => i.task.startMinutes as number));
+  const end = Math.max(
+    ...classes.map((i) => (i.task.startMinutes as number) + i.task.durationMinutes)
+  );
+  const out: ColumnItem[] = [];
+  let placed = false;
+  for (const inst of instances) {
+    if (classes.includes(inst)) {
+      if (!placed) {
+        out.push({ kind: 'school', start, end, count: classes.length });
+        placed = true;
+      }
+      continue;
+    }
+    // A dismissal marker says what the block's end already says.
+    if (isSchoolTask(inst.task) && !inst.task.recurrence && isRuleMarker(inst.task.title)) continue;
+    out.push({ kind: 'task', inst });
+  }
+  return out;
+}
+
+function SchoolDayBlock({
+  startMinutes,
+  endMinutes,
+  count,
+  onPress,
+}: {
+  startMinutes: number;
+  endMinutes: number;
+  count: number;
+  onPress: () => void;
+}) {
+  const theme = useTheme();
+  const c = taskColor('sky');
+  const fg = theme.dark ? c.fgDark : c.fgLight;
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`School, ${formatMinutes(startMinutes)} to ${formatMinutes(endMinutes)}, ${count} periods. Opens the day.`}
+      style={({ pressed }) => [
+        styles.schoolBlock,
+        {
+          backgroundColor: theme.dark ? `${c.solid}1F` : `${c.solid}14`,
+          borderColor: theme.dark ? `${c.solid}55` : `${c.solid}40`,
+          opacity: pressed ? 0.7 : 1,
+        },
+      ]}
+    >
+      <Ionicons name="school" size={11} color={fg} />
+      <Text style={[styles.schoolLabel, { color: theme.text }]} numberOfLines={1}>
+        School
+      </Text>
+      <Text style={[styles.schoolTime, { color: theme.textTertiary }]} numberOfLines={1}>
+        {formatMinutes(startMinutes)}
+      </Text>
+      <Text style={[styles.schoolTime, { color: theme.textTertiary }]} numberOfLines={1}>
+        {`– ${formatMinutes(endMinutes)}`}
+      </Text>
+    </Pressable>
+  );
+}
+
 export default function WeekScreen() {
   const theme = useTheme();
   const router = useRouter();
@@ -101,6 +185,10 @@ export default function WeekScreen() {
     let minutes = 0;
     for (const list of dayInstances) {
       for (const inst of list) {
+        // Classes are where you have to be, not what you have to do. Counted,
+        // a school week read "41 tasks, 31.7 h planned" when the week's own
+        // plan was four things — true, useless, and discouraging.
+        if (isSchoolTask(inst.task)) continue;
         total += 1;
         if (inst.completed) done += 1;
         if (!inst.task.allDay && inst.task.startMinutes != null) {
@@ -256,16 +344,26 @@ export default function WeekScreen() {
                 i < 6 && { borderRightWidth: StyleSheet.hairlineWidth, borderRightColor: theme.separator },
               ]}
             >
-              {dayInstances[i].map((inst) => (
-                <DayBlock
-                  key={inst.task.id}
-                  inst={inst}
-                  onPress={() => {
-                    tapHaptic();
-                    router.push(`/task-editor?id=${inst.task.id}&date=${day}`);
-                  }}
-                />
-              ))}
+              {columnItems(dayInstances[i]).map((item) =>
+                item.kind === 'school' ? (
+                  <SchoolDayBlock
+                    key="school"
+                    startMinutes={item.start}
+                    endMinutes={item.end}
+                    count={item.count}
+                    onPress={() => openDay(day)}
+                  />
+                ) : (
+                  <DayBlock
+                    key={item.inst.task.id}
+                    inst={item.inst}
+                    onPress={() => {
+                      tapHaptic();
+                      router.push(`/task-editor?id=${item.inst.task.id}&date=${day}`);
+                    }}
+                  />
+                )
+              )}
             </View>
           ))}
         </View>
@@ -278,6 +376,16 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
   },
+  schoolBlock: {
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 5,
+    paddingVertical: 6,
+    marginBottom: 4,
+    gap: 1,
+  },
+  schoolLabel: { fontSize: 11, fontWeight: '800' },
+  schoolTime: { fontSize: 9, fontWeight: '600', fontVariant: ['tabular-nums'] },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
