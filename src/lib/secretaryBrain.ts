@@ -8,7 +8,7 @@ import type { ChatTurn, SecretaryOutcome, ToolRunner, ToolSpec } from './secreta
 /**
  * Which model actually answers.
  *
- * Claude Sonnet is the intended brain; Gemini stays as the fallback so the
+ * Claude Opus is the intended brain; Gemini stays as the fallback so the
  * secretary keeps working for anyone who has only ever saved a Google key,
  * and so switching is just adding a key rather than a broken feature in
  * between. Same rule as the messaging route: the credential IS the switch.
@@ -54,7 +54,7 @@ export async function connectedBrains(): Promise<BrainId[]> {
 
 /** Human label for the settings screen. */
 export function brainLabel(id: BrainId): string {
-  return id === 'claude' ? 'Claude Sonnet' : 'Gemini';
+  return id === 'claude' ? 'Claude Opus' : 'Gemini';
 }
 
 /**

@@ -28,7 +28,7 @@ const API_VERSION = '2023-06-01';
  * outage the day the vendor retires it. Haiku is the safety net — a weaker
  * answer beats a dead feature.
  */
-export const CLAUDE_MODELS = ['claude-sonnet-5', 'claude-haiku-4-5-20251001'] as const;
+export const CLAUDE_MODELS = ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'] as const;
 
 export const CLAUDE_MODEL = CLAUDE_MODELS[0];
 
@@ -43,7 +43,13 @@ export const CLAUDE_MODEL = CLAUDE_MODELS[0];
 const MAX_ROUNDS = 10;
 /** Per request. Generous because every request now carries an inbox digest. */
 const TIMEOUT_MS = 90_000;
-const MAX_TOKENS = 900;
+/**
+ * Room for the answer. Raised from 900 because Opus 5 thinks before it
+ * answers by default and the thinking counts against this ceiling — at 900
+ * the reasoning alone could hit the cap and the user got a reply cut off
+ * mid-sentence with no error to say why.
+ */
+const MAX_TOKENS = 4096;
 
 /** A tool call the model asked for, in Anthropic's shape. */
 interface ToolUseBlock {
@@ -131,11 +137,15 @@ async function postTurn(
   messages: ClaudeMessage[],
   tools: ToolSpec[],
   /** Overrides for callers that are not the secretary — see askOnce. */
-  override?: { system?: string; maxTokens?: number; temperature?: number }
+  override?: { system?: string; maxTokens?: number }
 ): Promise<{ ok: true; data: ClaudeResponse } | { ok: false; error: string }> {
+  // Deliberately no temperature, top_p or top_k. The Claude 5 family (and
+  // 4.7 onward) rejects sampling parameters outright with a 400, and the
+  // 0.4 that used to be here was the entire reason every request failed
+  // before a single token came back. Adaptive thinking is on by default on
+  // Opus 5 and needs nothing set.
   const body: Record<string, unknown> = {
     max_tokens: override?.maxTokens ?? MAX_TOKENS,
-    temperature: override?.temperature ?? 0.4,
     system: override?.system ?? systemInstructionNow(),
     messages,
   };
@@ -241,24 +251,21 @@ export async function askOnce(
       ]
     : user;
   const messages: ClaudeMessage[] = [{ role: 'user', content: content as ClaudeMessage['content'] }];
-  // Putting the opening bracket in the model's own mouth. It can only
-  // continue from there, so there is no room for "Here is the schedule you
-  // asked for:" in front of it — the single most common way a JSON answer
-  // arrives unparseable.
-  if (opts.json) messages.push({ role: 'assistant', content: '[' });
+  // No assistant prefill: the Claude 5 family returns a 400 for one. A JSON
+  // answer is asked for in the instruction and read leniently instead, and
+  // the readers retry once when it still arrives wrapped in prose.
   const res = await postTurn(apiKey, messages, [], {
-    system,
+    system: opts.json
+      ? `${system}\n\nReply with the JSON alone: no preamble, no code fence, nothing before or after it.`
+      : system,
     maxTokens: 8192,
-    temperature: 0,
   });
   if (!res.ok) return res;
-  const body = (res.data.content ?? [])
+  const text = (res.data.content ?? [])
     .filter(isText)
     .map((b) => b.text)
     .join('')
     .trim();
-  // The prefill is not echoed back, so it has to be put in front again.
-  const text = opts.json && body && !body.startsWith('[') ? `[${body}` : body;
   return text ? { ok: true, text } : { ok: false, error: 'Claude answered with nothing.' };
 }
 

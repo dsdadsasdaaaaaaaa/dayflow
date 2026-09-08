@@ -1458,9 +1458,10 @@ const DIGEST_TIERS = [
   // A fortnight, in full. Summarizing this window was costing exactly the
   // thing the assistant is for: a stranger's three messages got clipped to
   // one, the assistant never saw them ask about Thursday, and a booking that
-  // was there to be made was not suggested. Everything inside two weeks is
-  // now quoted whole.
-  { withinDays: 14, messages: FULL_THREAD, label: 'last two weeks, in full' },
+  // was there to be made was not suggested. Everything inside three weeks
+  // is now quoted whole — Opus 5 has a million tokens of room, and a whole
+  // inbox is a rounding error against that.
+  { withinDays: 21, messages: FULL_THREAD, label: 'last three weeks, in full' },
   { withinDays: 30, messages: 2, label: 'cooling' },
 ] as const;
 
@@ -1480,13 +1481,14 @@ const DIGEST_BODY_CHARS = 240;
 /**
  * Ceiling on the whole picture, in characters.
  *
- * "Every chat from the past fortnight" is the instruction, and on an ordinary
- * fortnight it is easily met. This exists for the fortnight that is not
+ * "Every chat from the past three weeks" is the instruction, and on an
+ * ordinary three weeks it is easily met — roughly a hundred thousand tokens
+ * against a window of a million. This exists for the fortnight that is not
  * ordinary — an imported history, a group blast, a bot loop — where the
  * alternative to a limit is a request too large to send at all. When it
  * bites, the digest says so rather than quietly ending early.
  */
-const DIGEST_CHAR_BUDGET = 120_000;
+const DIGEST_CHAR_BUDGET = 400_000;
 
 const DAY_MS = 24 * 3_600_000;
 

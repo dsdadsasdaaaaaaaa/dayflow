@@ -38,7 +38,7 @@ import { SettingsSection } from './SettingsSection';
 const KEY_URL = 'https://console.anthropic.com/settings/keys';
 
 const CAPTION =
-  'Runs on Claude Sonnet, using your own Anthropic key. Usage is billed to ' +
+  'Runs on Claude Opus, using your own Anthropic key. Usage is billed to ' +
   'that key, not to DayFlow. A Google AI key still works if you have one.';
 
 /**
