@@ -95,101 +95,118 @@ export const useSecretary = create<SecretaryState>()(
           lastError: null,
         }));
 
-        const brain = await loadBrain();
-        if (!brain) {
-          set({
-            busy: false,
-            lastError: 'Add your Anthropic API key in Settings to use the assistant.',
-          });
-          return;
-        }
+        try {
+          const brain = await loadBrain();
+          if (!brain) {
+            set({
+              busy: false,
+              lastError: 'Add your Anthropic API key in Settings to use the assistant.',
+            });
+            return;
+          }
 
-        // Fresh map every request: real names in, labels out.
-        const map = buildPseudonyms(collectClientNames());
-        // Rebuilt from the local text only: `mentions` and `actions` are
-        // on-device display state in REAL names and must never go back out.
-        const history: ChatTurn[] = get()
-          .messages.slice(-CONTEXT_TURNS)
-          .map((t) => ({ role: t.role, at: t.at, text: redactText(t.text, map) }));
+          // Fresh map every request: real names in, labels out.
+          const map = buildPseudonyms(collectClientNames());
+          // Rebuilt from the local text only: `mentions` and `actions` are
+          // on-device display state in REAL names and must never go back out.
+          const history: ChatTurn[] = get()
+            .messages.slice(-CONTEXT_TURNS)
+            .map((t) => ({ role: t.role, at: t.at, text: redactText(t.text, map) }));
 
-        // The inbox picture rides in FRONT of the conversation, as its own
-        // turn, so it reads as background the assistant was handed rather
-        // than as something the user said. Rebuilt every request: a snapshot
-        // from ten minutes ago is worse than none, because it looks current.
-        const { secretaryPreloadChats } = useSettings.getState().settings;
-        if (secretaryPreloadChats) {
-          const digest = buildInboxDigest(map);
-          if (digest) {
-            history.unshift({ role: 'user', at: Date.now(), text: digest, cache: true });
-            history.splice(1, 0, {
-              role: 'model',
-              at: Date.now(),
-              text: 'Understood, I have the current inbox in mind.',
+          // The inbox picture rides in FRONT of the conversation, as its own
+          // turn, so it reads as background the assistant was handed rather
+          // than as something the user said. Rebuilt every request: a snapshot
+          // from ten minutes ago is worse than none, because it looks current.
+          const { secretaryPreloadChats } = useSettings.getState().settings;
+          if (secretaryPreloadChats) {
+            const digest = buildInboxDigest(map);
+            if (digest) {
+              history.unshift({ role: 'user', at: Date.now(), text: digest, cache: true });
+              history.splice(1, 0, {
+                role: 'model',
+                at: Date.now(),
+                text: 'Understood, I have the current inbox in mind.',
+              });
+            }
+          }
+          assertNoPii(
+            history.map((t) => t.text).join('\n'),
+            map
+          );
+
+          // A fresh sink per request. Write tools only PROPOSE into this — the
+          // model cannot send or book anything by itself.
+          const proposals: SecretaryAction[] = [];
+          // The notes tool is absent, not merely refused, when the user has not
+          // opted in — the model cannot call what it was never offered.
+          const { secretaryUsesNotes: usesNotes, secretaryReadsMessages: readsMessages } =
+            useSettings.getState().settings;
+          const outcome = await askBrain(
+            brain,
+            history,
+            secretaryTools(usesNotes, readsMessages),
+            buildToolRunner(map, proposals)
+          );
+          if (!outcome.ok) {
+            set({ busy: false, lastError: outcome.error });
+            return;
+          }
+
+          // Labels become real names again on device, right before display.
+          const reply = restoreText(outcome.text, map);
+          // Which clients did it actually name? Those get one-tap chips.
+          const mentions = map.entries
+            .filter((e) => reply.includes(e.real))
+            .map((e) => e.real);
+
+          // Proposals come back labelled ("Client 3"); the real name is put on
+          // here, on device. A label the map cannot resolve is a hallucinated
+          // client — drop it rather than show a card for nobody. Draft bodies
+          // are written by the model and carry labels too, so they get the same
+          // restore pass as the answer text.
+          const actions: SecretaryAction[] = [];
+          for (const p of proposals) {
+            if (actions.length >= MAX_ACTIONS) break;
+            const client = map.toReal(p.label);
+            if (!client) continue;
+            actions.push({
+              ...p,
+              client,
+              ...(p.text != null ? { text: restoreText(p.text, map) } : {}),
             });
           }
-        }
-        assertNoPii(
-          history.map((t) => t.text).join('\n'),
-          map
-        );
 
-        // A fresh sink per request. Write tools only PROPOSE into this — the
-        // model cannot send or book anything by itself.
-        const proposals: SecretaryAction[] = [];
-        // The notes tool is absent, not merely refused, when the user has not
-        // opted in — the model cannot call what it was never offered.
-        const { secretaryUsesNotes: usesNotes, secretaryReadsMessages: readsMessages } =
-          useSettings.getState().settings;
-        const outcome = await askBrain(
-          brain,
-          history,
-          secretaryTools(usesNotes, readsMessages),
-          buildToolRunner(map, proposals)
-        );
-        if (!outcome.ok) {
-          set({ busy: false, lastError: outcome.error });
-          return;
-        }
-
-        // Labels become real names again on device, right before display.
-        const reply = restoreText(outcome.text, map);
-        // Which clients did it actually name? Those get one-tap chips.
-        const mentions = map.entries
-          .filter((e) => reply.includes(e.real))
-          .map((e) => e.real);
-
-        // Proposals come back labelled ("Client 3"); the real name is put on
-        // here, on device. A label the map cannot resolve is a hallucinated
-        // client — drop it rather than show a card for nobody. Draft bodies
-        // are written by the model and carry labels too, so they get the same
-        // restore pass as the answer text.
-        const actions: SecretaryAction[] = [];
-        for (const p of proposals) {
-          if (actions.length >= MAX_ACTIONS) break;
-          const client = map.toReal(p.label);
-          if (!client) continue;
-          actions.push({
-            ...p,
-            client,
-            ...(p.text != null ? { text: restoreText(p.text, map) } : {}),
+          set((s) => ({
+            messages: capTurns([
+              ...s.messages,
+              {
+                role: 'model',
+                text: reply,
+                at: Date.now(),
+                ...(mentions.length > 0 ? { mentions } : {}),
+                ...(actions.length > 0 ? { actions } : {}),
+              },
+            ]),
+            busy: false,
+            lastError: null,
+          }));
+ 
+        } catch (e) {
+          // Nothing in here was guarded, so any throw became an unhandled
+          // rejection: `busy` stayed true, the spinner span forever, and the
+          // screen looked like the app had died. It is one screen's worth of
+          // work over a large inbox — building the picture, redacting it,
+          // serializing it — and every step of that can fail on a phone in a
+          // way it never does on a desk.
+          set({
+            busy: false,
+            lastError:
+              e instanceof Error
+                ? `The assistant could not finish: ${e.message}`
+                : 'The assistant could not finish.',
           });
         }
-
-        set((s) => ({
-          messages: capTurns([
-            ...s.messages,
-            {
-              role: 'model',
-              text: reply,
-              at: Date.now(),
-              ...(mentions.length > 0 ? { mentions } : {}),
-              ...(actions.length > 0 ? { actions } : {}),
-            },
-          ]),
-          busy: false,
-          lastError: null,
-        }));
-      },
+     },
 
       clear: () => set({ messages: [], lastError: null }),
     }),

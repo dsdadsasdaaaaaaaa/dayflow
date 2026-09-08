@@ -1501,6 +1501,19 @@ const DIGEST_BODY_CHARS = 2000;
 // under half the window with the conversation and tool results on top.
 const DIGEST_CHAR_BUDGET = 1_600_000;
 
+/**
+ * A hard stop on the whole picture, independent of the budget above.
+ *
+ * The budget is about what is worth sending; this is about what a phone can
+ * survive building. The picture is assembled as thousands of strings, joined
+ * into one, then serialized again inside the request body — several copies
+ * of it alive at once, on a device with a fraction of a laptop's JS heap.
+ * Hermes also refuses to make a string past a certain length outright. Two
+ * million characters is comfortably under both, and past the point where the
+ * budget above would have stopped anyway on any real inbox.
+ */
+const DIGEST_HARD_LIMIT = 2_000_000;
+
 const DAY_MS = 24 * 3_600_000;
 
 /**
@@ -1660,7 +1673,7 @@ export function buildInboxDigest(map: PseudonymMap): string | null {
     lines.push(...dormant.map((d) => `  ${d}`));
   }
 
-  return [
+  const picture = [
     todayLine(map),
     'CURRENT INBOX (loaded automatically, not something the user typed).',
     `EVERY conversation from the last ${DIGEST_TIERS[0].withinDays} days is quoted here IN FULL — every message, both directions. Older ones are thinner: two messages up to a month, a single summary line beyond that. Each quoted line names who wrote it: a client label, or "you" for the user.`,
@@ -1679,6 +1692,19 @@ export function buildInboxDigest(map: PseudonymMap): string | null {
     '',
     ...lines,
   ].join('\n');
+
+  // Truncating here would cut a thread in half mid-sentence and leave the
+  // assistant believing it had read the whole thing. Better to say plainly
+  // that the picture was too large to build and let it use its tools.
+  if (picture.length > DIGEST_HARD_LIMIT) {
+    return [
+      todayLine(map),
+      'CURRENT INBOX: too large to load in full this time.',
+      `The last ${DIGEST_TIERS[0].withinDays} days came to ${Math.round(picture.length / 1000)}k characters, past what this app will build in one go.`,
+      'You have no inbox picture for this question. Use scan_conversations and search_messages to find what you need, and get_conversation to read anyone in particular. Say that you are working without the usual overview if it affects your answer.',
+    ].join('\n');
+  }
+  return picture;
 }
 
 // ------------------------------------------------------------- proposals

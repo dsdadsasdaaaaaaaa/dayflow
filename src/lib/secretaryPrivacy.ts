@@ -124,14 +124,12 @@ export function redactText(text: string, map: PseudonymMap): string {
   //
   // Longest first, so "Marcus J" is matched before the bare "Marcus" that
   // nameFragments derives from it.
-  for (const t of expandNameTargets(map)) {
-    // Word-ish boundaries only — no lookbehind (Hermes), so the leading
-    // separator is captured and put back.
-    const re = new RegExp(
-      `(^|[^A-Za-z0-9_])${escapeRegExp(t.real)}(?![A-Za-z0-9_])`,
-      'gi'
-    );
-    out = out.replace(re, `$1${t.pseudo}`);
+  for (const { re, pseudo } of compiledTargets(map)) {
+    // The pattern is global and therefore stateful; reset it, or the second
+    // message to mention a name starts searching from where the first left
+    // off and quietly leaves the name in.
+    re.lastIndex = 0;
+    out = out.replace(re, `$1${pseudo}`);
   }
 
   // Whatever is still phone-shaped is a number we have no label for — a
@@ -158,6 +156,40 @@ export function redactText(text: string, map: PseudonymMap): string {
  * This deliberately over-matches — a client called "Grace" will also redact
  * the word "grace". Losing a little wording is the cheaper mistake.
  */
+/**
+ * The compiled redaction pass for one map, built once and reused.
+ *
+ * This is the difference between the assistant answering and the app being
+ * killed. redactText runs once per message, and it used to expand, dedupe,
+ * sort and then COMPILE a fresh RegExp for every name on every call. With a
+ * couple of hundred known people and a few thousand messages in the picture
+ * that is millions of RegExp constructions on the JS thread — minutes of
+ * solid blocking, which iOS does not wait for. It sends the watchdog.
+ *
+ * Nothing about the work was per-message; only the text was. So it is done
+ * once and cached against the map, keyed on how many entries it had when
+ * compiled, since toPseudo can mint a new label mid-pass.
+ */
+interface CompiledTargets {
+  count: number;
+  patterns: { re: RegExp; pseudo: string }[];
+}
+
+const compiledCache = new WeakMap<PseudonymMap, CompiledTargets>();
+
+function compiledTargets(map: PseudonymMap): { re: RegExp; pseudo: string }[] {
+  const cached = compiledCache.get(map);
+  if (cached && cached.count === map.entries.length) return cached.patterns;
+  const patterns = expandNameTargets(map).map((t) => ({
+    // Word-ish boundaries only — no lookbehind (Hermes), so the leading
+    // separator is captured and put back.
+    re: new RegExp(`(^|[^A-Za-z0-9_])${escapeRegExp(t.real)}(?![A-Za-z0-9_])`, 'gi'),
+    pseudo: t.pseudo,
+  }));
+  compiledCache.set(map, { count: map.entries.length, patterns });
+  return patterns;
+}
+
 function expandNameTargets(map: PseudonymMap): { real: string; pseudo: string }[] {
   const seen = new Set<string>();
   const out: { real: string; pseudo: string }[] = [];
