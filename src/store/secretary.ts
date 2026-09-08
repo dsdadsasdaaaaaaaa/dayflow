@@ -120,7 +120,7 @@ export const useSecretary = create<SecretaryState>()(
         if (secretaryPreloadChats) {
           const digest = buildInboxDigest(map);
           if (digest) {
-            history.unshift({ role: 'user', at: Date.now(), text: digest });
+            history.unshift({ role: 'user', at: Date.now(), text: digest, cache: true });
             history.splice(1, 0, {
               role: 'model',
               at: Date.now(),

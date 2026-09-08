@@ -1,5 +1,6 @@
 import {
   systemInstructionNow,
+  systemInstructionParts,
   type ChatTurn,
   type SecretaryOutcome,
   type ToolRunner,
@@ -66,7 +67,15 @@ interface TextBlock {
 
 type ContentBlock = ToolUseBlock | TextBlock | { type: string; [k: string]: unknown };
 
+interface ClaudeUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}
+
 interface ClaudeResponse {
+  usage?: ClaudeUsage;
   content?: ContentBlock[];
   stop_reason?: string;
   error?: { type?: string; message?: string };
@@ -144,9 +153,17 @@ async function postTurn(
   // 0.4 that used to be here was the entire reason every request failed
   // before a single token came back. Adaptive thinking is on by default on
   // Opus 5 and needs nothing set.
+  // The stable instructions carry a cache breakpoint; the clock comes after
+  // it, so the breakpoint covers tools + instructions and the minute-by-
+  // minute change never reaches the cached prefix. A caller supplying its
+  // own system prompt (the readers) is one-shot and gets it plain.
+  const parts = systemInstructionParts();
   const body: Record<string, unknown> = {
     max_tokens: override?.maxTokens ?? MAX_TOKENS,
-    system: override?.system ?? systemInstructionNow(),
+    system: override?.system ?? [
+      { type: 'text', text: parts.stable, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: parts.volatile },
+    ],
     messages,
   };
   if (tools.length > 0) {
@@ -187,6 +204,14 @@ async function postTurn(
       try {
         const data = JSON.parse(text) as ClaudeResponse;
         resolvedModel = model;
+        // Where the tokens went, in development. cache_read at zero on the
+        // second round of a question means a silent invalidator is back.
+        if (__DEV__ && data.usage) {
+          const u = data.usage;
+          console.log(
+            `[claude] ${model} in=${u.input_tokens ?? 0} cache_read=${u.cache_read_input_tokens ?? 0} cache_write=${u.cache_creation_input_tokens ?? 0} out=${u.output_tokens ?? 0}`
+          );
+        }
         return { ok: true, data };
       } catch {
         return { ok: false, error: 'Anthropic sent a reply the app could not read.' };
@@ -281,7 +306,13 @@ export async function askSecretary(
 
   const messages: ClaudeMessage[] = history.map((t) => ({
     role: t.role === 'model' ? 'assistant' : 'user',
-    content: t.text,
+    // The inbox picture is a hundred thousand tokens that do not change
+    // between the tool rounds of one question, and rarely between
+    // questions. A breakpoint after it means every round past the first
+    // reads it back at a tenth of the price instead of paying for it again.
+    content: t.cache
+      ? [{ type: 'text', text: t.text, cache_control: { type: 'ephemeral' } }]
+      : t.text,
   }));
 
   const toolsUsed: string[] = [];

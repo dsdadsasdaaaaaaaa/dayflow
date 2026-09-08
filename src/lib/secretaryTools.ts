@@ -1508,6 +1508,13 @@ function looksAutomated(t: WalkedThread): boolean {
   return !t.messages.some((m) => m.direction === 'out');
 }
 
+/** "Sep 8 14:32", local time — the same bytes every time it is rendered. */
+function stamp(ms: number): string {
+  const d = new Date(ms);
+  const month = d.toLocaleDateString('en-US', { month: 'short' });
+  return `${month} ${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
 /** "3 hours" / "6 days" / "7 weeks" — a length, not a timestamp. */
 function quietFor(ms: number): string {
   const hours = ms / 3_600_000;
@@ -1620,7 +1627,11 @@ export function buildInboxDigest(map: PseudonymMap): string | null {
       const speaker = m.direction === 'in' ? t.label : 'you';
       const text = redactText(m.body.trim(), map).slice(0, DIGEST_BODY_CHARS);
       if (!text) continue;
-      const line = `  ${speaker} (${quietFor(now - m.sentAt)} ago): ${text}`;
+      // An absolute stamp, not "3 hours ago". Relative wording re-rendered
+      // the whole picture every hour, which is every hour the cache was
+      // thrown away; a fixed time is the same bytes until a message arrives,
+      // and reads better against the date the model is given anyway.
+      const line = `  ${speaker} (${stamp(m.sentAt)}): ${text}`;
       if (budget - line.length < 0) {
         trimmed++;
         break;
@@ -1643,6 +1654,7 @@ export function buildInboxDigest(map: PseudonymMap): string | null {
     'CURRENT INBOX (loaded automatically, not something the user typed).',
     `EVERY conversation from the last ${DIGEST_TIERS[0].withinDays} days is quoted here IN FULL — every message, both directions. Older ones are thinner: two messages up to a month, a single summary line beyond that. Each quoted line names who wrote it: a client label, or "you" for the user.`,
     'Rows marked UNANSWERED are people who wrote and were never replied to. Treat those as the first thing worth raising, whether or not they are a saved client.',
+    'Each quoted message carries the local time it was sent, "Sep 8 14:32". Work out how long ago that was from the current time you are given.',
     omitted > 0
       ? `${omitted} further conversations did not fit — use scan_conversations or search_messages if the answer may involve them.`
       : 'This covers every conversation with any activity in the past few months.',

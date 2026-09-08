@@ -16,6 +16,12 @@ export interface ChatTurn {
   /** Epoch ms. */
   at: number;
   /**
+   * Worth a cache breakpoint: the turn is large, identical across the tool
+   * rounds of one question, and usually identical across questions too.
+   * The inbox picture is the one that matters.
+   */
+  cache?: boolean;
+  /**
    * Real client names this answer referred to, resolved on-device after the
    * labels are mapped back. Powers the one-tap "Message X" chips — never sent
    * anywhere, purely a local display aid.
@@ -88,7 +94,17 @@ export const SYSTEM_INSTRUCTION = [
  * get_schedule, so the current moment is stamped into the system instruction
  * on every request (in the user's own timezone, not UTC).
  */
-export function systemInstructionNow(): string {
+/**
+ * The system prompt in two halves, because caching is a prefix match.
+ *
+ * `stable` is identical from one request to the next and is what a cache
+ * breakpoint goes after: the instructions plus the tools that precede them
+ * come to a couple of thousand tokens, and behind them sits the inbox
+ * picture at a hundred thousand more. `volatile` is the clock, which changes
+ * every minute; with it inside the cached block every request missed the
+ * cache and paid full price for the whole picture on every tool round.
+ */
+export function systemInstructionParts(): { stable: string; volatile: string } {
   const readsMessages = useSettings.getState().settings.secretaryReadsMessages;
   const now = new Date();
   const weekday = now.toLocaleDateString('en-US', { weekday: 'long' });
@@ -96,12 +112,19 @@ export function systemInstructionNow(): string {
   const m = String(now.getMonth() + 1).padStart(2, '0');
   const d = String(now.getDate()).padStart(2, '0');
   const minutes = now.getHours() * 60 + now.getMinutes();
-  return [
-    SYSTEM_INSTRUCTION,
-    readsMessages
-      ? 'You CAN read the text of messages: it arrives in tool results, with names, numbers, emails and addresses already replaced. Reason from what was actually said.'
-      : 'You cannot see the text of any message, only when it was sent. Never guess at wording or claim to know what someone said.',
-    `Right now it is ${weekday}, ${y}-${m}-${d}, ${minutes} minutes past midnight local time.`,
-    'Resolve "today", "tomorrow", "this evening" and weekday names against that, and pass real YYYY-MM-DD dates to tools.',
-  ].join(' ');
+  return {
+    stable: [
+      SYSTEM_INSTRUCTION,
+      readsMessages
+        ? 'You CAN read the text of messages: it arrives in tool results, with names, numbers, emails and addresses already replaced. Reason from what was actually said.'
+        : 'You cannot see the text of any message, only when it was sent. Never guess at wording or claim to know what someone said.',
+      'Resolve "today", "tomorrow", "this evening" and weekday names against the current time you are given, and pass real YYYY-MM-DD dates to tools.',
+    ].join(' '),
+    volatile: `Right now it is ${weekday}, ${y}-${m}-${d}, ${minutes} minutes past midnight local time.`,
+  };
+}
+
+export function systemInstructionNow(): string {
+  const { stable, volatile } = systemInstructionParts();
+  return `${stable} ${volatile}`;
 }
