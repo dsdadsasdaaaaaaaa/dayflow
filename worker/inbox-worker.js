@@ -42,6 +42,23 @@ const SCHEDULE_KEY = 'schedule';
  */
 const CALL_KEY = 'call';
 
+/**
+ * The live link: a snapshot of the whole app, and a queue of changes for it.
+ *
+ * Guarded by DATA_SECRET, deliberately not the secret that guards messages.
+ * The SMS secret is pasted into SMSGate, sits in a URL an automation app can
+ * read, and has been shared more than once; it should not also be the key to
+ * a client book. Two secrets means losing one does not lose both, and either
+ * can be rotated without touching the other.
+ */
+const DATA_KEY = 'data';
+const QUEUE_KEY = 'queue';
+
+/** A snapshot past this is a bug, not a big inbox. */
+const MAX_DATA_BYTES = 5_000_000;
+/** Changes waiting for the app. Small on purpose: these are single actions. */
+const MAX_QUEUED = 50;
+
 /** Attachments the forwarder sends with a schedule: bell-schedule PDFs. */
 const MAX_ATTACHMENTS = 8;
 const MAX_ATTACHMENT_BYTES = 700_000;
@@ -291,6 +308,89 @@ export default {
         return new Response('', { headers: { 'content-type': 'text/plain' } });
       }
       return new Response(pending.to, { headers: { 'content-type': 'text/plain' } });
+    }
+
+    // --- the live link ------------------------------------------------------
+    const dataSecret = env.DATA_SECRET;
+    const dataAuth = (req) =>
+      dataSecret != null &&
+      secretMatches((req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, ''), dataSecret);
+
+    // The app pushes its whole state here. Replaces rather than merges: a
+    // snapshot is a statement about right now, and half of one is worse than
+    // none because it still looks current.
+    if (request.method === 'POST' && url.pathname.startsWith('/data/')) {
+      const given = decodeURIComponent(url.pathname.slice('/data/'.length));
+      if (!dataSecret) return json({ error: 'live link is not configured' }, 501);
+      if (!secretMatches(given, dataSecret)) return json({ error: 'forbidden' }, 403);
+      const body = await request.text();
+      if (body.length > MAX_DATA_BYTES) return json({ error: 'snapshot too large' }, 413);
+      let parsed = null;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        return json({ error: 'body was not JSON' }, 400);
+      }
+      await env.INBOX.put(
+        DATA_KEY,
+        JSON.stringify({ ...parsed, storedAt: Date.now() })
+      );
+      return json({ ok: true, bytes: body.length });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/data') {
+      if (!dataSecret) return json({ error: 'live link is not configured' }, 501);
+      if (!dataAuth(request)) return json({ error: 'forbidden' }, 403);
+      const stored = await env.INBOX.get(DATA_KEY, 'json');
+      return json({ data: stored ?? null });
+    }
+
+    // Turning the link off has to actually remove what is up here, or "off"
+    // means "still readable by whoever has the secret".
+    if (request.method === 'DELETE' && url.pathname.startsWith('/data/')) {
+      const given = decodeURIComponent(url.pathname.slice('/data/'.length));
+      if (!dataSecret) return json({ error: 'live link is not configured' }, 501);
+      if (!secretMatches(given, dataSecret)) return json({ error: 'forbidden' }, 403);
+      await env.INBOX.delete(DATA_KEY);
+      await env.INBOX.delete(QUEUE_KEY);
+      return json({ ok: true, cleared: true });
+    }
+
+    // An assistant queues a change; the app collects it and decides what to
+    // do with it. Nothing here reaches a client: a message is queued as a
+    // DRAFT and the app still requires a person to send it.
+    if (request.method === 'POST' && url.pathname === '/queue') {
+      if (!dataSecret) return json({ error: 'live link is not configured' }, 501);
+      if (!dataAuth(request)) return json({ error: 'forbidden' }, 403);
+      let change = null;
+      try {
+        change = await request.json();
+      } catch {
+        return json({ error: 'body was not JSON' }, 400);
+      }
+      if (!change || typeof change.action !== 'string') {
+        return json({ error: 'a change needs an action' }, 400);
+      }
+      const queue = (await env.INBOX.get(QUEUE_KEY, 'json')) ?? [];
+      if (queue.length >= MAX_QUEUED) return json({ error: 'queue is full' }, 429);
+      queue.push({
+        id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        at: Date.now(),
+        ...change,
+      });
+      await env.INBOX.put(QUEUE_KEY, JSON.stringify(queue));
+      return json({ ok: true, queued: queue.length });
+    }
+
+    // The app collects everything waiting and the queue is emptied in the
+    // same breath, so a change is applied once even if two syncs overlap.
+    if (request.method === 'GET' && url.pathname.startsWith('/queue/')) {
+      const given = decodeURIComponent(url.pathname.slice('/queue/'.length));
+      if (!dataSecret) return json({ error: 'live link is not configured' }, 501);
+      if (!secretMatches(given, dataSecret)) return json({ error: 'forbidden' }, 403);
+      const queue = (await env.INBOX.get(QUEUE_KEY, 'json')) ?? [];
+      if (queue.length > 0) await env.INBOX.delete(QUEUE_KEY);
+      return json({ changes: queue });
     }
 
     if (request.method === 'GET' && url.pathname === '/health') {

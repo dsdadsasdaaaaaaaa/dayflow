@@ -31,6 +31,7 @@ import { SecretarySection } from '../src/components/settings/SecretarySection';
 import { SettingsRow } from '../src/components/settings/SettingsRow';
 import { shareAuditExport } from '../src/lib/auditExport';
 import { SCOPE_LABELS, shareDataExport } from '../src/lib/dataExport';
+import { LiveLinkSection } from '../src/components/settings/LiveLinkSection';
 import { SettingsSection } from '../src/components/settings/SettingsSection';
 import { Stepper } from '../src/components/settings/Stepper';
 import {
@@ -931,6 +932,8 @@ export default function SettingsScreen() {
             </View>
           ) : null}
         </SettingsSection>
+
+        <LiveLinkSection />
 
         <SettingsSection
           delay={315}

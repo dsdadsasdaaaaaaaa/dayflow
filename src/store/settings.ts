@@ -35,6 +35,8 @@ export const DEFAULT_SETTINGS: Settings = {
   callForwardTo: '',
   callShowWorkNumber: false,
   voicemailGreeting: "Sorry I missed you — leave a message after the tone and I'll text you back.",
+  liveLinkEnabled: false,
+  liveLinkScope: 'clients',
   appLock: false,
   appLockGraceSeconds: 60,
   safetyAlertEnabled: false,

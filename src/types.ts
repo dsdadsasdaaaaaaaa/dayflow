@@ -243,6 +243,17 @@ export interface Settings {
   callShowWorkNumber: boolean;
   /** Greeting spoken before recording a voicemail. */
   voicemailGreeting: string;
+  /**
+   * Share a live copy of everything with an assistant.
+   *
+   * Off by default and worth keeping that way: on, the client book and — at
+   * the widest scope — every message travels to the relay, where anyone
+   * holding the data secret can read it. Switching it off deletes the
+   * shared copy rather than merely stopping the pushes.
+   */
+  liveLinkEnabled: boolean;
+  /** How much of it to share. Same three levels as the manual export. */
+  liveLinkScope: 'schedule' | 'clients' | 'everything';
   /** Require Face ID / passcode to open the app. */
   appLock: boolean;
   /**

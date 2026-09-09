@@ -2,6 +2,7 @@ import * as BackgroundTask from 'expo-background-task';
 import * as Notifications from 'expo-notifications';
 import * as TaskManager from 'expo-task-manager';
 import { autoImportSchedule } from './scheduleAuto';
+import { syncLiveLink } from './liveLink';
 import { Platform } from 'react-native';
 import { useClientMeta, isPhoneBlocked } from '../store/clientMeta';
 import { mergeMessage, useMessages } from '../store/messages';
@@ -107,6 +108,10 @@ TaskManager.defineTask(TASK_NAME, async () => {
   // compete with this one for the same iOS budget, and the thing it waits
   // for arrives once a week.
   try { await autoImportSchedule(); } catch {}
+  // The live link rides the same wake: send what changed, take what an
+  // assistant queued. Off unless the user switched it on, in which case
+  // this returns immediately.
+  try { await syncLiveLink(); } catch {}
   try {
     await notifyNewInbound();
     return BackgroundTask.BackgroundTaskResult.Success;
@@ -140,6 +145,11 @@ export async function checkInboundNow(): Promise<void> {
   // overnight should not wait on its goodwill.
   try {
     await autoImportSchedule();
+  } catch {
+    // Next wake catches up.
+  }
+  try {
+    await syncLiveLink();
   } catch {
     // Next wake catches up.
   }
