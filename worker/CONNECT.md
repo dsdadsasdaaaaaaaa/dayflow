@@ -57,7 +57,14 @@ minutes at most). Actions:
     — written into that conversation's composer as a DRAFT. It is never
       sent. I press send myself. Do not tell me a message was sent.
 
-Anything else is rejected and counted.
+    {"action":"import_calendar","ics":"BEGIN:VCALENDAR..."}
+    — a whole .ics (the school's Edsby year calendar). Closures, early
+      closings and late starts amend the timetable; the rest land as
+      school items. Idempotent, safe to resend.
+
+Anything else is rejected and counted. `data.build` in the snapshot is the
+app's running update id; a change queued before the app updates to a build
+that knows it is dropped as "rejected".
 
 ## How to behave
 

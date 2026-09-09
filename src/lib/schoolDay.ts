@@ -35,8 +35,12 @@ export interface DayRule {
   startsAt: number | null;
 }
 
-const CLOSED = /\b(school closed|no school|closed)\b/i;
-const DISMISSAL = /\bdismissal\b/i;
+// The newsletter says "School Closed" and "Dismissal"; the year calendar says
+// "No classes", "PD Day", "Winter Break" and "3:08 Closing". Same facts.
+const CLOSED = /\b(school closed|no school|closed|no classes|pd day|(?:winter|mid[- ]winter|march|spring) break)\b/i;
+const DISMISSAL = /\b(dismissal|closing)\b/i;
+// "Last Day of School Before Winter Break" names the break without being it.
+const NOT_CLOSED = /\b(before|after|last day|first day|resumes?)\b/i;
 const START = /\bstart\b/i;
 
 /**
@@ -48,7 +52,11 @@ const START = /\bstart\b/i;
  * note about the day, not on the timeline as a half-hour block.
  */
 export function isRuleMarker(title: string): boolean {
-  return CLOSED.test(title) || DISMISSAL.test(title) || START.test(title);
+  return isClosure(title) || DISMISSAL.test(title) || START.test(title);
+}
+
+function isClosure(title: string): boolean {
+  return CLOSED.test(title) && !NOT_CLOSED.test(title);
 }
 
 /**
@@ -70,7 +78,7 @@ export function deriveDayRules(events: readonly ParsedEvent[]): Map<DayKey, DayR
 
   for (const e of events) {
     const title = e.title;
-    if (CLOSED.test(title)) {
+    if (isClosure(title)) {
       get(e.date).closed = true;
       continue;
     }

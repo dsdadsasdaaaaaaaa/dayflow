@@ -1,5 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { buildDataExport, type ExportScope } from './dataExport';
+import { importSchoolCalendar } from './icsImport';
 import { todayKey } from './dates';
 import { normalizePhone } from './smsCredentials';
 import { loadSmsGateCredentials } from './smsgateCredentials';
@@ -243,6 +244,27 @@ export async function applyQueuedChanges(): Promise<AppliedChanges> {
         }
         useMessages.getState().setThreadDraft(to, text);
         out.drafted++;
+        break;
+      }
+      case 'import_calendar': {
+        // A whole .ics, usually the school's year. Parsed on device by a
+        // fixed-format parser and applied through the same validation and
+        // duplicate checks as the newsletter; nothing in it can send.
+        const ics = typeof c.ics === 'string' ? c.ics : '';
+        if (!/BEGIN:VCALENDAR/.test(ics) || ics.length > 2_000_000) {
+          out.rejected++;
+          break;
+        }
+        try {
+          const r = await importSchoolCalendar(ics);
+          out.applied += r.added;
+          await note(
+            `Calendar from the assistant: ${r.read} entries read, ${r.added} added, ${r.closures} closure day${r.closures === 1 ? '' : 's'}, ${r.amended.skipped} class${r.amended.skipped === 1 ? '' : 'es'} cleared.`,
+            true
+          );
+        } catch {
+          out.rejected++;
+        }
         break;
       }
       default:

@@ -11,6 +11,7 @@ export const DEFAULT_SETTINGS: Settings = {
   dayEndHour: 24,
   showCalendarEvents: true,
   autoImportSchedule: true,
+  schoolCalendarUrl: '',
   hiddenCalendarIds: [],
   defaultDurationMinutes: 60,
   defaultAlerts: [0],

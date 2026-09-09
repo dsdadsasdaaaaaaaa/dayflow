@@ -1,3 +1,4 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { File, Paths } from 'expo-file-system';
 import * as LocalAuthentication from 'expo-local-authentication';
@@ -30,6 +31,7 @@ import { ImportBackupModal } from '../src/components/settings/ImportBackupModal'
 import { SecretarySection } from '../src/components/settings/SecretarySection';
 import { SettingsRow } from '../src/components/settings/SettingsRow';
 import { shareAuditExport } from '../src/lib/auditExport';
+import { autoImportSchoolCalendar } from '../src/lib/icsImport';
 import { SCOPE_LABELS, shareDataExport } from '../src/lib/dataExport';
 import { LiveLinkSection } from '../src/components/settings/LiveLinkSection';
 import { SettingsSection } from '../src/components/settings/SettingsSection';
@@ -719,6 +721,56 @@ export default function SettingsScreen() {
                     onPress: () => void shareDataExport('everything'),
                   },
                 ]
+              );
+            }}
+          />
+          <SettingsRow
+            icon="calendar-outline"
+            tint={taskColor('sky').solid}
+            label="School calendar link"
+            sublabel={
+              settings.schoolCalendarUrl
+                ? 'Checked daily for closures and early finishes'
+                : 'Paste the Edsby calendar link to import the whole year'
+            }
+            onPress={() => {
+              tapHaptic();
+              Alert.prompt(
+                'School calendar link',
+                'The subscription link from Edsby (Calendar, then Subscribe or Export). Closures and early finishes amend your timetable; everything else lands as a school item.',
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  ...(settings.schoolCalendarUrl
+                    ? [{ text: 'Remove', style: 'destructive' as const, onPress: () => update({ schoolCalendarUrl: '' }) }]
+                    : []),
+                  {
+                    text: 'Save',
+                    onPress: (value?: string) => {
+                      const url = (value ?? '').trim();
+                      if (!/^(https?|webcal):\/\//i.test(url)) {
+                        Alert.alert('That is not a link', 'It should start with https:// or webcal://.');
+                        return;
+                      }
+                      update({ schoolCalendarUrl: url });
+                      void AsyncStorage.removeItem('dayflow.schoolCalendar.fetchedAt');
+                      void autoImportSchoolCalendar()
+                        .then((r) =>
+                          r
+                            ? Alert.alert(
+                                'School calendar imported',
+                                `${r.read} entries read, ${r.added} added. ${r.closures} closure day${r.closures === 1 ? '' : 's'}; ${r.amended.skipped} class${r.amended.skipped === 1 ? '' : 'es'} cleared.`
+                              )
+                            : null
+                        )
+                        .catch((e: unknown) =>
+                          Alert.alert('Could not import', e instanceof Error ? e.message : 'The link did not answer.')
+                        );
+                    },
+                  },
+                ],
+                'plain-text',
+                settings.schoolCalendarUrl,
+                'url'
               );
             }}
           />

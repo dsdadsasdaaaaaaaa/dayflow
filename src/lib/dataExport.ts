@@ -11,6 +11,7 @@ import { useTasks } from '../store/tasks';
 import { useTelegram } from '../store/telegramAccount';
 import { todayKey } from './dates';
 import { normalizePhone } from './smsCredentials';
+import * as Updates from 'expo-updates';
 
 /**
  * The whole app, as one document, at a level of exposure the user picks.
@@ -111,6 +112,9 @@ export function buildDataExport(scope: ExportScope): Record<string, unknown> {
     exportedAt: new Date().toISOString(),
     today: todayKey(),
     platform: Platform.OS,
+    // Which code produced this, so a remote reader can tell whether a change
+    // it is about to queue is one this build understands.
+    build: Updates.updateId ?? 'dev',
     scope,
     // Said in the document itself, so a reader who was handed the file
     // without the conversation around it still knows what it is.

@@ -198,6 +198,12 @@ export interface Settings {
    * notification says what appeared, so it is auditable rather than silent.
    */
   autoImportSchedule: boolean;
+  /**
+   * The school's calendar subscription link (Edsby exports one). Fetched about
+   * once a day and applied like the newsletter: closures and early bells
+   * amend the timetable, everything else lands as a school item.
+   */
+  schoolCalendarUrl: string;
   /** Device calendar IDs to hide. */
   hiddenCalendarIds: string[];
   /** Default task duration in minutes for new tasks. */
