@@ -30,6 +30,7 @@ import { ImportBackupModal } from '../src/components/settings/ImportBackupModal'
 import { SecretarySection } from '../src/components/settings/SecretarySection';
 import { SettingsRow } from '../src/components/settings/SettingsRow';
 import { shareAuditExport } from '../src/lib/auditExport';
+import { SCOPE_LABELS, shareDataExport } from '../src/lib/dataExport';
 import { SettingsSection } from '../src/components/settings/SettingsSection';
 import { Stepper } from '../src/components/settings/Stepper';
 import {
@@ -686,6 +687,38 @@ export default function SettingsScreen() {
             onPress={() => {
               tapHaptic();
               void shareAuditExport();
+            }}
+          />
+          <SettingsRow
+            icon="share"
+            tint={taskColor('rose').solid}
+            label="Export my data"
+            sublabel="Hand an assistant the real thing — you choose how much of it"
+            onPress={() => {
+              tapHaptic();
+              // Asked every time, never remembered. A setting that quietly
+              // stays on "everything" is how a message log ends up somewhere
+              // nobody meant to send it.
+              Alert.alert(
+                'How much should the file contain?',
+                'It will be saved and the share sheet opened. Anyone you send it to can read all of it.',
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  {
+                    text: SCOPE_LABELS.schedule.title,
+                    onPress: () => void shareDataExport('schedule'),
+                  },
+                  {
+                    text: SCOPE_LABELS.clients.title,
+                    onPress: () => void shareDataExport('clients'),
+                  },
+                  {
+                    text: SCOPE_LABELS.everything.title,
+                    style: 'destructive',
+                    onPress: () => void shareDataExport('everything'),
+                  },
+                ]
+              );
             }}
           />
           <SettingsRow
