@@ -17,6 +17,7 @@ import {
 import { selectionHaptic, tapHaptic } from '../src/lib/haptics';
 import { earningsForDays, formatMoney } from '../src/lib/meetings';
 import { isRuleMarker } from '../src/lib/schoolDay';
+import { isImportedSchool } from '../src/lib/schoolWords';
 import { isSchoolTask } from '../src/lib/timetableImport';
 import { useSettings } from '../src/store/settings';
 import { instancesForDay, useTasks } from '../src/store/tasks';
@@ -188,7 +189,7 @@ export default function WeekScreen() {
         // Classes are where you have to be, not what you have to do. Counted,
         // a school week read "41 tasks, 31.7 h planned" when the week's own
         // plan was four things — true, useless, and discouraging.
-        if (isSchoolTask(inst.task)) continue;
+        if (isImportedSchool(inst.task)) continue;
         total += 1;
         if (inst.completed) done += 1;
         if (!inst.task.allDay && inst.task.startMinutes != null) {

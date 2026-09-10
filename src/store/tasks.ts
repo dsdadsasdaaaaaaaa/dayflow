@@ -6,6 +6,7 @@ import { isInstanceCompleted, taskOccursOn } from '../lib/recurrence';
 import type { DayKey, Task, TaskInstance } from '../types';
 import { PERSIST_VERSION, migrateStore } from './persistVersion';
 import { collapseSchoolDuplicates } from '../lib/schoolDuplicates';
+import { isImportedSchool } from '../lib/schoolWords';
 
 export interface NewTaskInput {
   title: string;
@@ -528,6 +529,19 @@ export const useTasks = create<TaskState>()(
     }
   )
 );
+
+/**
+ * The user's own occurrences for a day — school left out.
+ *
+ * Every tally in the app wants this rather than instancesForDay, and each
+ * one that open-coded the filter got it slightly differently or forgot it:
+ * the Day screen and Week screen excluded school, Stats and the home-screen
+ * widget did not, and the same Tuesday read "2 of 3" in one place and
+ * "2 of 11" in another. One rule, in one place, so they cannot drift again.
+ */
+export function ownInstancesForDay(tasks: Record<string, Task>, day: DayKey): TaskInstance[] {
+  return instancesForDay(tasks, day).filter((i) => !isImportedSchool(i.task));
+}
 
 /** All occurrences for a day, sorted: all-day first, then by start time. */
 export function instancesForDay(tasks: Record<string, Task>, day: DayKey): TaskInstance[] {

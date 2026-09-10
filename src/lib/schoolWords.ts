@@ -32,6 +32,26 @@ export function isSchoolTask(task: Pick<Task, 'tags' | 'icon'>): boolean {
 }
 
 /**
+ * Did the school put this here, as opposed to the user?
+ *
+ * The tag only, deliberately, and this is the test to use whenever the
+ * question is "is this the user's own work" — counting it, chasing them
+ * about it, showing it on the widget.
+ *
+ * isSchoolTask above also accepts the school icon, which is right for
+ * deciding how something LOOKS but dangerous for deciding whose it is: the
+ * icon suggester hands out 'school-outline' for the words "study",
+ * "homework", "exam" and "test prep", so a person typing "Study for the
+ * Physics test" gets it automatically. Judged by the icon, their own
+ * revision would stop being counted as theirs and quietly drop out of the
+ * catch-up pile — the exact opposite of the complaint that school was being
+ * counted as work.
+ */
+export function isImportedSchool(task: Pick<Task, 'tags'>): boolean {
+  return task.tags?.includes(SCHOOL_TAG) === true;
+}
+
+/**
  * Fold a title down to its words.
  *
  * The newsletter and the year calendar describe the same days in the same

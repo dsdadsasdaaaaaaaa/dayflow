@@ -13,7 +13,7 @@ import { isPhoneBlocked, isTelegramBlocked, useClientMeta } from '../store/clien
 import { useMeetingSession } from '../store/meetingSession';
 import { buildThreads, useMessages } from '../store/messages';
 import { useSettings } from '../store/settings';
-import { instancesForDay, useTasks } from '../store/tasks';
+import { ownInstancesForDay, useTasks } from '../store/tasks';
 import { buildTelegramThreads, useTelegram } from '../store/telegramAccount';
 import { taskColor } from '../theme';
 import type { DayKey, Task } from '../types';
@@ -138,7 +138,11 @@ export function pushWidgetData(): void {
     const today = todayKey();
 
     // --- Today payload -----------------------------------------------------
-    const instances = instancesForDay(tasks, today);
+    // The user's own day. Counting school here made the widget read "0 of 11"
+    // on a Tuesday whose real plan was one errand, and filled all of its rows
+    // with classes — an all-day school notice sorts above everything, so a
+    // task at 6 PM fell off the bottom of a home screen widget.
+    const instances = ownInstancesForDay(tasks, today);
     const sorted = [...instances].sort((a, b) => {
       if (a.completed !== b.completed) return a.completed ? 1 : -1;
       return (a.task.startMinutes ?? -1) - (b.task.startMinutes ?? -1);

@@ -16,7 +16,7 @@ import type { MeetingOccurrence } from '../../lib/meetings';
 import { isInstanceCompleted, taskOccursOn } from '../../lib/recurrence';
 import { minutesFocusedOn } from '../../store/focus';
 import { habitActiveOn, habitStreak } from '../../store/habits';
-import { instancesForDay } from '../../store/tasks';
+import { ownInstancesForDay } from '../../store/tasks';
 import { taskColor } from '../../theme';
 import type {
   DayKey,
@@ -42,7 +42,7 @@ export function completionByDay(
   days: DayKey[]
 ): DayCompletion[] {
   return days.map((day) => {
-    const instances = instancesForDay(tasks, day);
+    const instances = ownInstancesForDay(tasks, day);
     return {
       day,
       planned: instances.length,
@@ -68,7 +68,7 @@ export function periodStats(
   let done = 0;
   let planned = 0;
   for (const day of days) {
-    const instances = instancesForDay(tasks, day);
+    const instances = ownInstancesForDay(tasks, day);
     planned += instances.length;
     for (const i of instances) if (i.completed) done += 1;
   }
@@ -82,7 +82,7 @@ export function periodStats(
 export function hourLoad(tasks: Record<string, Task>, days: DayKey[]): number[] {
   const buckets = new Array<number>(24).fill(0);
   for (const day of days) {
-    for (const inst of instancesForDay(tasks, day)) {
+    for (const inst of ownInstancesForDay(tasks, day)) {
       const t = inst.task;
       if (t.allDay || t.startMinutes == null) continue;
       const start = t.startMinutes;
@@ -118,7 +118,7 @@ export function minutesByColor(
 ): ColorSlice[] {
   const groups = new Map<string, { minutes: number; tagCounts: Map<string, number> }>();
   for (const day of days) {
-    for (const inst of instancesForDay(tasks, day)) {
+    for (const inst of ownInstancesForDay(tasks, day)) {
       const t = inst.task;
       if (t.allDay || t.startMinutes == null || t.durationMinutes <= 0) continue;
       const g = groups.get(t.color) ?? { minutes: 0, tagCounts: new Map() };

@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { addDays, daysBetween, todayKey, weekdayOf, weekdayShort, weekOf } from '../../lib/dates';
 import { selectionHaptic } from '../../lib/haptics';
-import { instancesForDay } from '../../store/tasks';
+import { ownInstancesForDay } from '../../store/tasks';
 import { taskColor, useTheme, type Theme } from '../../theme';
 import type { DayKey, Task } from '../../types';
 import { GlassCard } from '../glass/GlassCard';
@@ -131,7 +131,7 @@ const WeekPage = memo(function WeekPage({
     () =>
       days.map((day) => ({
         day,
-        dots: instancesForDay(tasks, day)
+        dots: ownInstancesForDay(tasks, day)
           .slice(0, 4)
           .map((i) => taskColor(i.task.color).solid),
       })),

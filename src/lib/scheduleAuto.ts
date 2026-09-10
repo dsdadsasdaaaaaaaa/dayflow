@@ -101,8 +101,17 @@ function existingKeys(): Set<string> {
   return have;
 }
 
+/**
+ * The key an event will have ONCE STORED, not as it arrived.
+ *
+ * A rule marker is shelved as all-day whatever time it names, so keying the
+ * incoming event on its raw time never matched the task already sitting on
+ * the calendar: "Noon Dismissal" was re-added every time the year calendar
+ * refreshed, roughly once a day, forever.
+ */
 function keyOf(e: ParsedEvent): string {
-  return `${e.date}|${e.startMinutes ?? 'all'}|${normTitle(e.title)}`;
+  const allDay = e.startMinutes == null || isRuleMarker(e.title);
+  return `${e.date}|${allDay ? 'all' : e.startMinutes}|${normTitle(e.title)}`;
 }
 
 /**
@@ -157,8 +166,15 @@ export function addScheduleEvents(events: ParsedEvent[]): number {
   // the ones only comparing facts can pair — "2:25 Closing" against
   // "2:25 PM Dismissal".
   if (added > 0) {
+    const before = Object.keys(useTasks.getState().tasks).length;
     const collapsed = collapseSchoolDuplicates(useTasks.getState().tasks);
-    if (collapsed) useTasks.setState({ tasks: collapsed });
+    if (collapsed) {
+      useTasks.setState({ tasks: collapsed });
+      // Say what is on the calendar, not how many rows were attempted: a
+      // notification claiming fifteen when eleven survived is a small lie
+      // that makes the import look broken next time somebody counts.
+      added = Math.max(0, added - (before - Object.keys(collapsed).length));
+    }
   }
   return added;
 }

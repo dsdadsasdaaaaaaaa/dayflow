@@ -39,6 +39,7 @@ import {
 import { eventsForDay } from '../../src/lib/calendar';
 import { isRuleMarker } from '../../src/lib/schoolDay';
 import { isSchoolTask } from '../../src/lib/timetableImport';
+import { isImportedSchool } from '../../src/lib/schoolWords';
 import { addDays, isToday, minutesOfDay, todayKey } from '../../src/lib/dates';
 import { successHaptic, tapHaptic } from '../../src/lib/haptics';
 import { syncTaskNotifications } from '../../src/lib/notifications';
@@ -169,8 +170,8 @@ export default function TodayScreen() {
     // them made the summary read "0 of 8 done, 8h 34m planned" on a day whose
     // actual plan was one errand — a number that is true, useless, and
     // discouraging. The day's own tally counts what is left to the person.
-    const mine = all.filter((i) => !isSchoolTask(i.task));
-    const mineTimed = timed.filter((i) => !isSchoolTask(i.task));
+    const mine = all.filter((i) => !isImportedSchool(i.task));
+    const mineTimed = timed.filter((i) => !isImportedSchool(i.task));
     return {
       all,
       allDay,
@@ -326,7 +327,7 @@ export default function TodayScreen() {
     return Object.values(tasks)
       .filter(
         (t) =>
-          t.date != null && t.date < todayK && !t.recurrence && !t.completed && !isSchoolTask(t)
+          t.date != null && t.date < todayK && !t.recurrence && !t.completed && !isImportedSchool(t)
       )
       .sort((a, b) => (a.date! < b.date! ? -1 : a.date! > b.date! ? 1 : 0));
   }, [tasks, todayK]);
