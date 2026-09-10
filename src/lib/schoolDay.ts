@@ -4,6 +4,7 @@ import { taskOccursOn } from './recurrence';
 import type { ParsedEvent } from './scheduleImport';
 import { timeInText } from './scheduleImport';
 import { isSchoolTask, SCHOOL_TAG, TIMETABLE_TAG } from './timetableImport';
+import { isClosure, isDismissal, isRuleMarker, isStart } from './schoolWords';
 import { useTasks } from '../store/tasks';
 
 /**
@@ -37,11 +38,7 @@ export interface DayRule {
 
 // The newsletter says "School Closed" and "Dismissal"; the year calendar says
 // "No classes", "PD Day", "Winter Break" and "3:08 Closing". Same facts.
-const CLOSED = /\b(school closed|no school|closed|no classes|pd day|(?:winter|mid[- ]winter|march|spring) break)\b/i;
-const DISMISSAL = /\b(dismissal|closing)\b/i;
-// "Last Day of School Before Winter Break" names the break without being it.
-const NOT_CLOSED = /\b(before|after|last day|first day|resumes?)\b/i;
-const START = /\bstart\b/i;
+
 
 /**
  * Is this entry a statement about the day's hours rather than an event?
@@ -51,13 +48,7 @@ const START = /\bstart\b/i;
  * something to attend at 2:25, so they belong on the all-day shelf as a
  * note about the day, not on the timeline as a half-hour block.
  */
-export function isRuleMarker(title: string): boolean {
-  return isClosure(title) || DISMISSAL.test(title) || START.test(title);
-}
-
-function isClosure(title: string): boolean {
-  return CLOSED.test(title) && !NOT_CLOSED.test(title);
-}
+export { isRuleMarker };
 
 /**
  * Read the newsletter's entries as amendments, keyed by day.
@@ -86,12 +77,12 @@ export function deriveDayRules(events: readonly ParsedEvent[]): Map<DayKey, DayR
     // that is the school's clock; the parsed start is the fallback.
     const at = timeInText(title) ?? e.startMinutes;
     if (at == null) continue;
-    if (DISMISSAL.test(title)) {
+    if (isDismissal(title)) {
       const rule = get(e.date);
       // Earliest wins: two dismissals named for one day means the day ends
       // at the first of them.
       rule.dismissalAt = rule.dismissalAt == null ? at : Math.min(rule.dismissalAt, at);
-    } else if (START.test(title)) {
+    } else if (isStart(title)) {
       const rule = get(e.date);
       rule.startsAt = rule.startsAt == null ? at : Math.max(rule.startsAt, at);
     }

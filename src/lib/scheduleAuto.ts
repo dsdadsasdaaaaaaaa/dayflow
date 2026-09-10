@@ -8,6 +8,8 @@ import { useTasks } from '../store/tasks';
 import { applySpecialDay, parseBellSchedule, rememberBellSchedule } from './bellSchedule';
 import { applySchoolDayRules, deriveDayRules, rememberDayRules } from './schoolDay';
 import { isRuleMarker } from './schoolDay';
+import { normTitle } from './schoolWords';
+import { collapseSchoolDuplicates } from './schoolDuplicates';
 import { SCHOOL_TAG } from './timetableImport';
 
 /**
@@ -90,26 +92,6 @@ async function markHandled(storedAt: number): Promise<void> {
 }
 
 /** Everything already on the calendar, so nothing is added over itself. */
-/**
- * Fold a title down to its words, so "Labour Day: School Closed" and
- * "Labour Day - School Closed" are the same entry.
- *
- * The newsletter and the year calendar describe the same closures and half
- * days in the same words, joined with whatever punctuation each source
- * happens to use. Matching on the literal string let the two sources add
- * the same day twice under near-identical titles; matching on the words
- * instead catches that without touching two entries that actually differ
- * ("First Day of School" and "First Day of School: Special Schedule" still
- * count as different, because one has words the other does not).
- */
-function normTitle(title: string): string {
-  return title
-    .toLowerCase()
-    .replace(/[:;,\-–—]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
 function existingKeys(): Set<string> {
   const have = new Set<string>();
   for (const t of Object.values(useTasks.getState().tasks)) {
@@ -169,6 +151,14 @@ export function addScheduleEvents(events: ParsedEvent[]): number {
       tags: [SCHOOL_TAG],
     });
     added++;
+  }
+  // Both sources land here, so this is where a day described twice is
+  // noticed. The word-matching above stops the ordinary case; this catches
+  // the ones only comparing facts can pair — "2:25 Closing" against
+  // "2:25 PM Dismissal".
+  if (added > 0) {
+    const collapsed = collapseSchoolDuplicates(useTasks.getState().tasks);
+    if (collapsed) useTasks.setState({ tasks: collapsed });
   }
   return added;
 }

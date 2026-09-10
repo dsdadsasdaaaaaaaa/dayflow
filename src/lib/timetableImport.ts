@@ -1,6 +1,10 @@
 import type { DayKey, Task } from '../types';
+import { isSchoolTask, SCHOOL_TAG, TIMETABLE_TAG } from './schoolWords';
 import { addDays, fromDayKey, todayKey } from './dates';
 import { askModel, extractJson, timeInText } from './scheduleImport';
+
+// Re-exported: these lived here first and half the app imports them from here.
+export { isSchoolTask, SCHOOL_TAG, TIMETABLE_TAG };
 import type { BrainChoice } from './secretaryBrain';
 
 /**
@@ -18,24 +22,6 @@ import type { BrainChoice } from './secretaryBrain';
  * dropped rather than guessed at.
  */
 
-/**
- * Marks a task as coming from a timetable or a school newsletter.
- *
- * Two things need to recognise these later: the timeline, which gives them a
- * lane of their own, and re-importing, which has to be able to replace the
- * old week rather than lay a second one on top of it. Recognising them by
- * their icon would break the moment someone picked a different icon.
- */
-export const SCHOOL_TAG = 'school';
-
-/**
- * Marks a task as a timetable class specifically — as opposed to a newsletter
- * item, which is also school. Replacing a timetable must remove the old
- * classes and nothing else, and "school" alone could not tell a class from
- * "Terry Fox Walk".
- */
-export const TIMETABLE_TAG = 'timetable';
-
 /** Is this a class from the timetable, repeating or a detached single day? */
 export function isTimetableTask(task: Pick<Task, 'tags' | 'icon' | 'recurrence'>): boolean {
   if (task.tags?.includes(TIMETABLE_TAG)) return true;
@@ -46,10 +32,6 @@ export function isTimetableTask(task: Pick<Task, 'tags' | 'icon' | 'recurrence'>
   return isSchoolTask(task) && (task.recurrence?.weekdays?.length ?? 0) > 0;
 }
 
-/** Is this one of ours? Icon is the fallback for anything imported before the tag existed. */
-export function isSchoolTask(task: Pick<Task, 'tags' | 'icon'>): boolean {
-  return task.tags?.includes(SCHOOL_TAG) === true || task.icon === 'school-outline';
-}
 
 /** One class, on one weekday, every week. */
 export interface ParsedClass {

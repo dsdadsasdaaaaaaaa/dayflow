@@ -5,6 +5,7 @@ import { uid } from '../lib/id';
 import { isInstanceCompleted, taskOccursOn } from '../lib/recurrence';
 import type { DayKey, Task, TaskInstance } from '../types';
 import { PERSIST_VERSION, migrateStore } from './persistVersion';
+import { collapseSchoolDuplicates } from '../lib/schoolDuplicates';
 
 export interface NewTaskInput {
   title: string;
@@ -515,7 +516,14 @@ export const useTasks = create<TaskState>()(
     {
       name: 'dayflow-tasks',
       version: PERSIST_VERSION,
-      migrate: migrateStore,
+      migrate: (persisted, fromVersion) => {
+        const state = migrateStore<TaskState>(persisted, fromVersion);
+        // Calendars that already carry the same closure twice are cleaned on
+        // the way in, since the duplicate check that now prevents it cannot
+        // reach back through the imports that already happened.
+        const collapsed = state?.tasks ? collapseSchoolDuplicates(state.tasks) : null;
+        return collapsed ? { ...state, tasks: collapsed } : state;
+      },
       storage: createJSONStorage(() => AsyncStorage),
     }
   )
