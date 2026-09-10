@@ -313,10 +313,21 @@ export default function TodayScreen() {
   // ── Replan: unfinished non-recurring tasks scheduled before today ─────────
   // todayK is read on every render (the 30s now-tick re-renders us), so the
   // memo rolls over correctly if the app stays open past midnight.
+  //
+  // School is not in this. The school year import puts a task on the calendar
+  // for every closure, dismissal time and special-schedule day, and none of
+  // them is anything the user does or ticks off — so they sat in the catch-up
+  // pile forever, growing. Two days after importing the year it offered to
+  // replan fourteen things, all fourteen of them school notices and not one
+  // of them the user's. A nag that is entirely wrong is worse than no nag:
+  // it teaches you to ignore the real one.
   const todayK = todayKey();
   const replanTasks = useMemo(() => {
     return Object.values(tasks)
-      .filter((t) => t.date != null && t.date < todayK && !t.recurrence && !t.completed)
+      .filter(
+        (t) =>
+          t.date != null && t.date < todayK && !t.recurrence && !t.completed && !isSchoolTask(t)
+      )
       .sort((a, b) => (a.date! < b.date! ? -1 : a.date! > b.date! ? 1 : 0));
   }, [tasks, todayK]);
 
