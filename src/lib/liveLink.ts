@@ -196,7 +196,7 @@ export async function applyQueuedChanges(): Promise<AppliedChanges> {
         break;
       }
       case 'update_task': {
-        const id = str(c.id_task ?? c.taskId, 60);
+        const id = str(c.taskId ?? c.id_task ?? c.id, 60);
         const existing = id ? useTasks.getState().tasks[id] : null;
         if (!existing) {
           out.rejected++;
@@ -216,6 +216,101 @@ export async function applyQueuedChanges(): Promise<AppliedChanges> {
           break;
         }
         tasks.updateTask(id, patch);
+        out.applied++;
+        break;
+      }
+      case 'delete_task': {
+        const id = str(c.taskId ?? c.id_task ?? c.id, 60);
+        const existing = id ? useTasks.getState().tasks[id] : null;
+        if (!existing) {
+          out.rejected++;
+          break;
+        }
+        const day = str(c.date, 10);
+        // A class every Tuesday is one task. Deleting it because one Tuesday
+        // is cancelled would take the whole term with it, so a date means
+        // that day only, and taking the series needs saying outright.
+        if (existing.recurrence) {
+          if (day && isRealDate(day)) {
+            tasks.skipOccurrence(id, day);
+            out.applied++;
+            break;
+          }
+          if (c.applyToSeries !== true) {
+            out.rejected++;
+            await note(
+              `"${existing.title}" repeats — give a date to cancel one day, or say applyToSeries to delete every occurrence.`,
+              false
+            );
+            break;
+          }
+        }
+        tasks.deleteTask(id);
+        out.applied++;
+        break;
+      }
+      case 'move_task': {
+        const id = str(c.taskId ?? c.id_task ?? c.id, 60);
+        const existing = id ? useTasks.getState().tasks[id] : null;
+        const date = str(c.date, 10);
+        if (!existing || (date && !isRealDate(date))) {
+          out.rejected++;
+          break;
+        }
+        const start = num(c.startMinutes);
+        const patch: Record<string, unknown> = {};
+        if (date) patch.date = date;
+        if (start != null && start >= 0 && start <= 1439) {
+          patch.startMinutes = start;
+          patch.allDay = false;
+        }
+        const dur = num(c.durationMinutes);
+        if (dur != null) patch.durationMinutes = Math.min(1440, Math.max(5, dur));
+        if (Object.keys(patch).length === 0) {
+          out.rejected++;
+          break;
+        }
+        // Moving one day of a series detaches that day rather than dragging
+        // every other week along with it.
+        const from = str(c.fromDate, 10);
+        if (existing.recurrence && from && isRealDate(from)) {
+          const detached = useTasks.getState().detachOccurrence(id, from);
+          if (!detached) {
+            out.rejected++;
+            break;
+          }
+          useTasks.getState().updateTask(detached.id, patch);
+          out.applied++;
+          break;
+        }
+        if (existing.recurrence && c.applyToSeries !== true) {
+          out.rejected++;
+          await note(
+            `"${existing.title}" repeats — give fromDate to move one day, or say applyToSeries to move every occurrence.`,
+            false
+          );
+          break;
+        }
+        tasks.updateTask(id, patch);
+        out.applied++;
+        break;
+      }
+      case 'complete_task': {
+        const id = str(c.taskId ?? c.id_task ?? c.id, 60);
+        const existing = id ? useTasks.getState().tasks[id] : null;
+        if (!existing) {
+          out.rejected++;
+          break;
+        }
+        const day = str(c.date, 10);
+        const on = isRealDate(day) ? day : (existing.date ?? todayKey());
+        const wanted = c.done === false ? false : true;
+        // toggleComplete flips; read first so saying "done" twice is not
+        // an accidental undo.
+        const now = existing.recurrence
+          ? existing.completions[on] === true
+          : existing.completed === true;
+        if (now !== wanted) tasks.toggleComplete(id, on);
         out.applied++;
         break;
       }

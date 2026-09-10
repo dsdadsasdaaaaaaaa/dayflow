@@ -23,7 +23,9 @@ settings, and message threads with full text. `storedAt` says how fresh it
 is; the app refreshes it every few minutes while open and on background wakes.
 
 Key fields:
-- `tasks[]` — every task and class. `meeting` is non-null for paid client
+- `tasks[]` — every task and class. Its `id` is what every action below
+  means by taskId; `recurrence` non-null means it repeats, so the guards on
+  move/delete apply. `meeting` is non-null for paid client
   meetings (`client`, `rate`, `location`, `paidDates`). `tags` includes
   `school` / `timetable` for classes, `assistant` for things you added.
 - `clients[]` — name, phone, status (`client` / `lead` / `blocked`), notes.
@@ -60,6 +62,25 @@ minutes at most). Actions:
     {"action":"update_task","taskId":"<id from tasks[]>","title":"...",
      "date":"...","startMinutes":...,"durationMinutes":...,"notes":"..."}
     — any subset of those fields
+
+    {"action":"move_task","taskId":"<id>","date":"2026-09-14","startMinutes":900,
+     "durationMinutes":60}
+    — move or resize something. For a repeating task, add "fromDate":"<the day
+      you mean>" to move ONLY that day (it is detached from the series and the
+      other weeks are untouched). To move every occurrence, say
+      "applyToSeries":true instead. Without either, a repeating task is refused.
+
+    {"action":"complete_task","taskId":"<id>","date":"2026-09-14","done":true}
+    — tick something off, or untick it with "done":false. date defaults to the
+      task's own day, and matters for repeating tasks (which day was done).
+      Safe to repeat: saying done twice does not untick it.
+
+    {"action":"delete_task","taskId":"<id>"}
+    — delete it. For a repeating task this is refused unless you either give
+      "date":"2026-09-14" (cancels just that one day, keeping the series) or
+      say "applyToSeries":true (deletes the whole series). A term of classes is
+      one task, so this guard is the difference between cancelling Tuesday and
+      cancelling Tuesdays.
 
     {"action":"add_client_note","client":"Sam","notes":"Prefers evenings"}
     — appended to their existing notes
