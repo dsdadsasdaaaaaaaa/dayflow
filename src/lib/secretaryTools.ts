@@ -11,7 +11,7 @@
  */
 
 import { moneyStats } from '../components/stats/compute';
-import { buildCallRows, useCalls } from '../store/calls';
+import { buildCallRows, useCalls, type StoredVoicemail } from '../store/calls';
 import {
   clientMetaKey,
   clientNameForPhone,
@@ -178,7 +178,7 @@ const READ_TOOLS: ToolSpec[] = [
   {
     name: 'get_call_history',
     description:
-      'Recent phone calls and voicemails, newest first. Each row is one call: the client label (a number that belongs to nobody in the book still gets its own label), whether it came in or went out, whether it was missed, the local time it happened, and whether a voicemail was left. Recordings and transcripts are never available.',
+      'Recent phone calls and voicemails, newest first. Each row is one call: the client label (a number that belongs to nobody in the book still gets its own label), whether it came in or went out, whether it was missed, the local time it happened, and whether a voicemail was left. A row with a voicemail carries "voicemail": transcriptStatus is "done" (the transcript is in "text", already scrubbed), "pending" (still being transcribed), "none" (no transcript is coming — the recording failed to transcribe or predates the feature), or "unknown" (the app has not managed to check — say you do not know, never that there is no transcript). Never say a voicemail has not been transcribed unless the status actually says so. The audio recording itself is never available, only the text.',
     parameters: {
       type: 'object',
       properties: {
@@ -830,6 +830,56 @@ interface CallHistoryRow {
   /** Local time, "YYYY-MM-DDTHH:mm". */
   atISO: string;
   hadVoicemail: boolean;
+  /** Present only when a voicemail was left. */
+  voicemail?: {
+    transcriptStatus: 'done' | 'pending' | 'none' | 'unknown';
+    /** The transcript, scrubbed. Absent unless the status is 'done' and the
+     *  user allows message reading. */
+    text?: string;
+  };
+}
+
+/**
+ * A caller's label, whatever state the number is in.
+ *
+ * The number is optional on a voicemail and, despite the type, has been seen
+ * missing on a call too. Left alone it reached the model as the literal word
+ * "undefined", which the model then talked about as though it were a person.
+ * An unknown caller says so.
+ */
+function callerLabel(map: PseudonymMap, number: string | undefined | null): string {
+  const trimmed = (number ?? '').trim();
+  if (!trimmed) return 'Unknown caller';
+  return map.toPseudo(clientForNumber(trimmed) ?? trimmed) || 'Unknown caller';
+}
+
+/**
+ * What the model is told about a voicemail.
+ *
+ * The transcript is the content of a client's own words, so it is treated
+ * exactly like a message body: scrubbed on the way out, and withheld
+ * entirely unless the user has allowed message reading. The STATUS is still
+ * reported when the text is withheld, because "there is a transcript you
+ * have not been shown" and "there is no transcript" are different facts and
+ * conflating them is what made the assistant say a transcribed voicemail
+ * had never been transcribed.
+ */
+function voicemailForModel(
+  vm: StoredVoicemail | undefined,
+  map: PseudonymMap
+): CallHistoryRow['voicemail'] {
+  if (!vm) return undefined;
+  // Absent is not the same fact as negative. The field is missing whenever the
+  // transcription fetch has not run or has failed, and reporting that as
+  // 'none' told the assistant a transcript will never come for a voicemail
+  // the account had already transcribed — the very sentence this came from.
+  const status = vm.transcriptStatus ?? 'unknown';
+  const text = vm.transcript?.trim();
+  if (status !== 'done' || !text) return { transcriptStatus: status };
+  if (!useSettings.getState().settings.secretaryReadsMessages) {
+    return { transcriptStatus: 'done' };
+  }
+  return { transcriptStatus: 'done', text: redactText(text, map).slice(0, MAX_BODY_CHARS) };
 }
 
 /**
@@ -848,11 +898,12 @@ function toolGetCallHistory(
     .filter((c) => c.startedAt >= since)
     .slice(0, MAX_ROWS)
     .map((c) => ({
-      label: map.toPseudo(clientForNumber(c.counterparty) ?? c.counterparty),
+      label: callerLabel(map, c.counterparty ?? c.voicemail?.counterparty),
       direction: c.direction,
       missed: c.missed,
       atISO: localStamp(c.startedAt),
       hadVoicemail: !!c.voicemail,
+      ...(c.voicemail ? { voicemail: voicemailForModel(c.voicemail, map) } : {}),
     }));
   return { days, calls };
 }

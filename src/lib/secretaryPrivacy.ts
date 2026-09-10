@@ -96,7 +96,11 @@ export function buildPseudonyms(clientNames: string[]): PseudonymMap {
 
   return {
     entries,
-    toPseudo: (name: string) => (name.trim() ? mint(name) : ''),
+    // Defensive about its input on purpose. Callers hand this whatever a
+    // client field held, and one of them is optional at runtime even where
+    // the type says string; `undefined.trim()` threw and took the whole
+    // answer down rather than costing one label.
+    toPseudo: (name: string) => (typeof name === 'string' && name.trim() ? mint(name) : ''),
     toReal: (pseudo: string) => byPseudo.get(pseudo.trim().toLowerCase()) ?? null,
   };
 }

@@ -131,23 +131,11 @@ export const useCalls = create<CallsState>()(
             })
           );
 
-          // Join transcripts by recording SID. A voicemail with no
-          // transcription that is old enough is never getting one ('none' —
-          // e.g. recorded before transcription was enabled); a fresh one is
-          // still being transcribed ('pending').
+          // Join transcripts by recording SID.
           if (trResult.ok) {
-            const byRecording = new Map<string, TranscriptionEntry>();
-            for (const t of trResult.transcriptions) byRecording.set(t.recordingSid, t);
+            const byRecording = bestTranscriptions(trResult.transcriptions);
             for (const vm of Object.values(voicemails)) {
-              const t = byRecording.get(vm.sid);
-              if (t?.status === 'completed') {
-                voicemails[vm.sid] = { ...vm, transcript: t.text, transcriptStatus: 'done' };
-              } else if (t?.status === 'failed') {
-                voicemails[vm.sid] = { ...vm, transcriptStatus: 'none' };
-              } else if (vm.transcriptStatus !== 'done') {
-                const waiting = t != null || Date.now() - vm.recordedAt <= TRANSCRIPT_WAIT_MS;
-                voicemails[vm.sid] = { ...vm, transcriptStatus: waiting ? 'pending' : 'none' };
-              }
+              voicemails[vm.sid] = withTranscript(vm, byRecording.get(vm.sid), Date.now());
             }
           } else {
             error = error ?? trResult.error;
@@ -204,6 +192,66 @@ export const useCalls = create<CallsState>()(
   )
 );
 
+/**
+ * One transcription per recording, preferring one that actually succeeded.
+ *
+ * Twilio returns the list newest first, so writing every row into a map by
+ * recording SID left the OLDEST attempt winning. A recording that failed and
+ * was then transcribed successfully resolved to the failure, and the text the
+ * account already holds was reported as never coming.
+ */
+export function bestTranscriptions(
+  list: readonly TranscriptionEntry[]
+): Map<string, TranscriptionEntry> {
+  const best = new Map<string, TranscriptionEntry>();
+  for (const t of list) {
+    const held = best.get(t.recordingSid);
+    // First writer wins (the newest), except that a completed transcription
+    // always beats one that is not.
+    if (!held || (held.status !== 'completed' && t.status === 'completed')) {
+      best.set(t.recordingSid, t);
+    }
+  }
+  return best;
+}
+
+/**
+ * A voicemail's transcript state after this sync.
+ *
+ * Pure and exported because this decides whether text the account really
+ * holds is shown to anyone: the calls screen only renders a transcript when
+ * the status says 'done', and the assistant is told a voicemail will never
+ * have one when it says 'none'. Getting it wrong makes the app deny a
+ * transcript it is storing, which is exactly the complaint this came from.
+ *
+ * Two rules matter here. A voicemail already transcribed is never demoted —
+ * a later failed attempt on the same recording does not unsay the text we
+ * hold. And a voicemail that is NOT transcribed never keeps stale text, so
+ * status and content cannot drift apart.
+ */
+export function withTranscript(
+  vm: StoredVoicemail,
+  t: TranscriptionEntry | undefined,
+  now: number
+): StoredVoicemail {
+  if (t?.status === 'completed' && t.text.trim()) {
+    return { ...vm, transcript: t.text, transcriptStatus: 'done' };
+  }
+  // Already have the words: nothing later takes them away.
+  if (vm.transcriptStatus === 'done' && vm.transcript?.trim()) return vm;
+
+  const settled = (): StoredVoicemail => {
+    const { transcript: _stale, ...rest } = vm;
+    return { ...rest, transcriptStatus: 'none' };
+  };
+  if (t?.status === 'failed') return settled();
+  // A transcription row that exists but has not finished, or a recording
+  // young enough that one may still arrive.
+  const waiting = t != null || now - vm.recordedAt <= TRANSCRIPT_WAIT_MS;
+  if (waiting) return { ...vm, transcriptStatus: 'pending' };
+  return settled();
+}
+
 /** One call-log row: the call plus its voicemail, when one was left. */
 export interface CallRow extends CallEntry {
   voicemail?: StoredVoicemail;
@@ -213,10 +261,31 @@ export interface CallRow extends CallEntry {
 export function buildCallRows(state: Pick<CallsState, 'calls' | 'voicemails'>): CallRow[] {
   const byCallSid = new Map<string, StoredVoicemail>();
   for (const vm of Object.values(state.voicemails)) byCallSid.set(vm.callSid, vm);
-  return Object.values(state.calls)
+
+  // A voicemail whose parent call never made it into the log still has to
+  // appear. The badge counts it either way, so dropping it here meant the
+  // tab said "1 new voicemail" over a list that did not contain one, and it
+  // was invisible to the assistant as well.
+  const orphans: CallRow[] = [];
+  for (const vm of Object.values(state.voicemails)) {
+    if (state.calls[vm.callSid]) continue;
+    orphans.push({
+      sid: vm.callSid,
+      counterparty: vm.counterparty ?? '',
+      direction: 'in',
+      startedAt: vm.recordedAt,
+      durationSec: vm.durationSec,
+      status: 'completed',
+      missed: true,
+      voicemail: vm,
+    });
+  }
+
+  return [...Object.values(state.calls), ...orphans]
     .map((c): CallRow => {
       const voicemail = byCallSid.get(c.sid);
       if (!voicemail) return { ...c };
+      if ('voicemail' in c) return c as CallRow;
       // A voicemail is proof the user never picked up — the parent call
       // itself always ends 'completed' with nonzero duration, so the
       // status/duration heuristic alone can't catch rang-out calls.
