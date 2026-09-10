@@ -1,5 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Notifications from 'expo-notifications';
+import { todayKey } from './dates';
 import { parseScheduleEmail, type ParsedEvent } from './scheduleImport';
 import { fetchRelaySchedule } from './smsgate';
 import { loadSmsGateCredentials } from './smsgateCredentials';
@@ -10,6 +11,7 @@ import { applySchoolDayRules, deriveDayRules, rememberDayRules } from './schoolD
 import { isRuleMarker } from './schoolDay';
 import { normTitle } from './schoolWords';
 import { collapseSchoolDuplicates } from './schoolDuplicates';
+import { forgottenSchoolKeys } from './schoolTombstones';
 import { SCHOOL_TAG } from './timetableImport';
 
 /**
@@ -140,13 +142,20 @@ export async function applyBellSheets(
 }
 
 /** Add these to the calendar, skipping any that are already on it. */
-export function addScheduleEvents(events: ParsedEvent[]): number {
+export function addScheduleEvents(
+  events: ParsedEvent[],
+  /** Entries the user deleted. Absent means nothing has been deleted yet. */
+  forgotten?: ReadonlySet<string>
+): number {
   const have = existingKeys();
   const addTask = useTasks.getState().addTask;
   let added = 0;
   for (const e of events) {
     const key = keyOf(e);
     if (have.has(key)) continue;
+    // Deleted on purpose. The calendar keeps offering it; the user has
+    // already answered.
+    if (forgotten?.has(key)) continue;
     have.add(key);
     addTask({
       title: e.title,
@@ -213,7 +222,7 @@ export async function autoImportSchedule(): Promise<number> {
     return 0;
   }
 
-  const added = addScheduleEvents(parsed.events);
+  const added = addScheduleEvents(parsed.events, await forgottenSchoolKeys(todayKey()));
 
   // The newsletter is an amendment to the timetable, not a second list
   // beside it: a closure or an early bell has to remove the classes that are

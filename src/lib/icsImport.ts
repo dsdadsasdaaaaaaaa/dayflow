@@ -1,10 +1,12 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { DayKey } from '../types';
 import { addScheduleEvents } from './scheduleAuto';
+import { forgottenSchoolKeys } from './schoolTombstones';
 import type { ParsedEvent } from './scheduleImport';
 import { timeInText } from './scheduleImport';
 import { applySchoolDayRules, deriveDayRules, isRuleMarker, rememberDayRules } from './schoolDay';
 import { useSettings } from '../store/settings';
+import { todayKey } from './dates';
 
 /**
  * The school's own year calendar, as a file rather than a weekly email.
@@ -232,7 +234,7 @@ export interface CalendarImport {
  */
 export async function importSchoolCalendar(text: string): Promise<CalendarImport> {
   const events = toScheduleEvents(parseIcs(text));
-  const added = addScheduleEvents(events);
+  const added = addScheduleEvents(events, await forgottenSchoolKeys(todayKey()));
   const rules = deriveDayRules(events);
   await rememberDayRules(rules);
   const amended = applySchoolDayRules(rules);

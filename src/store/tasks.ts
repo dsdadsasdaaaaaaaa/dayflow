@@ -7,6 +7,7 @@ import type { DayKey, Task, TaskInstance } from '../types';
 import { PERSIST_VERSION, migrateStore } from './persistVersion';
 import { collapseSchoolDuplicates } from '../lib/schoolDuplicates';
 import { isImportedSchool } from '../lib/schoolWords';
+import { forgetSchoolTask } from '../lib/schoolTombstones';
 
 export interface NewTaskInput {
   title: string;
@@ -288,6 +289,10 @@ export const useTasks = create<TaskState>()(
 
       deleteTask: (id) =>
         set((s) => {
+          const doomed = s.tasks[id];
+          // The school calendar is re-read every day and would put this
+          // straight back, hours later and silently.
+          if (doomed) void forgetSchoolTask(doomed);
           const { [id]: _removed, ...rest } = s.tasks;
           return { tasks: rest };
         }),
