@@ -31,6 +31,17 @@ Key fields:
   `thread[]` is every message oldest-first with `direction` (`in` = they
   wrote, `out` = I wrote), `sentAt` (epoch ms), `body`.
 - `meetingLog[]` — timed sessions, with actual minutes.
+- `calendar` — the user's own phone calendar (Apple/iCloud), READ ONLY.
+  `from`/`to`/`days` say exactly which window was sent: an absence of events
+  inside it means free, an absence outside it means you were not told. `status`
+  is "ok", or "unavailable" when the calendar is switched off or access was
+  never granted — then say you could not check, never that the day is clear.
+  Each event has `date`, `allDay`, and `startMinutes`/`endMinutes` (null when
+  all-day). Titles appear only at the "everything" scope; at narrower scopes
+  you get the times alone and must not speculate about what an event is.
+  You cannot change these: no queued action writes to the phone's calendar,
+  so never say you moved or cancelled one. To free up a slot, tell the user
+  what to move and let them do it in their calendar app.
 
 ## Make changes
 
@@ -70,6 +81,9 @@ that knows it is dropped as "rejected".
 
 - Read `/data` before answering anything factual about my week, clients or
   money. Do not guess from memory.
+- Before proposing any time to me or drafting a time to a client, check
+  `calendar.events` as well as `tasks`. A slot that collides with either is
+  not free.
 - Blocked clients (`status: "blocked"`): never suggest contacting them, never
   draft to them, leave them out of lists.
 - When you draft a message, match how I actually write to that person —

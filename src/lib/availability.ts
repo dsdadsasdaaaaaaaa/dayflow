@@ -1,5 +1,5 @@
 import type { CalendarEventLite, DayKey, Settings, Task } from '../types';
-import { eventsForDay } from './calendar';
+import { eventsForDays } from './calendar';
 import {
   addDays,
   daysBetween,
@@ -95,13 +95,7 @@ export async function computeFreeSlotsWithCalendar(
 ): Promise<DayFreeSlots[]> {
   if (!settings.showCalendarEvents) return computeFreeSlots(tasks, settings, days);
   const dayKeys = upcomingSlotDays(settings, days);
-  const perDay = await Promise.all(
-    dayKeys.map((d) => eventsForDay(d, settings.hiddenCalendarIds))
-  );
-  const eventsByDay: Record<DayKey, CalendarEventLite[]> = {};
-  dayKeys.forEach((d, i) => {
-    eventsByDay[d] = perDay[i];
-  });
+  const eventsByDay = await eventsForDays(dayKeys, settings.hiddenCalendarIds);
   return computeFreeSlots(tasks, settings, days, eventsByDay);
 }
 

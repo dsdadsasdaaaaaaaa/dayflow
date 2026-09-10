@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { buildDataExport, type ExportScope } from './dataExport';
+import { buildDataExport, collectExportCalendar, type ExportScope } from './dataExport';
 import { importSchoolCalendar } from './icsImport';
 import { todayKey } from './dates';
 import { normalizePhone } from './smsCredentials';
@@ -84,7 +84,7 @@ export async function pushSnapshot(): Promise<boolean> {
   const l = await link();
   if (!l) return false;
   try {
-    const body = JSON.stringify(buildDataExport(l.scope));
+    const body = JSON.stringify(buildDataExport(l.scope, await collectExportCalendar(l.scope)));
     const res = await fetch(`${l.url}/data/${encodeURIComponent(l.secret)}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

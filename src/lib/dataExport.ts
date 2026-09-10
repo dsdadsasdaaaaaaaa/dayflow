@@ -12,6 +12,8 @@ import { useTelegram } from '../store/telegramAccount';
 import { todayKey } from './dates';
 import { normalizePhone } from './smsCredentials';
 import * as Updates from 'expo-updates';
+import { addDays } from './dates';
+import { eventsForDays, hasCalendarPermission } from './calendar';
 
 /**
  * The whole app, as one document, at a level of exposure the user picks.
@@ -34,19 +36,62 @@ export const SCOPE_LABELS: Record<ExportScope, { title: string; detail: string }
   schedule: {
     title: 'Schedule only',
     detail:
-      'Classes, tasks, habits and settings. Clients appear as "person-1", with no names, numbers or messages.',
+      'Classes, tasks, habits and settings, plus the times you are busy on your phone calendar for the next two weeks. Clients appear as "person-1", with no names, numbers or messages, and calendar entries appear as times with no titles.',
   },
   clients: {
     title: 'Schedule and clients',
     detail:
-      'The above plus real names, phone numbers, notes, rates and addresses. Still no message text.',
+      'The above plus real names, phone numbers, notes, rates and addresses. Still no message text, and still no calendar titles.',
   },
   everything: {
     title: 'Everything',
     detail:
-      'The above plus the full text of every message, both directions. Nothing is held back.',
+      'The above plus the full text of every message, both directions, and the titles of your calendar events. Nothing is held back.',
   },
 };
+
+/** How far ahead the snapshot describes the user's own calendar. */
+const CALENDAR_DAYS = 14;
+
+/**
+ * The device calendar, for the snapshot.
+ *
+ * Read separately and handed to the builder rather than fetched inside it,
+ * because the builder reads eight stores in one uninterrupted tick and that
+ * is what makes a snapshot a statement about a single instant. Awaiting in
+ * the middle would let half of it change underneath.
+ *
+ * Titles only at the widest scope. The narrower scopes exist to keep other
+ * people out of the file — they turn clients into "person-1" — and a device
+ * calendar is full of other people and their appointments, so shipping
+ * "Lesson with Sam Rogers" under a scope that promises no names would break
+ * that promise from a direction the user never thought to check.
+ *
+ * Permission is checked, never requested: this runs on a background wake.
+ */
+export async function collectExportCalendar(
+  scope: ExportScope
+): Promise<Record<string, unknown>> {
+  const { showCalendarEvents, hiddenCalendarIds } = useSettings.getState().settings;
+  const from = todayKey();
+  const days = Array.from({ length: CALENDAR_DAYS }, (_, i) => addDays(from, i));
+  const window = { from, to: days[days.length - 1], days: CALENDAR_DAYS };
+
+  if (!showCalendarEvents || !(await hasCalendarPermission())) {
+    return { ...window, status: 'unavailable', events: [] };
+  }
+  const byDay = await eventsForDays(days, hiddenCalendarIds);
+  const events = days.flatMap((day) =>
+    (byDay[day] ?? []).map((e) => ({
+      date: day,
+      startMinutes: e.allDay ? null : e.startMinutes,
+      endMinutes: e.allDay ? null : e.endMinutes,
+      allDay: e.allDay,
+      ...(scope === 'everything' ? { title: e.title } : {}),
+    }))
+  );
+  return { ...window, status: 'ok', events };
+}
 
 /** Stable stand-ins, used only at the narrowest scope. */
 function anonymiser(): (value: string) => string {
@@ -63,7 +108,11 @@ function anonymiser(): (value: string) => string {
   };
 }
 
-export function buildDataExport(scope: ExportScope): Record<string, unknown> {
+export function buildDataExport(
+  scope: ExportScope,
+  /** From collectExportCalendar. Omitted means the calendar was not read. */
+  calendar?: Record<string, unknown>
+): Record<string, unknown> {
   const named = scope !== 'schedule';
   const person = anonymiser();
   const who = (value: string) => (named ? value : person(value));
@@ -121,6 +170,7 @@ export function buildDataExport(scope: ExportScope): Record<string, unknown> {
     contains: SCOPE_LABELS[scope].detail,
     settings: useSettings.getState().settings,
     tasks,
+    calendar: calendar ?? { status: 'not-collected', events: [] },
     habits: Object.values(useHabits.getState().habits),
     focusSessions: useFocus.getState().sessions,
     meetingLog: useMeetingSession.getState().log.map((e) => ({ ...e, client: who(e.client) })),
@@ -133,7 +183,7 @@ export function buildDataExport(scope: ExportScope): Record<string, unknown> {
 
 /** Write the export and open the share sheet on it. */
 export async function shareDataExport(scope: ExportScope): Promise<void> {
-  const json = JSON.stringify(buildDataExport(scope), null, 2);
+  const json = JSON.stringify(buildDataExport(scope, await collectExportCalendar(scope)), null, 2);
   const dir = new Directory(Paths.cache, 'export');
   if (!dir.exists) dir.create();
   const file = new File(dir, `dayflow-${scope}-${todayKey()}.json`);

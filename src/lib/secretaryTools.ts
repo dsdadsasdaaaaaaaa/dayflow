@@ -39,6 +39,7 @@ import {
 import type { ToolRunner, ToolSpec } from './secretaryPrompt';
 import { clientProfiles, knownClients, meetingOccurrences } from './meetings';
 import { overdueRegulars } from './rebook';
+import { eventsForDays, hasCalendarPermission } from './calendar';
 import { assertNoPii, redactText, type PseudonymMap } from './secretaryPrivacy';
 
 /** History window for rhythm math (matches src/lib/rebook.ts). */
@@ -163,7 +164,7 @@ const READ_TOOLS: ToolSpec[] = [
   {
     name: 'get_schedule',
     description:
-      'The meetings booked on one day. Times are minutes from midnight (540 = 9:00 AM).',
+      'One day: the meetings booked, plus the time already taken on the user\'s own phone calendar. Times are minutes from midnight (540 = 9:00 AM). "busy" is a list of stretches that are already spoken for, merged and in order — you get the times and deliberately nothing else, so never speculate about what a busy block is or who it is with. "allDayEvents" counts all-day entries, which mark the day but do not block any particular hour. "calendarChecked" is false when the calendar could not be read at all (switched off in settings, or access not granted) — when it is false say you could not check their calendar rather than implying the day is clear. Never propose a time that lands inside a busy block.',
     parameters: {
       type: 'object',
       properties: {
@@ -323,7 +324,7 @@ const WRITE_TOOLS: ToolSpec[] = [
   {
     name: 'propose_booking',
     description:
-      'Prepare a booking FOR THE USER TO CONFIRM. This does NOT put anything in the calendar: it offers a card the user has to tap to accept. Call get_availability first so the slot you name is genuinely free. Never say a meeting is booked or confirmed, only that you have suggested it.',
+      'Prepare a booking FOR THE USER TO CONFIRM. This does NOT put anything in the calendar: it offers a card the user has to tap to accept. Check the time is genuinely free first: get_availability for a range, or get_schedule when the client has named a particular day — the slot you propose must collide with neither a booked meeting nor a busy block from the user\'s own calendar. Never say a meeting is booked or confirmed, only that you have suggested it.',
     parameters: {
       type: 'object',
       properties: {
@@ -789,10 +790,53 @@ interface ScheduleRow {
   durationMinutes: number;
 }
 
-function toolGetSchedule(
+/** A stretch of the day already spoken for. Times only — see below. */
+interface BusyBlock {
+  startMinutes: number;
+  endMinutes: number;
+}
+
+/** Overlapping stretches folded into one, so the day reads as a shape. */
+function mergeBusy(blocks: BusyBlock[]): BusyBlock[] {
+  const sorted = [...blocks].sort((a, b) => a.startMinutes - b.startMinutes);
+  const out: BusyBlock[] = [];
+  for (const b of sorted) {
+    const last = out[out.length - 1];
+    if (last && b.startMinutes <= last.endMinutes) {
+      last.endMinutes = Math.max(last.endMinutes, b.endMinutes);
+    } else {
+      out.push({ ...b });
+    }
+  }
+  return out;
+}
+
+/**
+ * One day: the meetings booked, and the time already taken by the user's own
+ * calendar.
+ *
+ * The calendar arrives as intervals and nothing else. The assistant's job
+ * here is to avoid proposing a time the user cannot make, and an interval
+ * does that job completely — "busy 14:00 to 15:00" is exactly as useful for
+ * booking as knowing it is a hospital appointment, and one of those is
+ * nobody's business. Message bodies are shared under a setting the user
+ * turned on deliberately; a device calendar carries other people's
+ * appointments and medical details that were never part of that bargain.
+ *
+ * Permission is checked but never requested: raising an iOS dialog in the
+ * middle of a conversation, with no explanation on screen, is how a
+ * permission gets refused permanently.
+ */
+async function toolGetSchedule(
   map: PseudonymMap,
   args: Record<string, unknown>
-): { date: DayKey; meetings: ScheduleRow[] } {
+): Promise<{
+  date: DayKey;
+  meetings: ScheduleRow[];
+  busy: BusyBlock[];
+  allDayEvents: number;
+  calendarChecked: boolean;
+}> {
   const tasks = useTasks.getState().tasks;
   const date = coerceDay(args.date);
   const meetings = instancesForDay(tasks, date)
@@ -803,7 +847,23 @@ function toolGetSchedule(
       durationMinutes: i.task.allDay ? 24 * 60 : i.task.durationMinutes,
     }))
     .sort((a, b) => a.startMinutes - b.startMinutes);
-  return { date, meetings };
+
+  const settings = useSettings.getState().settings;
+  const canRead = settings.showCalendarEvents && (await hasCalendarPermission());
+  if (!canRead) {
+    return { date, meetings, busy: [], allDayEvents: 0, calendarChecked: false };
+  }
+  const events = (await eventsForDays([date], settings.hiddenCalendarIds))[date] ?? [];
+  const timed = events.filter((e) => !e.allDay);
+  return {
+    date,
+    meetings,
+    busy: mergeBusy(
+      timed.map((e) => ({ startMinutes: e.startMinutes, endMinutes: e.endMinutes }))
+    ).slice(0, MAX_ROWS),
+    allDayEvents: events.length - timed.length,
+    calendarChecked: true,
+  };
 }
 
 // -------------------------------------------------- calls, no-shows, detail
@@ -1855,7 +1915,7 @@ export function buildToolRunner(map: PseudonymMap, sink: SecretaryAction[]): Too
         result = toolGetMoneySummary(map);
         break;
       case 'get_schedule':
-        result = toolGetSchedule(map, args);
+        result = await toolGetSchedule(map, args);
         break;
       case 'get_call_history':
         result = toolGetCallHistory(map, args);

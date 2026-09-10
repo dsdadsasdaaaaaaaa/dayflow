@@ -9,13 +9,31 @@ export interface DeviceCalendar {
   color: string;
 }
 
+/**
+ * Is access already granted? Asks nobody.
+ *
+ * For the paths that run without a screen in front of them — the widget
+ * refresh, the background snapshot push. A permission dialog raised from a
+ * background job, with nothing on screen to explain it, is the surest way to
+ * earn a permanent refusal, and after that canAskAgain is false and the
+ * feature is dead everywhere.
+ */
+export async function hasCalendarPermission(): Promise<boolean> {
+  if (Platform.OS === 'web') return false;
+  try {
+    return (await Calendar.getCalendarPermissions()).granted;
+  } catch {
+    return false;
+  }
+}
+
 export async function ensureCalendarPermission(): Promise<boolean> {
   if (Platform.OS === 'web') return false;
   try {
-    const current = await Calendar.getCalendarPermissionsAsync();
+    const current = await Calendar.getCalendarPermissions();
     if (current.granted) return true;
     if (!current.canAskAgain) return false;
-    const req = await Calendar.requestCalendarPermissionsAsync();
+    const req = await Calendar.requestCalendarPermissions();
     return req.granted;
   } catch {
     return false;
@@ -27,7 +45,7 @@ export async function listCalendars(): Promise<DeviceCalendar[]> {
   try {
     const granted = await ensureCalendarPermission();
     if (!granted) return [];
-    const cals = await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT);
+    const cals = await Calendar.getCalendars(Calendar.EntityTypes.EVENT);
     return cals.map((c) => ({ id: c.id, title: c.title, color: c.color ?? '#6366F1' }));
   } catch {
     return [];
@@ -56,7 +74,7 @@ export async function eventsForDays(
   try {
     const granted = await ensureCalendarPermission();
     if (!granted) return empty;
-    const cals = await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT);
+    const cals = await Calendar.getCalendars(Calendar.EntityTypes.EVENT);
     const visible = cals.filter((c) => !hiddenCalendarIds.includes(c.id));
     if (visible.length === 0) return empty;
     const colorById = new Map(visible.map((c) => [c.id, c.color ?? '#6366F1']));
@@ -66,7 +84,7 @@ export async function eventsForDays(
     const end = fromDayKey(sorted[sorted.length - 1]);
     end.setHours(23, 59, 59, 999);
 
-    const events = await Calendar.getEventsAsync(
+    const events = await Calendar.listEvents(
       visible.map((c) => c.id),
       start,
       end
@@ -83,7 +101,17 @@ export async function eventsForDays(
       const s = new Date(e.startDate as string | number | Date);
       const en = new Date(e.endDate as string | number | Date);
       const first = toDayKey(s);
-      const last = toDayKey(en);
+      // An event ending exactly at midnight belongs to the day it ran in,
+      // not to the one that starts as it finishes. iOS states an all-day
+      // event as midnight-to-midnight, so without this every all-day event
+      // also claimed the following day, and a 10 PM to midnight event showed
+      // up as a zero-length sliver at the top of tomorrow.
+      const endsAtMidnight =
+        en.getHours() === 0 &&
+        en.getMinutes() === 0 &&
+        en.getSeconds() === 0 &&
+        en.getTime() > s.getTime();
+      const last = toDayKey(endsAtMidnight ? new Date(en.getTime() - 1) : en);
       for (const day of wanted) {
         if (day < first || day > last) continue;
         out[day].push({
