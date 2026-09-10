@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BackButton } from '../src/components/clients/BackButton';
@@ -16,13 +16,14 @@ import {
 } from '../src/lib/dates';
 import { selectionHaptic, tapHaptic } from '../src/lib/haptics';
 import { earningsForDays, formatMoney } from '../src/lib/meetings';
+import { eventsForDays } from '../src/lib/calendar';
 import { isRuleMarker } from '../src/lib/schoolDay';
 import { isImportedSchool } from '../src/lib/schoolWords';
 import { isSchoolTask } from '../src/lib/timetableImport';
 import { useSettings } from '../src/store/settings';
 import { instancesForDay, useTasks } from '../src/store/tasks';
 import { SPACING, taskColor, useTheme } from '../src/theme';
-import type { DayKey, TaskInstance } from '../src/types';
+import type { CalendarEventLite, DayKey, TaskInstance } from '../src/types';
 
 const WD_LETTERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
@@ -83,9 +84,49 @@ function DayBlock({ inst, onPress }: { inst: TaskInstance; onPress: () => void }
   );
 }
 
+/**
+ * One calendar event in a week column.
+ *
+ * Deliberately quieter than a task: an outline rather than a filled bar, and
+ * no completion state, because these are not things to tick off. They are
+ * here so a week reads as the week actually is — a dentist appointment on
+ * Tuesday afternoon is the reason that slot is not free, and a week view
+ * that hides it invites double-booking.
+ */
+function EventDayBlock({ event }: { event: CalendarEventLite }) {
+  const theme = useTheme();
+  return (
+    <View
+      style={styles.block}
+      accessibilityLabel={`${event.title}${
+        event.allDay ? ', all day' : `, ${formatMinutes(event.startMinutes)}`
+      }, calendar event`}
+    >
+      <View style={event.allDay ? styles.allDayRow : styles.timedRow}>
+        {event.allDay ? (
+          <View style={[styles.dot, styles.eventDot, { borderColor: event.color }]} />
+        ) : (
+          <View style={[styles.bar, styles.eventBar, { borderColor: event.color }]} />
+        )}
+        <View style={styles.blockBody}>
+          <Text style={[styles.blockTitle, { color: theme.textSecondary }]} numberOfLines={2}>
+            {event.title}
+          </Text>
+          {!event.allDay ? (
+            <Text style={[styles.timeLabel, { color: theme.textTertiary }]} numberOfLines={1}>
+              {formatMinutes(event.startMinutes)}
+            </Text>
+          ) : null}
+        </View>
+      </View>
+    </View>
+  );
+}
+
 /** Pushed week overview: 7 slim day columns of compact task blocks. */
 type ColumnItem =
   | { kind: 'task'; inst: TaskInstance }
+  | { kind: 'event'; event: CalendarEventLite }
   | { kind: 'school'; start: number; end: number; count: number };
 
 /**
@@ -98,7 +139,7 @@ type ColumnItem =
  * The block goes where the first period would, so the column still reads
  * in time order.
  */
-function columnItems(instances: TaskInstance[]): ColumnItem[] {
+function columnItems(instances: TaskInstance[], events: CalendarEventLite[] = []): ColumnItem[] {
   const classes = instances.filter(
     (i) => isSchoolTask(i.task) && i.task.recurrence != null && i.task.startMinutes != null
   );
@@ -120,6 +161,35 @@ function columnItems(instances: TaskInstance[]): ColumnItem[] {
     // A dismissal marker says what the block's end already says.
     if (isSchoolTask(inst.task) && !inst.task.recurrence && isRuleMarker(inst.task.title)) continue;
     out.push({ kind: 'task', inst });
+  }
+  return withEvents(out, events);
+}
+
+/**
+ * Slot events into a column that is already in order.
+ *
+ * All-day events go to the top with the all-day tasks; a timed one lands
+ * before the first thing that starts after it, so the column still reads
+ * down the day. The school block counts as starting when its first period
+ * does, so a 9 AM appointment sits above it rather than after the last
+ * class.
+ */
+function withEvents(items: ColumnItem[], events: CalendarEventLite[]): ColumnItem[] {
+  if (events.length === 0) return items;
+  const startOf = (item: ColumnItem): number => {
+    if (item.kind === 'school') return item.start;
+    if (item.kind === 'event') return item.event.allDay ? -1 : item.event.startMinutes;
+    const t = item.inst.task;
+    return t.allDay || t.startMinutes == null ? -1 : t.startMinutes;
+  };
+  const out = [...items];
+  for (const event of events) {
+    const at = event.allDay ? -1 : event.startMinutes;
+    // After everything that starts earlier, and after the all-day shelf when
+    // this one is all-day too, so events do not jump above tasks arbitrarily.
+    let i = 0;
+    while (i < out.length && startOf(out[i]) <= at) i++;
+    out.splice(i, 0, { kind: 'event', event });
   }
   return out;
 }
@@ -173,12 +243,32 @@ export default function WeekScreen() {
   const tasks = useTasks((s) => s.tasks);
   const weekStartsOn = useSettings((s) => s.settings.weekStartsOn);
   const symbol = useSettings((s) => s.settings.currencySymbol);
+  const showCalendarEvents = useSettings((s) => s.settings.showCalendarEvents);
+  const hiddenCalendarIds = useSettings((s) => s.settings.hiddenCalendarIds);
 
   const [anchor, setAnchor] = useState<DayKey>(() => todayKey());
   const days = useMemo(() => weekOf(anchor, weekStartsOn), [anchor, weekStartsOn]);
   const onCurrentWeek = days.some((d) => d === todayKey());
 
   const dayInstances = useMemo(() => days.map((d) => instancesForDay(tasks, d)), [tasks, days]);
+
+  // The device calendar for the whole week, in one query. Absent permission
+  // it comes back empty and the week simply shows tasks, which is what it
+  // did before there was any calendar support at all.
+  const [eventsByDay, setEventsByDay] = useState<Record<DayKey, CalendarEventLite[]>>({});
+  useEffect(() => {
+    let alive = true;
+    if (!showCalendarEvents) {
+      setEventsByDay({});
+      return;
+    }
+    eventsForDays(days, hiddenCalendarIds).then((byDay) => {
+      if (alive) setEventsByDay(byDay);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [days, showCalendarEvents, hiddenCalendarIds]);
 
   const stats = useMemo(() => {
     let total = 0;
@@ -345,8 +435,10 @@ export default function WeekScreen() {
                 i < 6 && { borderRightWidth: StyleSheet.hairlineWidth, borderRightColor: theme.separator },
               ]}
             >
-              {columnItems(dayInstances[i]).map((item) =>
-                item.kind === 'school' ? (
+              {columnItems(dayInstances[i], eventsByDay[day] ?? []).map((item) =>
+                item.kind === 'event' ? (
+                  <EventDayBlock key={`ev-${item.event.id}`} event={item.event} />
+                ) : item.kind === 'school' ? (
                   <SchoolDayBlock
                     key="school"
                     startMinutes={item.start}
@@ -482,6 +574,16 @@ const styles = StyleSheet.create({
     width: 5,
     height: 5,
     borderRadius: 2.5,
+  },
+  // An outline, not a fill: a calendar event is somewhere you have to be,
+  // not something to finish, and it should not read as an unticked task.
+  eventDot: {
+    backgroundColor: 'transparent',
+    borderWidth: 1.5,
+  },
+  eventBar: {
+    backgroundColor: 'transparent',
+    borderWidth: 1.5,
   },
   timedRow: {
     flexDirection: 'row',
