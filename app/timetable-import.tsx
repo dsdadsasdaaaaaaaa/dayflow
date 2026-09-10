@@ -34,6 +34,7 @@ import { applyStoredBellSchedules } from '../src/lib/bellSchedule';
 import { applyStoredRules } from '../src/lib/schoolDay';
 import { useTasks } from '../src/store/tasks';
 import { SPACING, useTheme } from '../src/theme';
+import type { ClassConflict } from '../src/lib/timetableImport';
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -67,6 +68,7 @@ export default function TimetableImportScreen() {
   const [error, setError] = useState<string | null>(null);
   const [classes, setClasses] = useState<ParsedClass[] | null>(null);
   const [dropped, setDropped] = useState(0);
+  const [conflicts, setConflicts] = useState<ClassConflict[]>([]);
   const [skipped, setSkipped] = useState<Record<string, boolean>>({});
   const [added, setAdded] = useState<number | null>(null);
 
@@ -117,6 +119,7 @@ export default function TimetableImportScreen() {
     }
     setClasses(result.classes);
     setDropped(result.dropped);
+    setConflicts(result.conflicts);
     setSkipped({});
   }
 
@@ -261,6 +264,30 @@ export default function TimetableImportScreen() {
                   : ''}
               </Text>
 
+              {conflicts.length > 0 ? (
+                <View style={[styles.conflicts, { borderColor: '#F59E0B' }]}>
+                  <Text style={[styles.conflictTitle, { color: theme.text }]}>
+                    {conflicts.length === 1
+                      ? 'One period overlaps the one before it'
+                      : `${conflicts.length} periods overlap the one before them`}
+                  </Text>
+                  <Text style={[styles.conflictBody, { color: theme.textSecondary }]}>
+                    A timetable cannot have two classes at once, so one of these times was read
+                    wrong. Check them against your own copy before importing.
+                  </Text>
+                  {conflicts.slice(0, 6).map((c, i) => (
+                    <Text
+                      key={`${c.weekday}-${i}`}
+                      style={[styles.conflictRow, { color: theme.textSecondary }]}
+                    >
+                      {DAY_NAMES[c.weekday]}: {c.later.title} starts{' '}
+                      {formatMinutes(c.later.startMinutes)}, but {c.earlier.title} runs to{' '}
+                      {formatMinutes(c.earlier.startMinutes + c.earlier.durationMinutes)}
+                    </Text>
+                  ))}
+                </View>
+              ) : null}
+
               {existing.length > 0 ? (
                 <GlassCard padding={0}>
                   <View style={styles.replaceRow}>
@@ -385,6 +412,16 @@ export default function TimetableImportScreen() {
 }
 
 const styles = StyleSheet.create({
+  conflicts: {
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 12,
+    gap: 4,
+    marginBottom: 12,
+  },
+  conflictTitle: { fontSize: 14, fontWeight: '700' },
+  conflictBody: { fontSize: 13, lineHeight: 18 },
+  conflictRow: { fontSize: 12, lineHeight: 17 },
   root: { flex: 1 },
   flex: { flex: 1 },
   header: {

@@ -56,7 +56,7 @@ export interface ParsedClass {
 }
 
 export type TimetableParse =
-  | { ok: true; classes: ParsedClass[]; dropped: number }
+  | { ok: true; classes: ParsedClass[]; dropped: number; conflicts: ClassConflict[] }
   | { ok: false; error: string };
 
 const MAX_INPUT = 24_000;
@@ -187,6 +187,47 @@ export function validateClasses(raw: unknown): { classes: ParsedClass[]; dropped
   };
 }
 
+/** Two classes on one day that cannot both be true. */
+export interface ClassConflict {
+  weekday: number;
+  earlier: ParsedClass;
+  later: ParsedClass;
+}
+
+/**
+ * Periods that overlap, which a timetable cannot contain.
+ *
+ * A grid is read by a model, and a model misreading one digit produces a
+ * time that is wrong but entirely plausible on its own — 3:11 PM looks like
+ * a school period. What it cannot survive is the company it keeps: the
+ * period before it runs to 3:25. Nothing on the timeline says so, because
+ * each class is drawn where it claims to be, so the error sat there for a
+ * fortnight until someone noticed school ending twenty minutes early.
+ *
+ * This cannot say which of the two is wrong, and it does not guess. It says
+ * that one of them is, which is the part the reader can act on.
+ */
+export function classConflicts(classes: readonly ParsedClass[]): ClassConflict[] {
+  const out: ClassConflict[] = [];
+  const byDay = new Map<number, ParsedClass[]>();
+  for (const c of classes) {
+    const list = byDay.get(c.weekday) ?? [];
+    list.push(c);
+    byDay.set(c.weekday, list);
+  }
+  for (const [weekday, list] of byDay) {
+    const ordered = [...list].sort((a, b) => a.startMinutes - b.startMinutes);
+    for (let i = 1; i < ordered.length; i++) {
+      const earlier = ordered[i - 1];
+      const later = ordered[i];
+      if (later.startMinutes < earlier.startMinutes + earlier.durationMinutes) {
+        out.push({ weekday, earlier, later });
+      }
+    }
+  }
+  return out;
+}
+
 /** Read a timetable into repeating classes. Nothing is created here. */
 export async function parseTimetable(
   text: string,
@@ -223,7 +264,7 @@ export async function parseTimetable(
           : 'No classes found in that.',
     };
   }
-  return { ok: true, classes, dropped };
+  return { ok: true, classes, dropped, conflicts: classConflicts(classes) };
 }
 
 /** The next date on or after `from` that falls on this weekday. */
