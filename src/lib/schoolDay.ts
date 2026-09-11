@@ -229,6 +229,14 @@ export async function rememberDayRules(rules: Map<DayKey, DayRule>): Promise<voi
 }
 
 /**
+ * Every remembered rule, by day — the late starts and early dismissals a
+ * special day's times have to fit inside.
+ */
+export async function storedDayRules(): Promise<Record<DayKey, DayRule>> {
+  return loadStored();
+}
+
+/**
  * Re-apply every remembered rule.
  *
  * Safe to call whenever the timetable changes, which is exactly when it is

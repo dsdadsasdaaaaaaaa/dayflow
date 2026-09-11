@@ -4,6 +4,18 @@ import { taskOccursOn } from './recurrence';
 import { askModel, extractJson, timeInText } from './scheduleImport';
 import { isSchoolTask, SCHOOL_TAG, TIMETABLE_TAG } from './timetableImport';
 import { useTasks } from '../store/tasks';
+import { fromDayKey, todayKey } from './dates';
+import { storedDayRules } from './schoolDay';
+import { isImportedSchool } from './schoolWords';
+import {
+  isSpecialNotice,
+  normalGrid,
+  parseBlockOrder,
+  planSwappedDay,
+  templatesFrom,
+  weekdayShape,
+  type TimeSource,
+} from './specialDays';
 
 /**
  * A day that runs on a different bell.
@@ -101,6 +113,26 @@ function isRealDate(key: string): boolean {
  * Keep only rows that describe a real slot. Exported because it, not the
  * model, is what makes this safe to run on a scanned sheet.
  */
+/**
+ * Most sheets print "Tuesday, September 8" with no year, so the year is the
+ * model's to supply, and a wrong one is still a valid date. A sheet filed a
+ * year in the past is rebuilt onto a day nobody will look at, then purged
+ * from memory as stale — gone without a trace. A sheet describes a day a
+ * week or two away, so a date nearly a year off with a far closer reading
+ * one year over is that reading.
+ */
+function nearestPlausibleYear(date: DayKey): DayKey {
+  const today = fromDayKey(todayKey()).getTime();
+  const away = (d: DayKey) => Math.abs(fromDayKey(d).getTime() - today) / 86_400_000;
+  if (away(date) <= 300) return date;
+  const year = Number(date.slice(0, 4));
+  const closer = [year - 1, year + 1]
+    .map((y) => `${y}${date.slice(4)}`)
+    .filter(isRealDate)
+    .sort((a, b) => away(a) - away(b))[0];
+  return closer && away(closer) <= 60 ? closer : date;
+}
+
 export function validateBell(raw: unknown, fallbackYear: number): BellSchedule | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const r = raw as Record<string, unknown>;
@@ -111,6 +143,7 @@ export function validateBell(raw: unknown, fallbackYear: number): BellSchedule |
     date = m ? (m.length === 4 ? `${m[1]}-${m[2]}-${m[3]}` : `${fallbackYear}-${m[1]}-${m[2]}`) : '';
   }
   if (!isRealDate(date)) return null;
+  date = nearestPlausibleYear(date);
   const rowsIn = Array.isArray(r.rows) ? r.rows : [];
   const rows: BellRow[] = [];
   for (const row of rowsIn.slice(0, 30)) {
@@ -245,30 +278,76 @@ export interface SpecialDayChanges {
   created: number;
 }
 
+const SOURCE_NOTE: Record<TimeSource, string> = {
+  sheet: 'Special schedule · times from the bell sheet',
+  template: 'Special schedule · times copied from a day that ran the same way',
+  grid: 'Special schedule · the usual bell times',
+  estimated: 'Special schedule · times estimated until the bell sheet arrives',
+};
+
 /**
  * Rebuild one day from its bell schedule.
  *
- * Idempotent: entries from an earlier run of the same day are removed first,
- * and a class already set aside is not there to set aside again. Only ever
- * touches what the school put there.
+ * Idempotent, and quiet when nothing has changed: a day already built from
+ * the same plan and the same source is left exactly as it is, so a class
+ * ticked off on a special day is not silently unticked by the next wake.
+ *
+ * Only ever touches the timetable. Returns null when it left the day alone.
  */
-export function applySpecialDay(schedule: BellSchedule): SpecialDayChanges {
-  const store = useTasks.getState();
+export function applySpecialDay(
+  schedule: BellSchedule,
+  source: TimeSource = 'sheet'
+): SpecialDayChanges | null {
   const tag = `${SPECIAL_TAG_PREFIX}${schedule.date}`;
-  let setAside = 0;
+  const sourceTag = `times:${source}`;
+  const plan = planSpecialDay(schedule, coursesByBlock(useTasks.getState().tasks));
+  const all = Object.values(useTasks.getState().tasks);
 
-  // Yesterday's version of this day, if this sheet has been read before.
-  for (const t of Object.values(useTasks.getState().tasks)) {
-    if (t.tags?.includes(tag)) store.deleteTask(t.id);
+  const previous = all.filter((t) => t.tags?.includes(tag));
+  const signature = (xs: { title: string; startMinutes: number | null; durationMinutes: number }[]) =>
+    xs
+      .map((x) => `${x.startMinutes}|${x.durationMinutes}|${x.title}`)
+      .sort()
+      .join(';');
+  if (
+    previous.length > 0 &&
+    previous.every((t) => t.tags?.includes(sourceTag)) &&
+    signature(previous) === signature(plan)
+  ) {
+    return null;
   }
-  // The ordinary timetable, set aside for the day.
+
+  // The day is rebuilt from scratch, so two kinds of one-off go: this day's
+  // previous build, and any class an ordinary bell rule cut short or split
+  // off it. Left in place, the second put Physics at 11:41 beside the
+  // Explore Excellence the sheet actually puts there.
+  //
+  // Removed directly rather than through deleteTask. deleteTask records a
+  // deletion as the user's own decision, and the importer honours those by
+  // never bringing the entry back.
+  const doomed = new Set<string>();
+  for (const t of all) {
+    if (t.recurrence || t.date !== schedule.date) continue;
+    if (t.tags?.includes(tag) || t.tags?.includes(TIMETABLE_TAG)) doomed.add(t.id);
+  }
+  if (doomed.size > 0) {
+    useTasks.setState((s) => {
+      const next = { ...s.tasks };
+      for (const id of doomed) delete next[id];
+      return { tasks: next };
+    });
+  }
+
+  // The ordinary timetable, set aside for the day. By tag, never by icon:
+  // somebody's own "Study for Physics" wears the school icon too.
+  let setAside = 0;
   for (const t of Object.values(useTasks.getState().tasks)) {
-    if (!isSchoolTask(t) || !t.recurrence || t.startMinutes == null) continue;
+    if (!t.recurrence || t.startMinutes == null || !t.tags?.includes(TIMETABLE_TAG)) continue;
     if (!taskOccursOn(t, schedule.date)) continue;
-    store.skipOccurrence(t.id, schedule.date);
+    useTasks.getState().skipOccurrence(t.id, schedule.date);
     setAside++;
   }
-  const plan = planSpecialDay(schedule, coursesByBlock(useTasks.getState().tasks));
+
   for (const entry of plan) {
     useTasks.getState().addTask({
       title: entry.title,
@@ -276,18 +355,87 @@ export function applySpecialDay(schedule: BellSchedule): SpecialDayChanges {
       allDay: false,
       startMinutes: entry.startMinutes,
       durationMinutes: entry.durationMinutes,
-      notes: entry.notes,
+      notes: [entry.notes, SOURCE_NOTE[source]].filter(Boolean).join('\n'),
       icon: 'school-outline',
       color: 'sky',
       tags: [
         SCHOOL_TAG,
         TIMETABLE_TAG,
         tag,
+        sourceTag,
         ...(entry.block != null ? [`block:${entry.block}`] : []),
       ],
     });
   }
   return { date: schedule.date, setAside, created: plan.length };
+}
+
+/**
+ * Every special day from today on, rebuilt from the best evidence there is.
+ *
+ * Driven by the calendar itself — the "Special schedule Blocks …" notices the
+ * year calendar and newsletter put there — rather than by a side cache of
+ * sheets alone. That cache is exactly what went missing after the timetable
+ * was re-imported, and every special day quietly reverted to an ordinary
+ * one. The notices live in the task store with everything else; if the
+ * calendar still says a day is special, the day gets rebuilt.
+ *
+ * Safe to call on every wake: an unchanged day is left alone.
+ */
+export async function rebuildSpecialDays(): Promise<SpecialDayChanges[]> {
+  const today = todayKey();
+  const sheets = await loadBells();
+  const rules = await storedDayRules();
+  const tasks = useTasks.getState().tasks;
+  const grid = normalGrid(tasks);
+  const templates = templatesFrom(Object.values(sheets));
+
+  const notices = new Map<DayKey, string[]>();
+  const support = new Set<DayKey>();
+  for (const t of Object.values(tasks)) {
+    if (!t.date || t.recurrence || t.date < today || !isImportedSchool(t)) continue;
+    if (t.tags?.includes(TIMETABLE_TAG)) continue;
+    if (isSpecialNotice(t.title)) notices.set(t.date, [...(notices.get(t.date) ?? []), t.title]);
+    if (/\bproject\s+support\b/i.test(t.title)) support.add(t.date);
+  }
+  for (const day of Object.keys(sheets)) {
+    if (day >= today && !notices.has(day)) notices.set(day, []);
+  }
+
+  const out: SpecialDayChanges[] = [];
+  for (const [date, titles] of [...notices].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    const sheet = sheets[date];
+    if (sheet) {
+      const done = applySpecialDay(sheet, 'sheet');
+      if (done) out.push(done);
+      continue;
+    }
+    const rule = rules[date] ?? null;
+    if (rule?.closed) continue;
+    const listedTitle = titles.find((t) => parseBlockOrder(t) != null);
+    const listed = listedTitle ? parseBlockOrder(listedTitle) : null;
+    const shape = weekdayShape(useTasks.getState().tasks, fromDayKey(date).getDay());
+    // A notice with no block list only changes anything when the hours move;
+    // otherwise the school has said the day is unusual without saying how,
+    // and it is left as it is rather than rebuilt from a guess.
+    const hoursMove = rule != null && (rule.startsAt != null || rule.dismissalAt != null);
+    const order = listed ?? (hoursMove ? shape.blocks : null);
+    if (!order || order.length === 0) continue;
+    const planned = planSwappedDay({
+      date,
+      title: listedTitle ?? titles[0] ?? 'Special schedule',
+      order,
+      rule,
+      grid,
+      shape,
+      templates,
+      projectSupport: support.has(date),
+    });
+    if (!planned || planned.schedule.rows.length === 0) continue;
+    const done = applySpecialDay(planned.schedule, planned.source);
+    if (done) out.push(done);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -320,8 +468,12 @@ export async function rememberBellSchedule(schedule: BellSchedule): Promise<void
   }
 }
 
-/** Re-apply every remembered special day. Safe whenever the timetable changes. */
+/** Re-apply every special day. Safe whenever the timetable changes. */
 export async function applyStoredBellSchedules(): Promise<SpecialDayChanges[]> {
-  const all = await loadBells();
-  return Object.values(all).map(applySpecialDay);
+  return rebuildSpecialDays();
+}
+
+/** The remembered sheets, by day. */
+export async function storedBellSchedules(): Promise<Record<DayKey, BellSchedule>> {
+  return loadBells();
 }

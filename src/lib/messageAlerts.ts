@@ -3,6 +3,7 @@ import * as Notifications from 'expo-notifications';
 import * as TaskManager from 'expo-task-manager';
 import { autoImportSchedule } from './scheduleAuto';
 import { autoImportSchoolCalendar } from './icsImport';
+import { rebuildSpecialDays } from './bellSchedule';
 import { syncLiveLink } from './liveLink';
 import { Platform } from 'react-native';
 import { useClientMeta, isPhoneBlocked } from '../store/clientMeta';
@@ -110,6 +111,7 @@ TaskManager.defineTask(TASK_NAME, async () => {
   // for arrives once a week.
   try { await autoImportSchedule(); } catch {}
   try { await autoImportSchoolCalendar(); } catch {}
+  try { await rebuildSpecialDays(); } catch {}
   // The live link rides the same wake: send what changed, take what an
   // assistant queued. Off unless the user switched it on, in which case
   // this returns immediately.
@@ -148,6 +150,7 @@ export async function checkInboundNow(): Promise<void> {
   try {
     await autoImportSchedule();
     try { await autoImportSchoolCalendar(); } catch {}
+    try { await rebuildSpecialDays(); } catch {}
   } catch {
     // Next wake catches up.
   }

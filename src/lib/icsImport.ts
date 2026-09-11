@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { DayKey } from '../types';
 import { addScheduleEvents } from './scheduleAuto';
 import { forgottenSchoolKeys } from './schoolTombstones';
+import { rebuildSpecialDays } from './bellSchedule';
 import type { ParsedEvent } from './scheduleImport';
 import { timeInText } from './scheduleImport';
 import { applySchoolDayRules, deriveDayRules, isRuleMarker, rememberDayRules } from './schoolDay';
@@ -238,6 +239,8 @@ export async function importSchoolCalendar(text: string): Promise<CalendarImport
   const rules = deriveDayRules(events);
   await rememberDayRules(rules);
   const amended = applySchoolDayRules(rules);
+  // After the rules, so a swapped day replaces the shortened ordinary one.
+  await rebuildSpecialDays().catch(() => []);
   let closures = 0;
   for (const r of rules.values()) if (r.closed) closures++;
   return { read: events.length, added, closures, amended };

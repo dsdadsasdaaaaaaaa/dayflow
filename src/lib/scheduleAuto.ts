@@ -6,7 +6,12 @@ import { fetchRelaySchedule } from './smsgate';
 import { loadSmsGateCredentials } from './smsgateCredentials';
 import { useSettings } from '../store/settings';
 import { useTasks } from '../store/tasks';
-import { applySpecialDay, parseBellSchedule, rememberBellSchedule } from './bellSchedule';
+import {
+  applySpecialDay,
+  parseBellSchedule,
+  rebuildSpecialDays,
+  rememberBellSchedule,
+} from './bellSchedule';
 import { applySchoolDayRules, deriveDayRules, rememberDayRules } from './schoolDay';
 import { isRuleMarker } from './schoolDay';
 import { normTitle } from './schoolWords';
@@ -233,6 +238,9 @@ export async function autoImportSchedule(): Promise<number> {
   // Then the sheets, which are more precise than the rules: a rule shortens
   // the day, a sheet says exactly which block runs when.
   const sheets = await applyBellSheets(waiting.attachments);
+  // Days the newsletter marks special without sending a sheet still get
+  // their blocks rearranged.
+  await rebuildSpecialDays().catch(() => []);
 
   await markHandled(waiting.storedAt);
   const amendment =

@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { buildDataExport, collectExportCalendar, type ExportScope } from './dataExport';
 import { importSchoolCalendar } from './icsImport';
+import { rebuildSpecialDays, rememberBellSchedule, validateBell } from './bellSchedule';
 import { todayKey } from './dates';
 import { normalizePhone } from './smsCredentials';
 import { loadSmsGateCredentials } from './smsgateCredentials';
@@ -341,6 +342,25 @@ export async function applyQueuedChanges(): Promise<AppliedChanges> {
         out.drafted++;
         break;
       }
+      case 'bell_schedule': {
+        // A bell sheet, already read: {date, title, rows:[{startMinutes,
+        // endMinutes, block, label}]}. Held to the same validation as one the
+        // app read itself, then remembered, so it survives a timetable
+        // re-import and teaches days that run the same way.
+        const schedule = validateBell(c, new Date().getFullYear());
+        if (!schedule) {
+          out.rejected++;
+          break;
+        }
+        await rememberBellSchedule(schedule);
+        out.applied++;
+        break;
+      }
+      case 'rebuild_special_days': {
+        // Nothing to do here: the rebuild runs once, after the whole batch.
+        out.applied++;
+        break;
+      }
       case 'import_calendar': {
         // A whole .ics, usually the school's year. Parsed on device by a
         // fixed-format parser and applied through the same validation and
@@ -379,6 +399,15 @@ export async function applyQueuedChanges(): Promise<AppliedChanges> {
 /** One pass: send what is here, take what is waiting. */
 export async function syncLiveLink(): Promise<void> {
   if (!(await link())) return;
-  await applyQueuedChanges();
+  const changes = await applyQueuedChanges();
+  // A corrected class time or a delivered bell sheet moves the special days
+  // with it, before the snapshot goes out describing them.
+  if (changes.applied > 0) {
+    try {
+      await rebuildSpecialDays();
+    } catch {
+      // A failed rebuild leaves yesterday's version, never a broken day.
+    }
+  }
   await pushSnapshot();
 }

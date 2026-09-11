@@ -28,6 +28,13 @@ Key fields:
   move/delete apply. `meeting` is non-null for paid client
   meetings (`client`, `rate`, `location`, `paidDates`). `tags` includes
   `school` / `timetable` for classes, `assistant` for things you added.
+- Special schedule days are rebuilt automatically: the blocks named in a
+  "Special schedule Blocks 1, 8, 4..." notice run in that order, whatever
+  the ordinary weekday says. Those classes carry `special:<date>` and
+  `times:<source>` tags, where source is "sheet" (exact, from the school's
+  bell sheet), "template" (copied from a day that ran the same way), "grid"
+  (the ordinary bell) or "estimated". Say which when you quote a time from
+  a day that is not "sheet".
 - `clients[]` — name, phone, status (`client` / `lead` / `blocked`), notes.
 - `threads[]` — one per conversation, `counterparty` is the phone number,
   `thread[]` is every message oldest-first with `direction` (`in` = they
@@ -88,6 +95,18 @@ minutes at most). Actions:
     {"action":"draft_message","to":"+14167223141","text":"Hey, still on for 7?"}
     — written into that conversation's composer as a DRAFT. It is never
       sent. I press send myself. Do not tell me a message was sent.
+
+    {"action":"bell_schedule","date":"2026-09-11","title":"Erev Rosh Hashanah",
+     "rows":[{"startMinutes":510,"endMinutes":559,"block":1,"label":""},
+             {"startMinutes":760,"endMinutes":805,"block":null,"label":"Lunch"}]}
+    — a special day's bell sheet, already read. One row per period in order;
+      "block" is which block runs in that slot (null for Lunch, breaks or
+      Project Support, named in "label"). Rebuilds that day with the right
+      classes at the right times, survives a timetable re-import, and teaches
+      the app how days of the same shape run.
+
+    {"action":"rebuild_special_days"}
+    — re-derive every special day from what the calendar already says.
 
     {"action":"import_calendar","ics":"BEGIN:VCALENDAR..."}
     — a whole .ics (the school's Edsby year calendar). Closures, early
