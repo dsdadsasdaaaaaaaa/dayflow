@@ -38,7 +38,7 @@ import {
 } from '../../src/components/timeline/layout';
 import { eventsForDay } from '../../src/lib/calendar';
 import { isRuleMarker } from '../../src/lib/schoolDay';
-import { isSchoolTask } from '../../src/lib/timetableImport';
+import { isSchoolTask, isTimetableTask } from '../../src/lib/timetableImport';
 import { isImportedSchool } from '../../src/lib/schoolWords';
 import { addDays, isToday, minutesOfDay, todayKey } from '../../src/lib/dates';
 import { successHaptic, tapHaptic } from '../../src/lib/haptics';
@@ -205,11 +205,15 @@ export default function TodayScreen() {
     const maxStart = Math.max(winStart, winEnd - MIN_LAYOUT_MINUTES);
     // Three or more classes is a school day rather than a couple of lessons,
     // and a school day is worth one block instead of eight.
-    // The timetable only — the weekly repeats. A newsletter marker like
-    // "2:25 PM Dismissal" is school-tagged and timed too, but it is not a
-    // period, and counting it stretched the band past the bell it announced.
+    // The timetable only, judged by its tag rather than by whether it repeats.
+    // A newsletter marker like "2:25 PM Dismissal" is school-tagged and timed
+    // too, but it is not a period, and counting it stretched the band past the
+    // bell it announced — so for a while only weekly repeats counted. That
+    // shut out a rebuilt special day, whose eight classes are one-offs: they
+    // fell through the band and drew as eight squashed blocks showing nothing
+    // but their times. The tag is what separates a class from a marker.
     const schoolInstances = visibleTimed
-      .filter((i) => isSchoolTask(i.task) && i.task.recurrence != null && i.task.startMinutes != null)
+      .filter((i) => isTimetableTask(i.task) && i.task.startMinutes != null)
       .sort((a, b) => (a.task.startMinutes ?? 0) - (b.task.startMinutes ?? 0));
     const collapse = schoolInstances.length >= 3;
     const band = collapse

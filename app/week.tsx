@@ -19,7 +19,7 @@ import { earningsForDays, formatMoney } from '../src/lib/meetings';
 import { eventsForDays } from '../src/lib/calendar';
 import { isRuleMarker } from '../src/lib/schoolDay';
 import { isImportedSchool } from '../src/lib/schoolWords';
-import { isSchoolTask } from '../src/lib/timetableImport';
+import { isSchoolTask, isTimetableTask } from '../src/lib/timetableImport';
 import { useSettings } from '../src/store/settings';
 import { instancesForDay, useTasks } from '../src/store/tasks';
 import { SPACING, taskColor, useTheme } from '../src/theme';
@@ -140,9 +140,9 @@ type ColumnItem =
  * in time order.
  */
 function columnItems(instances: TaskInstance[], events: CalendarEventLite[] = []): ColumnItem[] {
-  const classes = instances.filter(
-    (i) => isSchoolTask(i.task) && i.task.recurrence != null && i.task.startMinutes != null
-  );
+  // By tag, not by repeat: a rebuilt special day is eight one-off classes,
+  // and they fold into the block the same as an ordinary week does.
+  const classes = instances.filter((i) => isTimetableTask(i.task) && i.task.startMinutes != null);
   if (classes.length < 3) return instances.map((inst) => ({ kind: 'task', inst }));
   const start = Math.min(...classes.map((i) => i.task.startMinutes as number));
   const end = Math.max(
