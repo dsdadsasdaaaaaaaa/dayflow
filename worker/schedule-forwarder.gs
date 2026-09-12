@@ -179,11 +179,28 @@ function htmlToText(html) {
       .replace(/<\/table>/gi, '\n\n')
       .replace(/<\/h[1-6]>/gi, '\n')
       .replace(/<[^>]+>/g, '')
+      // Numeric entities, decoded to the characters they name. HEX is the
+      // form these emails actually use — "Candle Lighting:&#xa0; 7:17 PM" —
+      // and the old chain handled only decimal, so every one of them reached
+      // the reader as literal "&#xa0;" text. Eighty-three of them in one
+      // newsletter.
+      .replace(/&#x([0-9a-fA-F]+);?/g, function (whole, hex) {
+        var n = parseInt(hex, 16);
+        return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : ' ';
+      })
+      .replace(/&#(\d+);?/g, function (whole, dec) {
+        var n = parseInt(dec, 10);
+        return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : ' ';
+      })
       .replace(/&nbsp;/gi, ' ')
       .replace(/&amp;/gi, '&')
       .replace(/&#39;|&rsquo;|&lsquo;/gi, "'")
       .replace(/&quot;|&[lr]dquo;/gi, '"')
-      .replace(/&[a-z]+;|&#\d+;/gi, ' ')
+      .replace(/&[a-z]+;/gi, ' ')
+      // Decoding can produce the very characters the first pass removed: a
+      // &#xfeff; is invisible junk only once it is a character.
+      .replace(/[\uFEFF\u200B\u200C\u200D\u2060]/g, '')
+      .replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
       .replace(/[ \t]+/g, ' ')
       // Tidy the separators back down. Repeated semicolons are an artefact
       // of the layout and mean nothing. Repeated PIPES are not: an empty

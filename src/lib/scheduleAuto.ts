@@ -7,7 +7,9 @@ import { loadSmsGateCredentials } from './smsgateCredentials';
 import { useSettings } from '../store/settings';
 import { useTasks } from '../store/tasks';
 import {
+  alignBlocks,
   applySpecialDay,
+  calendarBlockOrder,
   parseBellSchedule,
   rebuildSpecialDays,
   rememberBellSchedule,
@@ -130,20 +132,29 @@ function keyOf(e: ParsedEvent): string {
  */
 export async function applyBellSheets(
   attachments: { name: string; mime: string; data: string }[] | undefined
-): Promise<{ days: number; failed: number }> {
+): Promise<{ days: number; failed: number; notes: string[] }> {
   let days = 0;
   let failed = 0;
+  const notes: string[] = [];
   for (const doc of attachments ?? []) {
     const parsed = await parseBellSchedule({ mime: doc.mime, data: doc.data });
     if (!parsed.ok) {
       failed++;
       continue;
     }
-    await rememberBellSchedule(parsed.schedule);
-    applySpecialDay(parsed.schedule);
+    // The sheet's date is only known once it is read, so the calendar's own
+    // block list for that day is fetched now and the two compared.
+    const expected = calendarBlockOrder(parsed.schedule.date);
+    const aligned = alignBlocks(parsed.schedule.rows, expected);
+    const schedule = { ...parsed.schedule, rows: aligned.rows };
+    for (const note of [...(parsed.notes ?? []), ...(aligned.note ? [aligned.note] : [])]) {
+      notes.push(`${schedule.date}: ${note}`);
+    }
+    await rememberBellSchedule(schedule);
+    applySpecialDay(schedule);
     days++;
   }
-  return { days, failed };
+  return { days, failed, notes };
 }
 
 /** Add these to the calendar, skipping any that are already on it. */
@@ -252,7 +263,11 @@ export async function autoImportSchedule(): Promise<number> {
     (sheets.days > 0
       ? ` Rebuilt ${sheets.days} special-schedule day${sheets.days === 1 ? '' : 's'} from the school's own bell sheets.`
       : '') +
-    (sheets.failed > 0 ? ` ${sheets.failed} bell sheet${sheets.failed === 1 ? '' : 's'} could not be read.` : '');
+    (sheets.failed > 0 ? ` ${sheets.failed} bell sheet${sheets.failed === 1 ? '' : 's'} could not be read.` : '') +
+    // Anything the two readings of a sheet disagreed on, or that the calendar
+    // contradicted. Said out loud: a quiet disagreement is how a wrong time
+    // lives for a fortnight.
+    (sheets.notes.length > 0 ? ` ${sheets.notes.join(' ')}` : '');
   if (added === 0) {
     await note(
       `Read ${parsed.events.length} item${parsed.events.length === 1 ? '' : 's'}; all were already on your calendar.${amendment}`,

@@ -2,6 +2,7 @@ import type { DayKey, Task } from '../types';
 import { isSchoolTask, SCHOOL_TAG, TIMETABLE_TAG } from './schoolWords';
 import { addDays, fromDayKey, todayKey } from './dates';
 import { askModel, extractJson, timeInText } from './scheduleImport';
+import { formatClock, parseClockRange, parseSchoolClock } from './clock';
 
 // Re-exported: these lived here first and half the app imports them from here.
 export { isSchoolTask, SCHOOL_TAG, TIMETABLE_TAG };
@@ -41,6 +42,9 @@ export interface ParsedClass {
   weekday: number;
   startMinutes: number;
   durationMinutes: number;
+  /** The period's times exactly as the grid printed them, when it did. */
+  startText?: string;
+  endText?: string;
   /** Room, teacher and course code, each optional. */
   room: string;
   teacher: string;
@@ -56,7 +60,14 @@ export interface ParsedClass {
 }
 
 export type TimetableParse =
-  | { ok: true; classes: ParsedClass[]; dropped: number; conflicts: ClassConflict[] }
+  | {
+      ok: true;
+      classes: ParsedClass[];
+      dropped: number;
+      conflicts: ClassConflict[];
+      repairs: string[];
+      warnings: string[];
+    }
   | { ok: false; error: string };
 
 const MAX_INPUT = 24_000;
@@ -72,6 +83,8 @@ const TIMETABLE_SCHEMA: Record<string, unknown> = {
         properties: {
           title: { type: 'string' },
           weekday: { type: 'integer' },
+          startText: { type: 'string' },
+          endText: { type: 'string' },
           startMinutes: { type: 'integer' },
           durationMinutes: { type: 'integer' },
           room: { type: 'string' },
@@ -80,7 +93,7 @@ const TIMETABLE_SCHEMA: Record<string, unknown> = {
           period: { type: 'string' },
           block: { type: ['integer', 'null'] },
         },
-        required: ['title', 'weekday', 'startMinutes', 'durationMinutes', 'room', 'teacher', 'code', 'period', 'block'],
+        required: ['title', 'weekday', 'startText', 'endText', 'startMinutes', 'durationMinutes', 'room', 'teacher', 'code', 'period', 'block'],
         additionalProperties: false,
       },
     },
@@ -96,7 +109,8 @@ const SYSTEM = [
   'days of the week. Each filled cell is one class, and it happens EVERY week on that day.',
   '',
   'Return ONLY JSON, no prose and no code fence: an object {"classes": [...]} whose array holds one element per class on one day:',
-  '{"title": string, "weekday": 0-6, "startMinutes": number, "durationMinutes": number,',
+  '{"title": string, "weekday": 0-6, "startText": string, "endText": string,',
+  ' "startMinutes": number, "durationMinutes": number,',
   ' "room": string, "teacher": string, "code": string, "period": string, "block": number|null}',
   '',
   'Rules:',
@@ -105,9 +119,14 @@ const SYSTEM = [
   '- weekday: 0 is Sunday, 1 Monday, 2 Tuesday, 3 Wednesday, 4 Thursday, 5 Friday, 6 Saturday.',
   '- title is the subject as a person would say it — "Chemistry", "Jewish History", "Lunch".',
   '  Not the course code. If a cell has only a code, use the code.',
-  '- startMinutes and durationMinutes come from the period\'s own times. Minutes from midnight;',
-  '  add 12 hours for PM except noon itself: 1:25 PM is 805, 12:40 PM is 760, 8:30 AM is 510.',
-  '  A period listed as 8:30 AM to 9:29 AM is startMinutes 510 and durationMinutes 59.',
+  '- startText and endText are the period\'s times COPIED EXACTLY as the grid prints them,',
+  '  with the am or pm: "8:30 AM", "3:31 PM". Copy the digits; do not round, reformat or',
+  '  correct them. These are the authority and the app does the arithmetic from them, so a',
+  '  careful transcription matters more here than anything else on the row.',
+  '- startMinutes and durationMinutes are your own reading of those same times in minutes',
+  '  from midnight (add 12 hours for PM except noon: 1:25 PM is 805, 12:40 PM is 760,',
+  '  8:30 AM is 510). They are checked against startText and endText, so if the two ever',
+  '  disagree the written time wins — which is why copying it exactly is what counts.',
   '- room, teacher, code and period are "" when the grid does not give them.',
   '- block is the number after the word "Block" in the cell ("Block 6" is 6), or null if',
   '  the cell has none. Keep it: the school reschedules by block on special days.',
@@ -127,10 +146,16 @@ function str(v: unknown, max: number): string {
  * Exported because it, not the model, is what makes this safe to point at a
  * scanned timetable: it is the thing worth testing.
  */
-export function validateClasses(raw: unknown): { classes: ParsedClass[]; dropped: number } {
-  if (!Array.isArray(raw)) return { classes: [], dropped: 0 };
+export function validateClasses(raw: unknown): {
+  classes: ParsedClass[];
+  dropped: number;
+  /** Rows where the written clock and the model's own minutes disagreed. */
+  disagreed: number;
+} {
+  if (!Array.isArray(raw)) return { classes: [], dropped: 0, disagreed: 0 };
   const classes: ParsedClass[] = [];
   let dropped = 0;
+  let disagreed = 0;
   for (const row of raw.slice(0, 300)) {
     if (!row || typeof row !== 'object') {
       dropped++;
@@ -152,19 +177,31 @@ export function validateClasses(raw: unknown): { classes: ParsedClass[]; dropped
     const rawDuration = typeof r.durationMinutes === 'number' ? Math.round(r.durationMinutes) : 60;
     // A school period is not eight hours. Clamping rather than dropping,
     // because the class is real even when the arithmetic around it is not.
-    const durationMinutes = Math.min(300, Math.max(5, rawDuration || 60));
+    const clamped = Math.min(300, Math.max(5, rawDuration || 60));
     const period = str(r.period, 20);
     const rawBlock = typeof r.block === 'number' ? Math.round(r.block) : NaN;
     const block = Number.isFinite(rawBlock) && rawBlock >= 1 && rawBlock <= 20 ? rawBlock : null;
-    // The period label often states the times outright; where it does, that
-    // is the school's own clock and it beats the model's arithmetic — the
-    // same rule the newsletter reader is held to.
-    const written = timeInText(period);
+
+    // The clock the page printed beats any arithmetic done on it — the
+    // model's, and the period label's. Both endpoints come from the same
+    // row, so the length of the period is the school's statement too, and
+    // that is what later makes a misread digit visible.
+    const startText = str(r.startText, 20);
+    const endText = str(r.endText, 20);
+    const span = parseClockRange(`${startText} - ${endText}`, true);
+    const writtenStart = span ? span.start : parseSchoolClock(startText);
+    const fromLabel = timeInText(period);
+    const startMinutes = writtenStart ?? fromLabel ?? rawStart;
+    const durationMinutes = span ? Math.min(300, Math.max(5, span.end - span.start)) : clamped;
+    if (writtenStart != null && Math.abs(writtenStart - rawStart) > 1) disagreed++;
+
     classes.push({
       title,
       weekday,
-      startMinutes: written ?? rawStart,
+      startMinutes,
       durationMinutes,
+      startText: startText || undefined,
+      endText: endText || undefined,
       room: str(r.room, 40),
       teacher: str(r.teacher, 60),
       code: str(r.code, 20),
@@ -184,7 +221,108 @@ export function validateClasses(raw: unknown): { classes: ParsedClass[]; dropped
       a.weekday === b.weekday ? a.startMinutes - b.startMinutes : a.weekday - b.weekday
     ),
     dropped,
+    disagreed,
   };
+}
+
+
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/** The length a period usually runs here, which is what an odd one is odd against. */
+function usualLength(classes: readonly ParsedClass[]): number {
+  const tally = new Map<number, number>();
+  for (const c of classes) tally.set(c.durationMinutes, (tally.get(c.durationMinutes) ?? 0) + 1);
+  let best = 0;
+  let seen = 0;
+  for (const [length, count] of tally) {
+    if (count > seen || (count === seen && length > best)) {
+      best = length;
+      seen = count;
+    }
+  }
+  return best;
+}
+
+export interface GridReview {
+  classes: ParsedClass[];
+  /** Times the app corrected, said plainly enough to disagree with. */
+  repairs: string[];
+  /** What still looks wrong and cannot be settled from the grid alone. */
+  warnings: string[];
+}
+
+/**
+ * Read the grid against itself.
+ *
+ * A timetable is highly redundant and the redundancy is what catches a
+ * misread digit. Every period runs the same length; each one begins after
+ * the last has ended. "3:11 PM - 4:30 PM" breaks both rules at once — it
+ * runs 79 minutes where everything else runs 59, and it starts fourteen
+ * minutes before the period above it finishes.
+ *
+ * Where the contradiction has only one resolution, it is applied: an
+ * overlapping period whose own end time, less the usual length, clears the
+ * period before it was misread at the START, and the end is the part to
+ * trust. Everything else is reported rather than guessed at — if the model
+ * misreads both ends of a row consistently there is nothing in the grid that
+ * can tell, and inventing a correction would be worse than saying so.
+ */
+export function reviewGrid(input: readonly ParsedClass[]): GridReview {
+  const classes = input.map((c) => ({ ...c }));
+  const repairs: string[] = [];
+  const warnings: string[] = [];
+  const usual = usualLength(classes);
+
+  const byDay = new Map<number, ParsedClass[]>();
+  for (const c of classes) {
+    const list = byDay.get(c.weekday) ?? [];
+    list.push(c);
+    byDay.set(c.weekday, list);
+  }
+
+  for (const [weekday, list] of byDay) {
+    const day = [...list].sort((a, b) => a.startMinutes - b.startMinutes);
+    const where = DAY_NAMES[weekday] ?? 'That day';
+    for (let i = 1; i < day.length; i++) {
+      const earlier = day[i - 1];
+      const later = day[i];
+      const earlierEnd = earlier.startMinutes + earlier.durationMinutes;
+      if (later.startMinutes >= earlierEnd) continue;
+
+      const laterEnd = later.startMinutes + later.durationMinutes;
+      const fixed = laterEnd - usual;
+      if (usual > 0 && fixed > later.startMinutes && fixed >= earlierEnd) {
+        repairs.push(
+          `${where}: ${later.title} said it began at ${formatClock(later.startMinutes)}, which is ` +
+            `during ${earlier.title}. It ends at ${formatClock(laterEnd)} and periods here run ` +
+            `${usual} minutes, so it begins at ${formatClock(fixed)}.`
+        );
+        later.startMinutes = fixed;
+        later.durationMinutes = usual;
+      } else {
+        warnings.push(
+          `${where}: ${later.title} (${formatClock(later.startMinutes)}) begins before ` +
+            `${earlier.title} ends (${formatClock(earlierEnd)}). One of the two times is wrong ` +
+            `and the grid does not say which.`
+        );
+      }
+    }
+  }
+
+  // A period of an unusual length is not wrong by itself — lunch is shorter
+  // everywhere — but a long way from usual is worth a second look, and it is
+  // the only sign left when a row is misread at both ends.
+  for (const c of classes) {
+    if (usual === 0 || Math.abs(c.durationMinutes - usual) <= 20) continue;
+    if (/\b(lunch|break|advisory|assembly|support)\b/i.test(c.title)) continue;
+    warnings.push(
+      `${DAY_NAMES[c.weekday] ?? 'That day'}: ${c.title} runs ${c.durationMinutes} minutes ` +
+        `when periods here run ${usual}. Check ${formatClock(c.startMinutes)} to ` +
+        `${formatClock(c.startMinutes + c.durationMinutes)}.`
+    );
+  }
+
+  return { classes, repairs, warnings };
 }
 
 /** Two classes on one day that cannot both be true. */
@@ -254,7 +392,8 @@ export async function parseTimetable(
   if (raw == null) {
     return { ok: false, error: 'That did not come back as a timetable. Try pasting just the grid.' };
   }
-  const { classes, dropped } = validateClasses(raw);
+  const { classes: read, dropped, disagreed } = validateClasses(raw);
+  const { classes, repairs, warnings } = reviewGrid(read);
   if (classes.length === 0) {
     return {
       ok: false,
@@ -264,7 +403,13 @@ export async function parseTimetable(
           : 'No classes found in that.',
     };
   }
-  return { ok: true, classes, dropped, conflicts: classConflicts(classes) };
+  if (disagreed > 0) {
+    warnings.push(
+      `${disagreed} ${disagreed === 1 ? 'period was' : 'periods were'} read one way and ` +
+        `converted another; the written time was used.`
+    );
+  }
+  return { ok: true, classes, dropped, conflicts: classConflicts(classes), repairs, warnings };
 }
 
 /** The next date on or after `from` that falls on this weekday. */

@@ -1,5 +1,6 @@
 import type { DayKey } from '../types';
 import { todayKey } from './dates';
+import { timeInTitle } from './schoolWords';
 import { askOnce as askClaudeOnce } from './claude';
 import { askOnce as askGeminiOnce } from './gemini';
 import { loadBrain, type BrainChoice } from './secretaryBrain';
@@ -269,7 +270,9 @@ export function validateEvents(raw: unknown): { events: ParsedEvent[]; dropped: 
       continue;
     }
     // Where the entry states its own time, believe the entry.
-    const written = timeInText(title);
+    // The entry's own words first. timeInText wants an am or pm; a school
+    // writes "3:08 Closing" and means the afternoon, which timeInTitle knows.
+    const written = timeInText(title) ?? timeInTitle(title);
     const settled = written ?? startMinutes;
     const rawDuration = typeof r.durationMinutes === 'number' ? r.durationMinutes : 60;
     const durationMinutes = Math.min(1440, Math.max(5, Math.round(rawDuration) || 60));
@@ -437,7 +440,7 @@ export async function parseScheduleEmail(
   email: string,
   brain?: BrainChoice | null
 ): Promise<ScheduleParse> {
-  const text = email.trim();
+  const text = normalizeEmailText(email);
   if (!text) return { ok: false, error: 'There was nothing in that email to read.' };
 
   const today = todayKey();
@@ -494,4 +497,61 @@ export async function parseScheduleEmail(
     };
   }
   return { ok: true, events, dropped };
+}
+
+// ---------------------------------------------------------------------------
+// Cleaning up what the forwarder sends
+// ---------------------------------------------------------------------------
+
+/** The named entities these newsletters actually use. */
+const NAMED: Record<string, string> = {
+  nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", '#39': "'",
+  rsquo: '’', lsquo: '‘', ldquo: '“', rdquo: '”',
+  ndash: '–', mdash: '—', hellip: '…', middot: '·',
+  bull: '•', trade: '™', reg: '®', copy: '©',
+  eacute: 'é', egrave: 'è', agrave: 'à', ccedil: 'ç',
+  uuml: 'ü', ouml: 'ö', auml: 'ä', szlig: 'ß',
+  thinsp: ' ', ensp: ' ', emsp: ' ', hairsp: ' ', shy: '',
+};
+
+/**
+ * Decode what the flattener left behind, and settle the invisible characters.
+ *
+ * The forwarder decodes decimal entities and named ones, and misses HEX —
+ * which is the form these emails overwhelmingly use. So the model has been
+ * reading "Shabbat Candle Lighting:&#xa0; 7:17 PM&#xfeff;" and being asked to
+ * find a time in it. It coped, which is the problem: nobody noticed.
+ *
+ * Done here as well as in the forwarder because this half ships in an update
+ * and that half needs someone to paste it into Apps Script. A body that has
+ * already been cleaned passes through unchanged.
+ */
+export function normalizeEmailText(text: string): string {
+  return String(text ?? '')
+    .replace(/&#x([0-9a-f]+);?/gi, (_, hex: string) => codePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);?/g, (_, dec: string) => codePoint(Number(dec)))
+    .replace(/&([a-z][a-z0-9]*);/gi, (whole, name: string) => {
+      const known = NAMED[name.toLowerCase()];
+      return known === undefined ? whole : known;
+    })
+    // Zero-width characters survive every tidy-up by being invisible, and a
+    // "Monday,<U+FEFF> September 7" defeats anything matching around them.
+    .replace(/[\ufeff\u200b-\u200d\u2060]/g, '')
+    // Every other flavour of space becomes the ordinary one.
+    .replace(/[\u00a0\u2000-\u200a\u202f\u205f\u3000]/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/ *\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function codePoint(n: number): string {
+  if (!Number.isFinite(n) || n < 0 || n > 0x10ffff) return '';
+  // Surrogate halves on their own are not characters.
+  if (n >= 0xd800 && n <= 0xdfff) return '';
+  try {
+    return String.fromCodePoint(n);
+  } catch {
+    return '';
+  }
 }

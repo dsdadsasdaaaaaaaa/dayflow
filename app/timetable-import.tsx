@@ -34,7 +34,6 @@ import { rebuildSpecialDays } from '../src/lib/bellSchedule';
 import { applyStoredRules } from '../src/lib/schoolDay';
 import { useTasks } from '../src/store/tasks';
 import { SPACING, useTheme } from '../src/theme';
-import type { ClassConflict } from '../src/lib/timetableImport';
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -68,7 +67,8 @@ export default function TimetableImportScreen() {
   const [error, setError] = useState<string | null>(null);
   const [classes, setClasses] = useState<ParsedClass[] | null>(null);
   const [dropped, setDropped] = useState(0);
-  const [conflicts, setConflicts] = useState<ClassConflict[]>([]);
+  const [repairs, setRepairs] = useState<string[]>([]);
+  const [warnings, setWarnings] = useState<string[]>([]);
   const [skipped, setSkipped] = useState<Record<string, boolean>>({});
   const [added, setAdded] = useState<number | null>(null);
 
@@ -119,7 +119,8 @@ export default function TimetableImportScreen() {
     }
     setClasses(result.classes);
     setDropped(result.dropped);
-    setConflicts(result.conflicts);
+    setRepairs(result.repairs);
+    setWarnings(result.warnings);
     setSkipped({});
   }
 
@@ -266,25 +267,35 @@ export default function TimetableImportScreen() {
                   : ''}
               </Text>
 
-              {conflicts.length > 0 ? (
-                <View style={[styles.conflicts, { borderColor: '#F59E0B' }]}>
+              {repairs.length > 0 ? (
+                <View style={[styles.conflicts, { borderColor: theme.success }]}>
                   <Text style={[styles.conflictTitle, { color: theme.text }]}>
-                    {conflicts.length === 1
-                      ? 'One period overlaps the one before it'
-                      : `${conflicts.length} periods overlap the one before them`}
+                    {repairs.length === 1 ? 'One time was corrected' : `${repairs.length} times were corrected`}
                   </Text>
                   <Text style={[styles.conflictBody, { color: theme.textSecondary }]}>
-                    A timetable cannot have two classes at once, so one of these times was read
-                    wrong. Check them against your own copy before importing.
+                    Each of these ran into the period above it. The end time and the length of
+                    every other period say where it really begins.
                   </Text>
-                  {conflicts.slice(0, 6).map((c, i) => (
-                    <Text
-                      key={`${c.weekday}-${i}`}
-                      style={[styles.conflictRow, { color: theme.textSecondary }]}
-                    >
-                      {DAY_NAMES[c.weekday]}: {c.later.title} starts{' '}
-                      {formatMinutes(c.later.startMinutes)}, but {c.earlier.title} runs to{' '}
-                      {formatMinutes(c.earlier.startMinutes + c.earlier.durationMinutes)}
+                  {repairs.slice(0, 6).map((r, i) => (
+                    <Text key={`fix-${i}`} style={[styles.conflictRow, { color: theme.textSecondary }]}>
+                      {r}
+                    </Text>
+                  ))}
+                </View>
+              ) : null}
+
+              {warnings.length > 0 ? (
+                <View style={[styles.conflicts, { borderColor: '#F59E0B' }]}>
+                  <Text style={[styles.conflictTitle, { color: theme.text }]}>
+                    {warnings.length === 1 ? 'One thing looks wrong' : `${warnings.length} things look wrong`}
+                  </Text>
+                  <Text style={[styles.conflictBody, { color: theme.textSecondary }]}>
+                    These could not be settled from the grid alone. Check them against your own
+                    copy before importing.
+                  </Text>
+                  {warnings.slice(0, 6).map((w, i) => (
+                    <Text key={`warn-${i}`} style={[styles.conflictRow, { color: theme.textSecondary }]}>
+                      {w}
                     </Text>
                   ))}
                 </View>

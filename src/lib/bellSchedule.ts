@@ -5,6 +5,7 @@ import { askModel, extractJson, timeInText } from './scheduleImport';
 import { isSchoolTask, SCHOOL_TAG, TIMETABLE_TAG } from './timetableImport';
 import { useTasks } from '../store/tasks';
 import { fromDayKey, todayKey } from './dates';
+import { formatClock, parseClockRange, parseSchoolClock } from './clock';
 import { storedDayRules } from './schoolDay';
 import { isImportedSchool } from './schoolWords';
 import {
@@ -53,7 +54,9 @@ export interface BellSchedule {
   rows: BellRow[];
 }
 
-export type BellParse = { ok: true; schedule: BellSchedule } | { ok: false; error: string };
+export type BellParse =
+  | { ok: true; schedule: BellSchedule; notes?: string[] }
+  | { ok: false; error: string };
 
 /** Enforced server-side on Claude; see SCHEDULE_SCHEMA for why. */
 const BELL_SCHEMA: Record<string, unknown> = {
@@ -66,12 +69,14 @@ const BELL_SCHEMA: Record<string, unknown> = {
       items: {
         type: 'object',
         properties: {
+          startText: { type: 'string' },
+          endText: { type: 'string' },
           startMinutes: { type: 'integer' },
           endMinutes: { type: 'integer' },
           block: { type: ['integer', 'null'] },
           label: { type: 'string' },
         },
-        required: ['startMinutes', 'endMinutes', 'block', 'label'],
+        required: ['startText', 'endText', 'startMinutes', 'endMinutes', 'block', 'label'],
         additionalProperties: false,
       },
     },
@@ -87,13 +92,18 @@ const SYSTEM = [
   'label instead of a block number.',
   '',
   'Return ONLY a JSON object, no prose and no code fence:',
-  '{"date": "YYYY-MM-DD", "title": string, "rows": [{"startMinutes": number, "endMinutes": number, "block": number|null, "label": string}]}',
+  '{"date": "YYYY-MM-DD", "title": string, "rows": [{"startText": string, "endText": string,',
+  ' "startMinutes": number, "endMinutes": number, "block": number|null, "label": string}]}',
   '',
   'Rules:',
   '- date is the date the page names. The year may be omitted on the page; if so take the',
   '  year from the context line you are given.',
-  '- Times are minutes from midnight. Add 12 hours for PM except noon: 1:25 PM is 805,',
-  '  12:40 PM is 760, 8:30 AM is 510, 2:25 PM is 865.',
+  '- startText and endText are the row\'s times COPIED EXACTLY as the page prints them,',
+  '  with the am or pm: "8:30 AM", "3:31 PM". Copy the digits; do not round or correct them.',
+  '  These are the authority — the app does its own arithmetic from them.',
+  '- startMinutes and endMinutes are your reading of those same times in minutes from',
+  '  midnight (add 12 hours for PM except noon: 1:25 PM is 805, 12:40 PM is 760, 8:30 AM',
+  '  is 510, 2:25 PM is 865). They are checked against the written times.',
   '- block is the number in the BLOCK column, or null for a row that has a label instead.',
   '- label is the row\'s own words when it has no block ("Lunch", "10 Minute Break",',
   '  "Project Support - General"), otherwise "".',
@@ -149,8 +159,16 @@ export function validateBell(raw: unknown, fallbackYear: number): BellSchedule |
   for (const row of rowsIn.slice(0, 30)) {
     if (!row || typeof row !== 'object') continue;
     const x = row as Record<string, unknown>;
-    const start = typeof x.startMinutes === 'number' ? Math.round(x.startMinutes) : NaN;
-    const end = typeof x.endMinutes === 'number' ? Math.round(x.endMinutes) : NaN;
+    // The page's own clock first; the model's minutes are the fallback and
+    // the cross-check, never the authority.
+    const written = parseClockRange(
+      `${typeof x.startText === 'string' ? x.startText : ''} - ${
+        typeof x.endText === 'string' ? x.endText : ''
+      }`,
+      true
+    );
+    const start = written ? written.start : typeof x.startMinutes === 'number' ? Math.round(x.startMinutes) : NaN;
+    const end = written ? written.end : typeof x.endMinutes === 'number' ? Math.round(x.endMinutes) : NaN;
     if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
     if (start < 0 || start > 1439 || end <= start || end > 1440) continue;
     const block =
@@ -169,23 +187,210 @@ export function validateBell(raw: unknown, fallbackYear: number): BellSchedule |
   };
 }
 
+
+/**
+ * The second read.
+ *
+ * These sheets are pictures — the PDFs the newsletter links carry no text
+ * layer at all, so every digit on them is OCR, and OCR is where "3:31" became
+ * "3:11" on the timetable. One read has no way to know it misread.
+ *
+ * So the page is read twice by different routes: once as a plain
+ * transcription, which asks only for copying and is parsed here in code, and
+ * once as structure. Agreement between two independent readings is real
+ * evidence; disagreement is a row to distrust, and it is reported rather than
+ * averaged away.
+ */
+const TRANSCRIBE_SYSTEM = [
+  'You transcribe a one-page school bell schedule. You do not interpret it.',
+  '',
+  'Output the table as plain lines, one line per row, top to bottom, with the cells of a',
+  'row separated by " | ". Copy the text of each cell EXACTLY as printed, including the',
+  'am or pm and the punctuation. Do not convert times, do not reorder, do not fill in a',
+  'cell the page leaves empty, do not add a row.',
+  '',
+  'Make the FIRST line the date the page names, exactly as printed.',
+  '',
+  'Nothing else: no heading, no explanation, no code fence.',
+].join('\n');
+
+/** A transcribed line back into a row, by rule rather than by model. */
+export function transcribeRows(text: string): BellRow[] {
+  const rows: BellRow[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const cells = line.split('|').map((c) => c.trim()).filter(Boolean);
+    if (cells.length === 0) continue;
+    const timed = cells.findIndex((c) => parseClockRange(c, true) != null);
+    if (timed < 0) continue;
+    const span = parseClockRange(cells[timed], true) as { start: number; end: number };
+    const rest = cells.filter((_, i) => i !== timed);
+    // TIME | PERIOD | BLOCK: the block is the last bare number on the row.
+    // A row with words instead — "Lunch", "10 Minute Break" — has no block,
+    // and "10 Minute Break" is not the number ten.
+    let block: number | null = null;
+    const labels: string[] = [];
+    for (const cell of rest) {
+      const bare = /^\d{1,2}$/.test(cell) ? Number(cell) : null;
+      if (bare != null && bare >= 1 && bare <= 20) block = bare;
+      else labels.push(cell);
+    }
+    rows.push({
+      startMinutes: span.start,
+      endMinutes: span.end,
+      block: labels.length > 0 ? null : block,
+      label: labels.join(' ').slice(0, 60),
+    });
+  }
+  return rows.sort((a, b) => a.startMinutes - b.startMinutes);
+}
+
+/** What a bell schedule cannot be, whoever read it. */
+export function bellTrouble(rows: readonly BellRow[]): string[] {
+  const out: string[] = [];
+  const sorted = [...rows].sort((a, b) => a.startMinutes - b.startMinutes);
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1];
+    const row = sorted[i];
+    if (row.startMinutes < prev.endMinutes) {
+      out.push(
+        `${formatClock(row.startMinutes)} begins before the row above it ends (${formatClock(prev.endMinutes)}).`
+      );
+    } else if (row.startMinutes - prev.endMinutes > 60) {
+      out.push(
+        `Nothing between ${formatClock(prev.endMinutes)} and ${formatClock(row.startMinutes)} — a row may be missing.`
+      );
+    }
+  }
+  for (const row of sorted) {
+    const length = row.endMinutes - row.startMinutes;
+    if (row.block != null && (length < 15 || length > 120)) {
+      out.push(`A ${length}-minute period at ${formatClock(row.startMinutes)} is not a class.`);
+    }
+  }
+  return out;
+}
+
+/**
+ * Two readings of one page, reconciled.
+ *
+ * The transcription is preferred where it stands up structurally: it was
+ * copied rather than computed, and this code did the arithmetic. The
+ * structured reading is the check on it — and the fallback when the
+ * transcription arrives in some shape this cannot parse.
+ */
+export function reconcileReadings(
+  structured: BellRow[],
+  transcribed: BellRow[]
+): { rows: BellRow[]; notes: string[] } {
+  const notes: string[] = [];
+  const structuredTrouble = bellTrouble(structured);
+  const transcribedTrouble = bellTrouble(transcribed);
+
+  const usable = transcribed.length > 0 && transcribedTrouble.length === 0;
+  const rows = usable && transcribed.length >= structured.length ? transcribed : structured;
+  const other = rows === transcribed ? structured : transcribed;
+
+  if (other.length > 0) {
+    let disagreements = 0;
+    for (const row of rows) {
+      const twin = other.find((o) => Math.abs(o.startMinutes - row.startMinutes) <= 2);
+      if (!twin) {
+        disagreements++;
+        continue;
+      }
+      if (Math.abs(twin.endMinutes - row.endMinutes) > 2 || twin.block !== row.block) disagreements++;
+    }
+    if (disagreements > 0) {
+      notes.push(
+        `${disagreements} of ${rows.length} rows read differently the second time. ` +
+          `Check this day against the sheet.`
+      );
+    }
+  } else {
+    notes.push('Only one reading of this sheet came back, so nothing checked it.');
+  }
+  for (const trouble of rows === transcribed ? transcribedTrouble : structuredTrouble) notes.push(trouble);
+  return { rows, notes };
+}
+
+/**
+ * The blocks a sheet says run, against the blocks the calendar says run.
+ *
+ * Two independent sources describe the same day: a picture the school links
+ * from the newsletter, and a line of text in the year calendar ("Special
+ * schedule Blocks 1, 8, 4, 12, 6, 10"). The text was parsed by rule and the
+ * picture by OCR, so where they disagree the text is the safer reading — and
+ * the sheet still owns the times, which the text does not carry.
+ */
+export function alignBlocks(
+  rows: BellRow[],
+  expected: readonly number[] | null
+): { rows: BellRow[]; note: string | null } {
+  if (!expected || expected.length === 0) return { rows, note: null };
+  const classRows = rows.filter((r) => r.block != null);
+  const sheetOrder = classRows.map((r) => r.block as number);
+  if (sheetOrder.join() === expected.join()) return { rows, note: null };
+  if (sheetOrder.length !== expected.length) {
+    return {
+      rows,
+      note:
+        `The sheet shows ${sheetOrder.length} classes (blocks ${sheetOrder.join(', ')}) but the ` +
+        `calendar says ${expected.length} (blocks ${expected.join(', ')}). The sheet was used.`,
+    };
+  }
+  let i = 0;
+  const aligned = rows.map((r) => (r.block != null ? { ...r, block: expected[i++] } : r));
+  return {
+    rows: aligned,
+    note:
+      `The sheet read as blocks ${sheetOrder.join(', ')} but the calendar says ` +
+      `${expected.join(', ')}. The calendar's order was used with the sheet's times.`,
+  };
+}
+
+
+/**
+ * The blocks the calendar says run that day, if it says.
+ *
+ * The year calendar's notice ("Special schedule Blocks 1, 8, 4, 12, 6, 10")
+ * is text that was parsed by rule; the sheet is a picture that was read by
+ * OCR. Having both is the point — they are independent, so they can check
+ * each other.
+ */
+export function calendarBlockOrder(date: DayKey): number[] | null {
+  for (const t of Object.values(useTasks.getState().tasks)) {
+    if (t.date !== date || t.recurrence || !isImportedSchool(t)) continue;
+    if (t.tags?.includes(TIMETABLE_TAG)) continue;
+    if (!isSpecialNotice(t.title)) continue;
+    const order = parseBlockOrder(t.title);
+    if (order) return order;
+  }
+  return null;
+}
+
 /** Read one bell-schedule document. Nothing is changed here. */
-export async function parseBellSchedule(doc: { mime: string; data: string }): Promise<BellParse> {
+export async function parseBellSchedule(
+  doc: { mime: string; data: string },
+  /** The blocks the calendar says run that day, when it says. */
+  expectedBlocks: readonly number[] | null = null
+): Promise<BellParse> {
   const year = new Date().getFullYear();
-  const asked = await askModel(
-    SYSTEM,
-    `The current year is ${year}. Read the attached bell schedule.`,
-    undefined,
-    doc,
-    BELL_SCHEMA
-  );
+  const [asked, copied] = await Promise.all([
+    askModel(SYSTEM, `The current year is ${year}. Read the attached bell schedule.`, undefined, doc, BELL_SCHEMA),
+    askModel(TRANSCRIBE_SYSTEM, 'Transcribe the attached page.', undefined, doc),
+  ]);
   if (!asked.ok) return { ok: false, error: asked.error };
   const raw = extractJson(asked.text) ?? extractObject(asked.text);
   const schedule = validateBell(raw, year);
   if (!schedule) {
     return { ok: false, error: 'That document did not read as a bell schedule.' };
   }
-  return { ok: true, schedule };
+
+  const transcribed = copied.ok ? transcribeRows(copied.text) : [];
+  const { rows, notes } = reconcileReadings(schedule.rows, transcribed);
+  const checked = alignBlocks(rows, expectedBlocks);
+  if (checked.note) notes.push(checked.note);
+  return { ok: true, schedule: { ...schedule, rows: checked.rows }, notes };
 }
 
 /** The outermost object in an answer, for a reply that is one object rather than an array. */
